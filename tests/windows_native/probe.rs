@@ -12,6 +12,14 @@ fn main() {
     unsafe extern "system" {
         fn ExitProcess(code: u32) -> !;
     }
+    fn record(key: &str, value: &str) {
+        let mut out = std::io::stdout().lock();
+        write!(out, "{key}=").unwrap();
+        for byte in value.as_bytes() {
+            write!(out, "{byte:02x}").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
     let mut args = std::env::args_os().skip(1);
     let mode = args.next().expect("probe mode");
     match mode.to_str().expect("Unicode mode") {
@@ -37,6 +45,34 @@ fn main() {
             err.write_all(b"probe-err:\0\n\r\n\xff\x80").unwrap();
             err.flush().unwrap();
         }
+        mode @ ("n1-rename" | "n1-remove-dir" | "n1-copy") => {
+            let source = args.next().expect("source path");
+            if matches!(mode, "n1-rename" | "n1-remove-dir") {
+                // The helper must not retain its own process cwd inside the directory being
+                // mutated. Fish's parser-owned handle, not this incidental lock, is under test.
+                std::env::set_current_dir(std::path::Path::new(&source).parent().unwrap())
+                    .expect("release helper process cwd before directory mutation");
+            }
+            let result = match mode {
+                "n1-rename" => std::fs::rename(source, args.next().expect("destination path")),
+                "n1-copy" => std::fs::copy(source, args.next().expect("destination path")).map(|_| ()),
+                "n1-remove-dir" => std::fs::remove_dir(source),
+                _ => unreachable!(),
+            };
+            let mut out = std::io::stdout().lock();
+            match result {
+                Ok(()) => writeln!(out, "ok").unwrap(),
+                Err(error) => writeln!(
+                    out,
+                    "error={}",
+                    error.raw_os_error().expect("native filesystem error code")
+                )
+                .unwrap(),
+            }
+        }
+        "identity" => {
+            record("exe", std::env::current_exe().unwrap().to_str().unwrap());
+        }
         "exit" => {
             let code: u32 = args.next().unwrap().to_str().unwrap().parse().unwrap();
             unsafe { ExitProcess(code) }
@@ -45,13 +81,6 @@ fn main() {
             std::fs::write(args.next().unwrap(), b"launched").unwrap();
         }
         "report" => {
-            fn record(key: &str, value: &str) {
-                print!("{key}=");
-                for byte in value.as_bytes() {
-                    print!("{byte:02x}");
-                }
-                println!();
-            }
             record("cwd", std::env::current_dir().unwrap().to_str().unwrap());
             for (index, value) in args.enumerate() {
                 record(&format!("arg{index}"), value.to_str().unwrap());

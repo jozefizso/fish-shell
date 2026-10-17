@@ -152,23 +152,58 @@ pub fn flush_standard_streams() -> io::Result<()> {
     out.and(err)
 }
 
-/// Native batch jobs have no redirections. Unsupported syntax is rejected before
-/// expansion, so the type cannot represent an unavailable transport operation.
+/// Retained input bindings are independent of process-global standard handles.
+/// Other descriptor directions remain rejected by native preflight until N2.
 #[derive(Clone, Default)]
-pub struct IoChain;
+pub struct IoChain {
+    input: Option<std::sync::Arc<std::fs::File>>,
+}
 impl IoChain {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
     pub fn is_empty(&self) -> bool {
-        true
+        self.input.is_none()
     }
     pub fn len(&self) -> usize {
-        0
+        usize::from(self.input.is_some())
     }
-    pub fn clear(&mut self) {}
-    pub fn append(&mut self, _chain: &IoChain) -> bool {
+    pub fn clear(&mut self) {
+        self.input = None;
+    }
+    pub fn append(&mut self, chain: &IoChain) -> bool {
+        if let Some(input) = &chain.input {
+            self.input = Some(input.clone());
+        }
         true
+    }
+    pub fn input_file(&self) -> Option<std::sync::Arc<std::fs::File>> {
+        self.input.clone()
+    }
+
+    pub fn with_input_specs(
+        &self,
+        specs: &crate::redirection::RedirectionSpecList,
+        vars: &dyn crate::env::Environment,
+    ) -> io::Result<Self> {
+        use crate::redirection::RedirectionMode;
+        let mut result = self.clone();
+        for spec in specs {
+            if spec.fd != 0 || !matches!(spec.mode, RedirectionMode::Input | RedirectionMode::TryInput) {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "native input binding requires fd 0 input redirection"));
+            }
+            let path = crate::path::native_resolve_path_for_environment(&spec.target, vars)?;
+            let input = match std::fs::File::open(path) {
+                Ok(input) => input,
+                Err(_) if spec.mode == RedirectionMode::TryInput => {
+                    // Intentional virtual empty input, not ordinary filesystem name resolution.
+                    std::fs::File::open(r"\\.\NUL")?
+                }
+                Err(error) => return Err(error),
+            };
+            result.input = Some(std::sync::Arc::new(input));
+        }
+        Ok(result)
     }
 }
 
@@ -422,11 +457,16 @@ impl<'a> IoStreams<'a> {
         err: &'a mut OutputStream,
         io_chain: &'a IoChain,
     ) -> Self {
+        let input = io_chain.input_file();
+        let directly_redirected = input.is_some();
         Self {
             out,
             err,
-            stdin_file: BorrowedFdFile::stdin().ok(),
-            stdin_is_directly_redirected: false,
+            stdin_file: match input {
+                Some(input) => Some(BorrowedFdFile::from_file(input)),
+                None => BorrowedFdFile::stdin().ok(),
+            },
+            stdin_is_directly_redirected: directly_redirected,
             out_is_piped: false,
             err_is_piped: false,
             out_is_redirected: false,

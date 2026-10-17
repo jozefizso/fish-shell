@@ -3,10 +3,9 @@
 use super::prelude::*;
 use crate::env::Environment as _;
 use crate::err_fmt;
-use crate::{
-    path::path_apply_working_directory,
-    wutil::{normalize_path, wrealpath},
-};
+use crate::wutil::normalize_path;
+#[cfg(unix)]
+use crate::{path::path_apply_working_directory, wutil::wrealpath};
 
 #[derive(Default)]
 struct Options {
@@ -63,7 +62,7 @@ pub fn realpath(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]
 
     if opts.print_help {
         builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return if cfg!(windows) { Err(STATUS_CMD_ERROR) } else { Ok(SUCCESS) };
     }
 
     if optind == args.len() {
@@ -74,37 +73,38 @@ pub fn realpath(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]
     let mut had_error = false;
 
     for &arg in &args[optind..] {
-        if !opts.no_symlinks {
-            match wrealpath(arg) {
-                Ok(real_path) => {
-                    streams.out.append(&real_path);
-                    streams.out.append(L!("\n"));
-                }
-                Err(error) => {
-                    err_fmt!("%s: %s", arg, error.to_string())
-                        .cmd(cmd)
-                        .finish(streams);
-                    had_error = true;
-                }
-            }
+        #[cfg(unix)]
+        let result = if !opts.no_symlinks {
+            wrealpath(arg)
         } else {
-            let realpwd = wrealpath(&parser.vars().get_pwd_slash());
-
-            match realpwd {
-                Ok(realpwd) => {
-                    let absolute_arg = if arg.starts_with(L!("/")) {
-                        arg.to_owned()
-                    } else {
-                        path_apply_working_directory(arg, &realpwd)
-                    };
-                    streams.out.appendln(&normalize_path(&absolute_arg, false));
-                }
-                Err(error) => {
-                    err_fmt!("%s failed: %s", "realpath", error.to_string())
-                        .cmd(cmd)
-                        .finish(streams);
-                    had_error = true;
-                }
+            wrealpath(&parser.vars().get_pwd_slash()).map(|realpwd| {
+                let absolute_arg = if arg.starts_with(L!("/")) {
+                    arg.to_owned()
+                } else {
+                    path_apply_working_directory(arg, &realpwd)
+                };
+                normalize_path(&absolute_arg, false)
+            })
+        };
+        #[cfg(windows)]
+        let result = (|| -> std::io::Result<WString> {
+            let absolute = crate::path::native_resolve_path_for_environment(arg, parser.vars())?;
+            let absolute = crate::path::native_path_text(&absolute)?;
+            if opts.no_symlinks {
+                Ok(normalize_path(&absolute, false))
+            } else {
+                crate::wutil::native_realpath_with_cwd(&absolute, &absolute, true)
+            }
+        })();
+        match result {
+            Ok(real_path) => {
+                streams.out.appendln(&real_path);
+            }
+            Err(error) => {
+                err_fmt!("%s: %s", arg, error.to_string())
+                    .cmd(cmd)
+                    .finish(streams);
+                had_error = true;
             }
         }
     }

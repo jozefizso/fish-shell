@@ -2,23 +2,34 @@ use crate::builtins::Error;
 use crate::env::Environment as _;
 use crate::{err_fmt, err_str};
 use std::fs::Metadata;
+#[cfg(unix)]
 use std::os::unix::prelude::{FileTypeExt as _, MetadataExt as _};
 use std::time::SystemTime;
 
 use super::prelude::*;
+#[cfg(unix)]
 use crate::path::path_apply_working_directory;
 use crate::wutil::{
-    file_id_for_path, lwstat, normalize_path, waccess, wbasename, wdirname, wrealpath, wstat,
+    file_id_for_path, lwstat, normalize_path, waccess, wbasename, wdirname, wstat,
 };
+#[cfg(unix)]
+use crate::wutil::wrealpath;
 use fish_util::wcsfilecmp_glob;
 use fish_wcstringutil::split_string_tok;
+#[cfg(unix)]
 use libc::{PATH_MAX, S_ISGID, S_ISUID, mode_t};
+#[cfg(unix)]
 use nix::unistd::{AccessFlags, Gid, Uid};
+#[cfg(windows)]
+use crate::wutil::AccessFlags;
 
 // How many bytes we read() at once.
 // We use PATH_MAX here so we always get at least one path,
 // and so we can automatically detect NULL-separated input.
+#[cfg(unix)]
 const PATH_CHUNK_SIZE: usize = PATH_MAX as usize;
+#[cfg(windows)]
+const PATH_CHUNK_SIZE: usize = 4096;
 #[inline]
 fn arguments<'iter, 'args>(
     args: &'iter [&'args wstr],
@@ -457,6 +468,12 @@ fn path_normalize(
     path_transform(parser, streams, args, normalize_help, |_| {})
 }
 
+#[cfg(windows)]
+fn native_operand(path: &wstr, vars: &dyn crate::env::Environment) -> std::io::Result<WString> {
+    crate::path::native_resolve_path_for_environment(path, vars)
+        .and_then(|path| crate::path::native_path_text(&path))
+}
+
 fn path_mtime(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> BuiltinResult {
     let mut opts = Options {
         relative_valid: true,
@@ -478,6 +495,11 @@ fn path_mtime(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
         false => SplitBehavior::InferNull,
     });
     for InputValue { arg, .. } in arguments {
+        #[cfg(windows)]
+        let arg = match native_operand(&arg, parser.vars()) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
         if let Ok(ret) = file_id_for_path(&arg) {
             if opts.quiet {
                 return Ok(SUCCESS);
@@ -622,6 +644,14 @@ fn path_resolve(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]
         false => SplitBehavior::InferNull,
     });
     for InputValue { arg, .. } in arguments {
+        #[cfg(windows)]
+        let mut real = match native_operand(&arg, parser.vars()).and_then(|path| {
+            crate::wutil::native_realpath_with_cwd(&path, &path, true)
+        }) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        #[cfg(unix)]
         let mut real = match wrealpath(&arg) {
             Ok(p) => p,
             Err(_) => {
@@ -744,7 +774,12 @@ fn path_sort(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -
     Ok(SUCCESS)
 }
 
-fn filter_path(opts: &Options, path: &wstr, uid: Option<Uid>, gid: Option<Gid>) -> bool {
+fn filter_path(
+    opts: &Options,
+    path: &wstr,
+    #[cfg(unix)] uid: Option<Uid>,
+    #[cfg(unix)] gid: Option<Gid>,
+) -> bool {
     // TODO: Add moar stuff:
     // fifos, sockets, size greater than zero, setuid, ...
     // Nothing to check, file existence is checked elsewhere.
@@ -753,6 +788,7 @@ fn filter_path(opts: &Options, path: &wstr, uid: Option<Uid>, gid: Option<Gid>) 
     }
 
     // We keep the metadata around for other checks if we have it.
+    #[cfg(unix)]
     let mut metadata: Option<Metadata> = None;
 
     if let Some(t) = opts.types {
@@ -762,8 +798,9 @@ fn filter_path(opts: &Options, path: &wstr, uid: Option<Uid>, gid: Option<Gid>) 
             type_ok = md.as_ref().is_ok_and(Metadata::is_symlink);
         }
         let Ok(md) = wstat(path) else {
-            // Does not exist
-            return false;
+            // A dangling symlink still matches --type=link, but cannot
+            // satisfy permissions on its nonexistent target.
+            return type_ok && opts.perms.is_none();
         };
 
         let ft = md.file_type();
@@ -771,9 +808,13 @@ fn filter_path(opts: &Options, path: &wstr, uid: Option<Uid>, gid: Option<Gid>) 
             true => true,
             _ if t.file && ft.is_file() => true,
             _ if t.dir && ft.is_dir() => true,
+            #[cfg(unix)]
             _ if t.block && ft.is_block_device() => true,
+            #[cfg(unix)]
             _ if t.char && ft.is_char_device() => true,
+            #[cfg(unix)]
             _ if t.fifo && ft.is_fifo() => true,
+            #[cfg(unix)]
             _ if t.sock && ft.is_socket() => true,
             _ => false,
         };
@@ -781,7 +822,10 @@ fn filter_path(opts: &Options, path: &wstr, uid: Option<Uid>, gid: Option<Gid>) 
         if !type_ok {
             return false;
         }
-        metadata = Some(md);
+        #[cfg(unix)]
+        {
+            metadata = Some(md);
+        }
     }
 
     if let Some(perm) = opts.perms {
@@ -804,6 +848,7 @@ fn filter_path(opts: &Options, path: &wstr, uid: Option<Uid>, gid: Option<Gid>) 
         }
 
         // Permissions that require special handling
+        #[cfg(unix)]
         if perm.is_special() {
             let md = match metadata {
                 Some(n) => n,
@@ -849,6 +894,18 @@ fn path_filter_maybe_is(
 
     parse_opts(&mut opts, &mut optind, 0, args, parser, streams)?;
 
+    // Unix special-file kinds and ownership/mode bits have no native Windows
+    // predicate. Reject them before inversion rather than inventing metadata.
+    #[cfg(windows)]
+    if opts.types.is_some_and(|t| t.block || t.char || t.fifo || t.sock)
+        || opts.perms.is_some_and(PermFlags::is_special)
+    {
+        err_fmt!("Unix file types and ownership/mode predicates are unsupported on native Windows")
+            .subcmd(L!("path"), args[0])
+            .finish(streams);
+        return Err(STATUS_INVALID_ARGS);
+    }
+
     // If we have been invoked as "path is", which is "path filter -q".
     if is_is {
         opts.quiet = true;
@@ -861,34 +918,51 @@ fn path_filter_maybe_is(
     });
 
     // If we're looking for the owner/group, get our euid/egid here once.
+    #[cfg(unix)]
     let uid = if opts.perms.unwrap_or_default().user {
         Some(Uid::effective())
     } else {
         None
     };
+    #[cfg(unix)]
     let gid = if opts.perms.unwrap_or_default().group {
         Some(Gid::effective())
     } else {
         None
     };
 
-    // Collect arguments into a Vec so we can use .len()
-    let arguments_vec: Vec<_> = arguments.collect();
-
-    for InputValue { arg, .. } in arguments_vec.iter().filter(|&InputValue { arg, .. }| {
-        (opts.perms.is_none() && opts.types.is_none())
-            || (filter_path(&opts, arg, uid, gid) != opts.invert)
-    }) {
-        // If we don't have filters, check if it exists.
-        if opts.perms.is_none() && opts.types.is_none() {
-            let ok = waccess(arg, AccessFlags::F_OK).is_ok();
-            if ok == opts.invert {
-                // For --all, fail early if any path does not match the filter.
-                if opts.all {
-                    return Err(STATUS_CMD_ERROR);
-                }
-                continue;
+    for InputValue { arg, .. } in arguments {
+        #[cfg(windows)]
+        let native_path = match native_operand(&arg, parser.vars()) {
+            Ok(path) => path,
+            Err(error) => {
+                err_fmt!("Cannot resolve '%s': %s", arg, error.to_string())
+                    .subcmd(L!("path"), args[0])
+                    .finish(streams);
+                return Err(STATUS_INVALID_ARGS);
             }
+        };
+        #[cfg(windows)]
+        let checked_path: &wstr = &native_path;
+        #[cfg(unix)]
+        let checked_path: &wstr = &arg;
+        let matches = if opts.perms.is_none() && opts.types.is_none() {
+            waccess(checked_path, AccessFlags::F_OK).is_ok()
+        } else {
+            filter_path(
+                &opts,
+                checked_path,
+                #[cfg(unix)]
+                uid,
+                #[cfg(unix)]
+                gid,
+            )
+        };
+        if matches == opts.invert {
+            if opts.all {
+                return Err(STATUS_CMD_ERROR);
+            }
+            continue;
         }
 
         n_transformed += 1;
@@ -912,11 +986,6 @@ fn path_filter_maybe_is(
         }
     }
 
-    if opts.all && n_transformed != arguments_vec.len() {
-        // We have a filter and some paths didn't match.
-        // Return Err if we have a filter and some paths didn't match.
-        return Err(STATUS_CMD_ERROR);
-    }
     if n_transformed > 0 {
         Ok(SUCCESS)
     } else {
@@ -948,7 +1017,7 @@ pub fn path(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) ->
 
     if args[1] == "-h" || args[1] == "--help" {
         builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return if cfg!(windows) { Err(STATUS_INVALID_ARGS) } else { Ok(SUCCESS) };
     }
 
     let subcmd_name = args[1];
@@ -976,7 +1045,7 @@ pub fn path(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) ->
     if argc >= 3 && (args[2] == "-h" || args[2] == "--help") {
         // Unlike string, we don't have separate docs (yet)
         builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return if cfg!(windows) { Err(STATUS_INVALID_ARGS) } else { Ok(SUCCESS) };
     }
     let args = &mut args[1..];
     subcmd(parser, streams, args)

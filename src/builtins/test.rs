@@ -1,14 +1,19 @@
 use super::prelude::*;
+use crate::env::Environment;
 use crate::{err_str, should_flog};
 use fish_feature_flags::{FeatureFlag, feature_test};
 
 mod test_expressions {
+    #[cfg(unix)]
     use nix::unistd::{AccessFlags, Gid, Uid};
+    #[cfg(windows)]
+    use crate::wutil::AccessFlags;
 
     use super::*;
 
     use crate::builtins;
     use crate::err_raw;
+    #[cfg(unix)]
     use crate::nix::isatty;
     use crate::wutil::FileId;
     use crate::wutil::{
@@ -16,6 +21,7 @@ mod test_expressions {
     };
     use fish_fallback::fish_wcswidth;
     use std::collections::HashMap;
+    #[cfg(unix)]
     use std::os::unix::prelude::*;
     use std::sync::LazyLock;
 
@@ -164,6 +170,7 @@ mod test_expressions {
         }
 
         // Return true if the number is a tty().
+        #[cfg(unix)]
         fn isatty(&self, streams: &mut IoStreams) -> bool {
             if self.delta != 0.0 || self.base > i32::MAX as i64 || self.base < i32::MIN as i64 {
                 return false;
@@ -180,6 +187,28 @@ mod test_expressions {
                 !streams.err_is_redirected && isatty(libc::STDERR_FILENO)
             } else {
                 isatty(bint)
+            }
+        }
+
+        #[cfg(windows)]
+        fn isatty(&self, streams: &mut IoStreams) -> bool {
+            use std::os::windows::io::{AsRawHandle, BorrowedHandle};
+            use crate::fds::{is_console, standard_handle};
+
+            if self.delta != 0.0 {
+                return false;
+            }
+            match self.base {
+                0 => streams.stdin_file.as_ref().is_some_and(|input| {
+                    // Borrow the actual input endpoint, not a CRT descriptor.
+                    is_console(unsafe { BorrowedHandle::borrow_raw(input.as_raw_handle()) })
+                }),
+                1 => !streams.out_is_redirected
+                    && standard_handle(-11i32 as u32).is_ok_and(is_console),
+                2 => !streams.err_is_redirected
+                    && standard_handle(-12i32 as u32).is_ok_and(is_console),
+                // Native batch fish has no user-visible Unix descriptor table.
+                _ => false,
             }
         }
     }
@@ -271,7 +300,7 @@ mod test_expressions {
     /// Base trait for expressions.
     pub(super) trait Expression {
         /// Evaluate returns true if the expression is true (i.e. STATUS_CMD_OK).
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>) -> bool;
+        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool;
 
         /// Return base.range.
         fn range(&self) -> Range;
@@ -328,7 +357,7 @@ mod test_expressions {
     }
 
     impl Expression for JustAString {
-        fn evaluate(&self, _streams: &mut IoStreams, _errors: &mut Vec<WString>) -> bool {
+        fn evaluate(&self, _streams: &mut IoStreams, _errors: &mut Vec<WString>, _vars: &dyn Environment) -> bool {
             !self.arg.is_empty()
         }
 
@@ -338,8 +367,8 @@ mod test_expressions {
     }
 
     impl Expression for UnaryPrimary {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>) -> bool {
-            unary_primary_evaluate(self.token, &self.arg, streams, errors)
+        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+            unary_primary_evaluate(self.token, &self.arg, streams, errors, vars)
         }
 
         fn range(&self) -> Range {
@@ -348,8 +377,8 @@ mod test_expressions {
     }
 
     impl Expression for BinaryPrimary {
-        fn evaluate(&self, _streams: &mut IoStreams, errors: &mut Vec<WString>) -> bool {
-            binary_primary_evaluate(self.token, &self.arg_left, &self.arg_right, errors)
+        fn evaluate(&self, _streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+            binary_primary_evaluate(self.token, &self.arg_left, &self.arg_right, errors, vars)
         }
 
         fn range(&self) -> Range {
@@ -358,9 +387,9 @@ mod test_expressions {
     }
 
     impl Expression for UnaryOperator {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>) -> bool {
+        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
             match self.token {
-                UnaryBooleanToken::Bang => !self.subject.evaluate(streams, errors),
+                UnaryBooleanToken::Bang => !self.subject.evaluate(streams, errors, vars),
             }
         }
 
@@ -370,14 +399,13 @@ mod test_expressions {
     }
 
     impl Expression for CombiningExpression {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>) -> bool {
-            let _res = self.subjects[0].evaluate(streams, errors);
+        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
             assert!(!self.subjects.is_empty());
             assert_eq!(self.combiners.len() + 1, self.subjects.len());
 
             // One-element case.
             if self.subjects.len() == 1 {
-                return self.subjects[0].evaluate(streams, errors);
+                return self.subjects[0].evaluate(streams, errors, vars);
             }
 
             // Evaluate our lists, remembering that AND has higher precedence than OR. We can
@@ -395,7 +423,7 @@ mod test_expressions {
                 let mut and_result = true;
                 while idx < max {
                     // Evaluate it, short-circuiting.
-                    and_result = and_result && self.subjects[idx].evaluate(streams, errors);
+                    and_result = and_result && self.subjects[idx].evaluate(streams, errors, vars);
 
                     // If the combiner at this index (which corresponding to how we combine with the
                     // next subject) is not AND, then exit the loop.
@@ -419,8 +447,8 @@ mod test_expressions {
     }
 
     impl Expression for ParentheticalExpression {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>) -> bool {
-            self.contents.evaluate(streams, errors)
+        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+            self.contents.evaluate(streams, errors, vars)
         }
 
         fn range(&self) -> Range {
@@ -879,22 +907,61 @@ mod test_expressions {
         mod_time(lhs).cmp(&mod_time(rhs)).is_lt()
     }
 
+    #[cfg(windows)]
+    fn native_operand(path: &wstr, vars: &dyn Environment) -> std::io::Result<WString> {
+        crate::path::native_resolve_path_for_environment(path, vars)
+            .and_then(|path| crate::path::native_path_text(&path))
+    }
+
     fn binary_primary_evaluate(
         token: BinaryToken,
         left: &wstr,
         right: &wstr,
         errors: &mut Vec<WString>,
+        _vars: &dyn Environment,
     ) -> bool {
         match token {
             BinaryToken::String(StringComparison::Equal) => left == right,
             BinaryToken::String(StringComparison::NotEqual) => left != right,
             BinaryToken::FileId(comparison) => {
-                let left = file_id_for_path(left).ok();
-                let right = file_id_for_path(right).ok();
+                // Only absence participates in -nt/-ot's missing-file rules.
+                // A denied or otherwise unidentifiable object is not a missing one.
+                let identify = |path: &wstr, _errors: &mut Vec<WString>| {
+                    #[cfg(windows)]
+                    let result = native_operand(path, _vars)
+                        .and_then(|path| file_id_for_path(&path));
+                    #[cfg(unix)]
+                    let result = file_id_for_path(path);
+                    match result {
+                        Ok(id) => Some(id),
+                        Err(_error) => {
+                            #[cfg(windows)]
+                            if _error.kind() != std::io::ErrorKind::NotFound {
+                                _errors.push(wgettext_fmt!(
+                                    "Cannot identify '%s': %s", path, _error.to_string()
+                                ));
+                            }
+                            None
+                        }
+                    }
+                };
+                let left_id = identify(left, errors);
+                let right_id = identify(right, errors);
                 match comparison {
-                    FileComparison::Newer => older_than(right.as_ref(), left.as_ref()),
-                    FileComparison::Older => older_than(left.as_ref(), right.as_ref()),
-                    FileComparison::Same => left == right,
+                    FileComparison::Newer => older_than(right_id.as_ref(), left_id.as_ref()),
+                    FileComparison::Older => older_than(left_id.as_ref(), right_id.as_ref()),
+                    FileComparison::Same => {
+                        #[cfg(unix)]
+                        {
+                            matches!((left_id, right_id), (Some(l), Some(r))
+                                if l.dev_inode == r.dev_inode)
+                        }
+                        #[cfg(windows)]
+                        {
+                            matches!((left_id, right_id), (Some(l), Some(r))
+                                if l.native_identity == r.native_identity)
+                        }
+                    }
                 }
             }
             BinaryToken::Number(comparison) => {
@@ -920,22 +987,58 @@ mod test_expressions {
         arg: &wstr,
         streams: &mut IoStreams,
         errors: &mut Vec<WString>,
+        _vars: &dyn Environment,
     ) -> bool {
+        #[cfg(windows)]
+        let native_path = if matches!(
+            token,
+            UnaryToken::FileStat(_) | UnaryToken::FilePerm(_)
+                | UnaryToken::FileType(FilePredicate::h | FilePredicate::L)
+        ) {
+            match native_operand(arg, _vars) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    errors.push(wgettext_fmt!("Cannot resolve '%s': %s", arg, error.to_string()));
+                    return false;
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let arg = native_path.as_deref().unwrap_or(arg);
         match token {
             #[allow(clippy::unnecessary_cast)] // mode_t is u32 on many platforms, but not all
             UnaryToken::FileStat(stat_token) => {
+                #[cfg(windows)]
+                if matches!(
+                    stat_token,
+                    StatPredicate::b | StatPredicate::c | StatPredicate::G
+                        | StatPredicate::g | StatPredicate::k | StatPredicate::O
+                        | StatPredicate::p | StatPredicate::S | StatPredicate::u
+                ) {
+                    errors.push(wgettext!(
+                        "Unix special-file and ownership/mode predicates are unsupported on native Windows"
+                    ).to_owned());
+                    return false;
+                }
                 let Ok(md) = wstat(arg) else {
                     return false;
                 };
 
+                #[cfg(unix)]
                 const S_ISUID: u32 = libc::S_ISUID as u32;
+                #[cfg(unix)]
                 const S_ISGID: u32 = libc::S_ISGID as u32;
+                #[cfg(unix)]
                 const S_ISVTX: u32 = libc::S_ISVTX as u32;
 
                 match stat_token {
                     // "-b", for block special files
+                    #[cfg(unix)]
                     StatPredicate::b => md.file_type().is_block_device(),
                     // "-c", for character special files
+                    #[cfg(unix)]
                     StatPredicate::c => md.file_type().is_char_device(),
                     // "-d", for directories
                     StatPredicate::d => md.file_type().is_dir(),
@@ -944,21 +1047,30 @@ mod test_expressions {
                     // "-f", for regular files
                     StatPredicate::f => md.file_type().is_file(),
                     // "-G", for check effective group ID
+                    #[cfg(unix)]
                     StatPredicate::G => md.gid() == Gid::effective().as_raw(),
                     // "-g", for set-group-id
+                    #[cfg(unix)]
                     StatPredicate::g => md.permissions().mode() & S_ISGID != 0,
                     // "-k", for sticky bit
+                    #[cfg(unix)]
                     StatPredicate::k => md.permissions().mode() & S_ISVTX != 0,
                     // "-O", for check effective user id
+                    #[cfg(unix)]
                     StatPredicate::O => md.uid() == Uid::effective().as_raw(),
                     // "-p", for FIFO
+                    #[cfg(unix)]
                     StatPredicate::p => md.file_type().is_fifo(),
                     // "-S", socket
+                    #[cfg(unix)]
                     StatPredicate::S => md.file_type().is_socket(),
                     // "-s", size greater than zero
                     StatPredicate::s => md.len() > 0,
                     // "-u", whether file is setuid
+                    #[cfg(unix)]
                     StatPredicate::u => md.permissions().mode() & S_ISUID != 0,
+                    #[cfg(windows)]
+                    _ => unreachable!("unsupported native stat predicate rejected above"),
                 }
             }
             UnaryToken::FileType(file_type) => {
@@ -1077,7 +1189,7 @@ pub fn test(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     };
 
     let mut eval_errors = Vec::new();
-    let result = expr.evaluate(streams, &mut eval_errors);
+    let result = expr.evaluate(streams, &mut eval_errors, parser.vars());
     if !eval_errors.is_empty() {
         for eval_error in eval_errors {
             streams.err.appendln(&eval_error);
@@ -1095,7 +1207,7 @@ pub fn test(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::test as builtin_test;
     use crate::{
@@ -1231,6 +1343,8 @@ mod tests {
         assert!(run_test_test(1, &["-e", "/bin/sh_not_a_path"]));
         assert!(run_test_test(0, &["-x", "/bin/sh"]));
         assert!(run_test_test(1, &["-x", "/bin/sh_not_a_path"]));
+        assert!(run_test_test(0, &["/bin/sh", "-ef", "/bin/sh"]));
+        assert!(run_test_test(1, &["/bin/sh_not_a_path", "-ef", "/bin/sh_not_a_path"]));
         assert!(run_test_test(0, &["-d", "/bin/"]));
         assert!(run_test_test(1, &["-d", "/bin/sh"]));
 

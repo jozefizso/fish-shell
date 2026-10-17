@@ -35,7 +35,7 @@ use crate::{
         Block, BlockData, BlockId, BlockType, LoopStatus, Parser, ParserEnvSetMode, ProfileItem,
     },
     parser_keywords::parser_keywords_is_subcommand,
-    path::path_try_get_path,
+    path::{path_as_implicit_cd, path_try_get_path},
     prelude::*,
     proc::{ConcreteAssignment, Job, JobProperties, Process, ProcessType, job_reap, no_exec},
     redirection::{RedirectionMode, RedirectionSpec, RedirectionSpecList},
@@ -52,7 +52,6 @@ const STDERR_FILENO: i32 = 2;
 #[cfg(unix)]
 use crate::{
     function,
-    path::path_as_implicit_cd,
     proc::{JobControl, get_job_control_mode},
     reader::fish_is_unwinding_for_exit,
     timer::push_timer,
@@ -807,7 +806,6 @@ impl ExecutionContext {
                 path = external_cmd.path;
             } else {
                 // If the specified command does not exist, and is undecorated, try using an implicit cd.
-                #[cfg(unix)]
                 if statement.decoration() == StatementDecoration::None {
                     // Implicit cd requires an empty argument and redirection list.
                     if statement.args_or_redirs.is_empty() {
@@ -854,6 +852,10 @@ impl ExecutionContext {
                 } else {
                     ProcessType::Builtin
                 };
+            }
+            #[cfg(windows)]
+            {
+                process_type = ProcessType::Builtin;
             }
         } else {
             // Not implicit cd.
@@ -2042,7 +2044,12 @@ impl ExecutionContext {
                 ast::Kind::JobPipeline(pipeline) if !pipeline.continuation.is_empty() => {
                     return Some((node, "pipelines"));
                 }
-                ast::Kind::Redirection(_) => return Some((node, "redirection")),
+                ast::Kind::Redirection(redirection) => {
+                    let input = PipeOrRedir::try_from(self.node_source(&redirection.oper))
+                        .is_ok_and(|oper| oper.is_valid() && oper.fd == 0
+                            && matches!(oper.mode, RedirectionMode::Input | RedirectionMode::TryInput));
+                    if !input { return Some((node, "redirection")); }
+                }
                 ast::Kind::TimeDecorator(_) => return Some((node, "time")),
                 ast::Kind::WhileHeader(_) => return Some((node, "while")),
                 ast::Kind::FunctionHeader(_) => return Some((node, "function definitions")),
@@ -2076,24 +2083,6 @@ impl ExecutionContext {
                     Ok(None)
                 ) {
                     return Some((node, "command substitution"));
-                }
-                if let Some(unescaped) = unescape_string(
-                    text,
-                    UnescapeStringStyle::Script(fish_common::UnescapeFlags {
-                        special: true,
-                        ..Default::default()
-                    }),
-                ) {
-                    if unescaped.chars().any(|ch| {
-                        matches!(
-                            ch,
-                            fish_widestring::ANY_CHAR
-                                | fish_widestring::ANY_STRING
-                                | fish_widestring::ANY_STRING_RECURSIVE
-                        )
-                    }) {
-                        return Some((node, "glob traversal"));
-                    }
                 }
             }
         }

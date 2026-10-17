@@ -373,6 +373,18 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
 #[cfg(windows)]
 const BUILTIN_DATAS: &[BuiltinData] = &[
     BuiltinData {
+        name: L!("["),
+        func: test::test,
+    },
+    BuiltinData {
+        name: L!("cd"),
+        func: cd::cd,
+    },
+    BuiltinData {
+        name: L!("command"),
+        func: command::command,
+    },
+    BuiltinData {
         name: L!("echo"),
         func: echo::echo,
     },
@@ -389,16 +401,36 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         func: math::math,
     },
     BuiltinData {
+        name: L!("path"),
+        func: path::path,
+    },
+    BuiltinData {
         name: L!("printf"),
         func: printf::printf,
+    },
+    BuiltinData {
+        name: L!("pwd"),
+        func: pwd::pwd,
+    },
+    BuiltinData {
+        name: L!("realpath"),
+        func: realpath::realpath,
     },
     BuiltinData {
         name: L!("set"),
         func: set::set,
     },
     BuiltinData {
+        name: L!("test"),
+        func: test::test,
+    },
+    BuiltinData {
         name: L!("true"),
         func: r#true::r#true,
+    },
+    BuiltinData {
+        name: L!("type"),
+        func: r#type::r#type,
     },
 ];
 
@@ -409,7 +441,6 @@ pub fn builtin_is_unsupported(name: &wstr) -> bool {
         L!("!"),
         L!("."),
         L!(":"),
-        L!("["),
         L!("_"),
         L!("abbr"),
         L!("and"),
@@ -422,8 +453,6 @@ pub fn builtin_is_unsupported(name: &wstr) -> bool {
         L!("breakpoint"),
         L!("builtin"),
         L!("case"),
-        L!("cd"),
-        L!("command"),
         L!("commandline"),
         L!("complete"),
         L!("contains"),
@@ -446,20 +475,15 @@ pub fn builtin_is_unsupported(name: &wstr) -> bool {
         L!("jobs"),
         L!("not"),
         L!("or"),
-        L!("path"),
-        L!("pwd"),
         L!("random"),
         L!("read"),
-        L!("realpath"),
         L!("return"),
         L!("set_color"),
         L!("source"),
         L!("status"),
         L!("string"),
         L!("switch"),
-        L!("test"),
         L!("time"),
-        L!("type"),
         L!("ulimit"),
         L!("wait"),
         L!("while"),
@@ -1210,34 +1234,6 @@ pub fn native_builtin_options_supported(argv: &[&wstr]) -> bool {
 #[cfg(all(test, windows))]
 mod native_tests {
     use super::*;
-
-    #[test]
-    fn native_registry_is_deliberately_narrow() {
-        assert_eq!(
-            builtin_get_names().collect::<Vec<_>>(),
-            vec![
-                L!("echo"),
-                L!("exit"),
-                L!("false"),
-                L!("math"),
-                L!("printf"),
-                L!("set"),
-                L!("true")
-            ]
-        );
-        for name in [
-            L!("fg"),
-            L!("bg"),
-            L!("exec"),
-            L!("source"),
-            L!("cd"),
-            L!("test"),
-        ] {
-            assert!(builtin_is_unsupported(name));
-            assert!(!builtin_exists(name));
-        }
-        assert!(!builtin_is_unsupported(L!("C:\\probe.exe")));
-    }
 
     #[test]
     fn native_options_never_downgrade_universal_assignment() {

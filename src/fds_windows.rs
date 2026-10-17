@@ -1,6 +1,7 @@
 //! Synchronous Windows standard-stream handles. No Unix descriptors are involved.
 use std::io::{self, Read};
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, RawHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, RawHandle};
+use std::sync::Arc;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -43,10 +44,25 @@ pub(crate) fn is_console(handle: BorrowedHandle<'_>) -> bool {
     unsafe { GetConsoleMode(handle.as_raw_handle(), &mut mode) != 0 }
 }
 
-/// A borrowed input endpoint. Dropping or cloning it never closes the caller's handle.
+#[derive(Clone)]
+enum InputHandle<'a> {
+    Borrowed(BorrowedHandle<'a>),
+    File(Arc<std::fs::File>),
+}
+
+impl AsHandle for InputHandle<'_> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        match self {
+            Self::Borrowed(handle) => *handle,
+            Self::File(file) => file.as_handle(),
+        }
+    }
+}
+
+/// An input adapter borrowing an inherited handle or retaining an owned file redirection.
 /// Console reads are UTF-16 text converted to UTF-8; redirected reads are raw bytes.
 pub struct BorrowedInput<'a> {
-    handle: BorrowedHandle<'a>,
+    handle: InputHandle<'a>,
     pending: Vec<u8>,
     pending_offset: usize,
 }
@@ -56,7 +72,7 @@ impl Clone for BorrowedInput<'_> {
         // Like a second reader of the same OS stream, the clone has independent
         // read buffering. Never duplicate bytes already read into this wrapper.
         Self {
-            handle: self.handle,
+            handle: self.handle.clone(),
             pending: Vec::new(),
             pending_offset: 0,
         }
@@ -68,7 +84,7 @@ pub type BorrowedFdFile = BorrowedInput<'static>;
 impl<'a> BorrowedInput<'a> {
     pub fn from_handle(handle: BorrowedHandle<'a>) -> Self {
         Self {
-            handle,
+            handle: InputHandle::Borrowed(handle),
             pending: Vec::new(),
             pending_offset: 0,
         }
@@ -76,6 +92,14 @@ impl<'a> BorrowedInput<'a> {
 }
 
 impl BorrowedInput<'static> {
+    pub fn from_file(file: Arc<std::fs::File>) -> Self {
+        Self {
+            handle: InputHandle::File(file),
+            pending: Vec::new(),
+            pending_offset: 0,
+        }
+    }
+
     pub fn stdin() -> io::Result<Self> {
         standard_handle(-10i32 as u32).map(Self::from_handle)
     }
@@ -83,7 +107,7 @@ impl BorrowedInput<'static> {
 
 impl AsRawHandle for BorrowedInput<'_> {
     fn as_raw_handle(&self) -> RawHandle {
-        self.handle.as_raw_handle()
+        self.handle.as_handle().as_raw_handle()
     }
 }
 
@@ -99,7 +123,7 @@ impl Read for BorrowedInput<'_> {
             self.pending_offset += count;
             return Ok(count);
         }
-        if is_console(self.handle) {
+        if is_console(self.handle.as_handle()) {
             let mut wide = [0u16; 4097];
             let mut count = 0;
             if unsafe {

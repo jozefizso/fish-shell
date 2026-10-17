@@ -226,6 +226,27 @@ jobs:
         $output | Tee-Object native-windows-results/w1-host.txt
         if ($code -ne 0) { exit $code }
         if (@($output | Select-String '^test result: ok\. 1 passed; 0 failed; 0 ignored;').Count -ne 1) { throw "W1-HOST must execute without skips" }
+    - name: Provision required native filesystem fixtures
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $developer = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+        New-Item -Path $developer -Force | Out-Null
+        New-ItemProperty -Path $developer -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
+        New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -PropertyType DWord -Value 1 -Force | Out-Null
+        $root = Join-Path $env:RUNNER_TEMP 'fish-native-n1-share'
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        $absolute = [IO.Path]::GetFullPath($root)
+        $unc = '\\localhost\' + $absolute.Substring(0, 1) + '$' + $absolute.Substring(2)
+        $probe = Join-Path $unc 'fixture-capability.txt'
+        [IO.File]::WriteAllText($probe, 'native UNC fixture')
+        if ([IO.File]::ReadAllText($probe) -ne 'native UNC fixture') { throw 'Required UNC fixture is not writable' }
+        Remove-Item $probe
+        Add-Content $env:GITHUB_ENV "FISH_NATIVE_N1_UNC_ROOT=$unc"
+        @("OS=$([Environment]::OSVersion.Version)", "UNC=$unc", "DeveloperMode=1", "LongPathsEnabled=1") |
+          Tee-Object native-windows-results/filesystem-host.txt
+        Get-Volume -DriveLetter $absolute.Substring(0, 1) |
+          Select-Object DriveLetter, FileSystemType, HealthStatus |
+          Out-String | Tee-Object -Append native-windows-results/filesystem-host.txt
     - name: Build native debug fish and probe, and release fish
       run: |
         New-Item -ItemType Directory -Force native-windows-results | Out-Null
@@ -299,6 +320,18 @@ jobs:
         $expected = @(foreach ($profile in @('debug', 'release')) { foreach ($case in $required) { "PASS $profile $case" } })
         if ($passes.Count -ne 30 -or @(Compare-Object ($expected | Sort-Object) ($passes | Sort-Object)).Count -ne 0) {
           throw "Native acceptance must execute the exact 15-case registry in both profiles"
+        }
+        foreach ($profile in @('debug', 'release')) {
+          $profileArgs = @()
+          if ($profile -eq 'release') { $profileArgs += '--release' }
+          Invoke-NativeTests -Name "native-n1-$profile" -CargoArgs ($profileArgs + @('--test', 'windows_n1')) -Required @('N1_PATHS', 'N1_DISCOVERY', 'N1_GLOB')
+          $passes = @(Get-Content "native-windows-results/native-n1-$profile.txt" | Where-Object { $_ -match '^PASS (debug|release) N1-' })
+          $expected = @(foreach ($artifact in @('debug', 'release')) {
+            foreach ($case in @('N1-PATHS', 'N1-DISCOVERY', 'N1-GLOB')) { "PASS $artifact $case" }
+          })
+          if ($passes.Count -ne 6 -or @(Compare-Object ($expected | Sort-Object) ($passes | Sort-Object)).Count -ne 0) {
+            throw "N1 must execute the exact three required IDs against both artifacts in the $profile harness"
+          }
         }
     - name: Upload native Windows evidence
       if: always()

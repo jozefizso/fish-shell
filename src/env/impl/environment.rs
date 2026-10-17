@@ -266,6 +266,8 @@ fn copy_node_chain(node: &EnvNodeRef) -> EnvNodeRef {
 #[derive(Default, Clone)]
 pub(super) struct PerprocData {
     pub(super) pwd: WString,
+    #[cfg(windows)]
+    pub(super) native_cwd: Option<Arc<crate::path::NativeCwd>>,
     pub(super) statuses: Statuses,
 }
 
@@ -431,12 +433,12 @@ impl EnvScopedImpl {
     pub fn get_pwd_slash(&self) -> WString {
         // Return "/" if PWD is missing.
         // See https://github.com/fish-shell/fish-shell/issues/5080
-        let mut pwd;
-        pwd = self.perproc_data.pwd.clone();
-        if !pwd.ends_with('/') {
-            pwd.push('/');
-        }
-        pwd
+        crate::env::environment::pwd_with_trailing_separator(self.perproc_data.pwd.clone())
+    }
+
+    #[cfg(windows)]
+    pub fn native_cwd(&self) -> Option<Arc<crate::path::NativeCwd>> {
+        self.perproc_data.native_cwd.clone()
     }
 
     /// Return a copy of self, with copied locals but shared globals.
@@ -630,6 +632,20 @@ impl EnvStackImpl {
             base,
             shadowed_locals: Vec::new(),
         })
+    }
+
+    /// Publish the logical name and directory identity in the same environment transaction.
+    #[cfg(windows)]
+    pub fn set_native_cwd(&mut self, cwd: Arc<crate::path::NativeCwd>) -> ModResult {
+        let result = self.set(
+            L!("PWD"),
+            EnvSetMode::new_at_early_startup(EnvMode::GLOBAL_EXPORTED),
+            vec![cwd.logical_path().to_owned()],
+        );
+        if result.status == EnvStackSetResult::Ok {
+            self.base.perproc_data.native_cwd = Some(cwd);
+        }
+        result
     }
 
     /// Set a variable under the name `key`, using the given `mode`, setting its value to `val`.
@@ -899,6 +915,10 @@ impl EnvStackImpl {
             let pwd = val.pop().unwrap();
             if pwd != self.base.perproc_data.pwd {
                 self.base.perproc_data.pwd = pwd;
+                #[cfg(windows)]
+                {
+                    self.base.perproc_data.native_cwd = None;
+                }
                 self.base.globals.borrow_mut().changed_exported();
             }
             return Some(EnvStackSetResult::Ok);

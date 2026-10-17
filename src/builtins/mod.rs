@@ -16,9 +16,7 @@ pub mod r#break;
 pub mod breakpoint;
 #[cfg(unix)]
 pub mod builtin;
-#[cfg(unix)]
 pub mod cd;
-#[cfg(unix)]
 pub mod command;
 #[cfg(unix)]
 pub mod commandline;
@@ -56,16 +54,13 @@ pub mod history;
 #[cfg(unix)]
 pub mod jobs;
 pub mod math;
-#[cfg(unix)]
 pub mod path;
 pub mod printf;
-#[cfg(unix)]
 pub mod pwd;
 #[cfg(unix)]
 pub mod random;
 #[cfg(unix)]
 pub mod read;
-#[cfg(unix)]
 pub mod realpath;
 pub mod r#return;
 pub mod set;
@@ -77,10 +72,8 @@ pub mod source;
 pub mod status;
 #[cfg(unix)]
 pub mod string;
-#[cfg(unix)]
 pub mod test;
 pub mod r#true;
-#[cfg(unix)]
 pub mod r#type;
 #[cfg(unix)]
 pub mod ulimit;

@@ -2,20 +2,59 @@
 
 use super::prelude::*;
 use crate::{
-    env::{EnvMode, Environment as _},
-    err_fmt, err_raw, err_str,
-    fds::{BEST_O_SEARCH, wopen_dir},
-    parser::ParserEnvSetMode,
+    env::Environment as _,
+    err_fmt, err_str,
     path::path_apply_cdpath,
-    wutil::{normalize_path, wreadlink, wrealpath},
+    wutil::wreadlink,
 };
+#[cfg(unix)]
+use crate::{env::EnvMode, err_raw, fds::{BEST_O_SEARCH, wopen_dir},
+    parser::ParserEnvSetMode, wutil::{normalize_path, wrealpath}};
+#[cfg(unix)]
 use fish_widestring::str2wcstring;
+#[cfg(unix)]
 use nix::{errno::Errno, unistd::fchdir};
 use std::sync::Arc;
+
+#[cfg(unix)]
+type CdError = Errno;
+#[cfg(windows)]
+type CdError = std::io::Error;
+
+#[derive(Clone, Copy, PartialEq)]
+enum CdErrorClass { Missing, NotDirectory, Loop, Denied, Other }
+
+fn error_class(error: &CdError) -> CdErrorClass {
+    #[cfg(unix)]
+    {
+        match *error {
+            Errno::ENOENT => CdErrorClass::Missing,
+            Errno::ENOTDIR => CdErrorClass::NotDirectory,
+            Errno::ELOOP => CdErrorClass::Loop,
+            Errno::EACCES | Errno::EPERM => CdErrorClass::Denied,
+            _ => CdErrorClass::Other,
+        }
+    }
+    #[cfg(windows)]
+    {
+        match error.raw_os_error() {
+            Some(2 | 3) => CdErrorClass::Missing,
+            Some(267) => CdErrorClass::NotDirectory,
+            Some(1921) => CdErrorClass::Loop,
+            Some(5) => CdErrorClass::Denied,
+            _ => match error.kind() {
+                std::io::ErrorKind::NotFound => CdErrorClass::Missing,
+                std::io::ErrorKind::PermissionDenied => CdErrorClass::Denied,
+                _ => CdErrorClass::Other,
+            },
+        }
+    }
+}
 
 // Return whether a cd path is relative to the current directory.
 fn is_relative_cd_path(path: &wstr) -> bool {
     path == "." || path == ".." || path.starts_with("./") || path.starts_with("../")
+        || cfg!(windows) && (path.starts_with(".\\") || path.starts_with("..\\"))
 }
 
 // Attempt to chdir to a given directory.
@@ -24,6 +63,7 @@ fn is_relative_cd_path(path: &wstr) -> bool {
 // On failure, return an error.
 // The fd is stashed in the parser for eventual support for thread-backed subshells
 // with distinct CWDs.
+#[cfg(unix)]
 fn try_chdir(parser: &mut Parser, dir: &wstr, deref_symlink: bool) -> Result<(), Errno> {
     let norm_dir = normalize_path(dir, true);
     // Try opening the directory and invoking fchdir().
@@ -50,10 +90,21 @@ fn try_chdir(parser: &mut Parser, dir: &wstr, deref_symlink: bool) -> Result<(),
     Ok(())
 }
 
+#[cfg(windows)]
+fn try_chdir(parser: &mut Parser, dir: &wstr, deref_symlink: bool) -> Result<(), CdError> {
+    let cwd = parser.vars().get_pwd_slash();
+    // Complete every fallible open/name operation before replacing either authoritative state.
+    let directory = Arc::new(crate::path::NativeCwd::open(dir, &cwd, deref_symlink)?);
+    if parser.vars().set_native_cwd(directory) != crate::env::EnvStackSetResult::Ok {
+        return Err(std::io::Error::other("could not update fish working directory"));
+    }
+    Ok(())
+}
+
 // An error returned when trying to cd to one of many candidate directories.
 struct TryCdError {
     // The "best" error.
-    error: Errno,
+    error: CdError,
     // If the error is a broken symlink, the path to the symlink and what it was trying to point to.
     broken_symlink: Option<(WString, WString)>,
 }
@@ -69,7 +120,7 @@ fn try_cd_to_dirs(
     assert!(!dirs.is_empty(), "dirs should not be empty");
     // Because we may have multiple candidate directories, we have to be choosy about
     // which error to report.
-    let mut best_errno: Option<Errno> = None;
+    let mut best_errno: Option<CdError> = None;
 
     // If the error is a broken symlink, keep track of that here.
     // This is a tuple of the path to the symlink, and what the symlink was trying to point to.
@@ -77,7 +128,10 @@ fn try_cd_to_dirs(
     let mut broken_symlink: Option<(WString, WString)> = None;
 
     for dir in dirs {
+        #[cfg(unix)]
         let norm_dir = normalize_path(dir, true);
+        #[cfg(windows)]
+        let norm_dir = dir.to_owned();
         // Try opening the directory and invoking fchdir().
         // If this succeeds then we're done!
         let res = try_chdir(parser, &norm_dir, deref_symlink);
@@ -90,7 +144,7 @@ fn try_cd_to_dirs(
         // ENOENT in particular is very low priority
         // - if in another directory there was a *file* by the correct name
         // we prefer *that* error because it's more specific
-        if err == Errno::ENOENT {
+        if error_class(&err) == CdErrorClass::Missing {
             // If this is the first broken symlink, record it.
             if broken_symlink.is_none() {
                 if let Some(symlink_dest) = wreadlink(&norm_dir) {
@@ -101,7 +155,7 @@ fn try_cd_to_dirs(
                 best_errno = Some(err);
             }
             continue;
-        } else if err == Errno::ENOTDIR {
+        } else if error_class(&err) == CdErrorClass::NotDirectory {
             best_errno = Some(err);
             continue;
         }
@@ -152,7 +206,7 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
             'P' => deref_symlink = true,
             'h' => {
                 builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return if cfg!(windows) { Err(STATUS_CMD_ERROR) } else { Ok(SUCCESS) };
             }
             ';' => {
                 builtin_unexpected_argument(parser, streams, cmd, args[w.wopt_index - 1], false);
@@ -207,10 +261,32 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
 
     // If given -P, deref PWD before applying any CDPATH.
     let mut pwd = vars.get_pwd_slash();
+    #[cfg(windows)]
+    if let Some(cwd) = vars.native_cwd() {
+        match cwd.logical_path_for_cd() {
+            Ok(current_name) => pwd = current_name,
+            Err(error) => {
+                // A deleted/unnameable cwd can be escaped, but may not redirect a relative open
+                // into an unrelated replacement at its old logical spelling.
+                let escape = crate::path::native_absolute_path(dir_in).is_ok()
+                    || dir_in.starts_with('/') || dir_in.starts_with('\\')
+                    || dir_in == ".." || dir_in.starts_with(L!("../")) || dir_in.starts_with(L!("..\\"));
+                if !escape {
+                    err_fmt!("Could not resolve current directory: %s", error.to_string())
+                        .cmd(cmd).finish(streams);
+                    return Err(STATUS_CMD_ERROR);
+                }
+            }
+        }
+    }
     if deref_symlink {
-        if let Ok(mut real_pwd) = wrealpath(&pwd) {
-            if !real_pwd.ends_with('/') {
-                real_pwd.push('/');
+        #[cfg(unix)]
+        let physical_pwd = wrealpath(&pwd);
+        #[cfg(windows)]
+        let physical_pwd = parser.vars().get_working_directory();
+        if let Ok(mut real_pwd) = physical_pwd {
+            if !real_pwd.ends_with('/') && !(cfg!(windows) && real_pwd.ends_with('\\')) {
+                real_pwd.push(if cfg!(windows) && real_pwd.starts_with(L!("\\\\?\\")) { '\\' } else { '/' });
             }
             pwd = real_pwd;
         }
@@ -228,10 +304,14 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
     // actual cwd via realpath("."). We only do this for arguments that explicitly refer to the
     // current directory; absolute paths and bare relative names are reported as
     // ordinary errors. zsh's `cd_try_chdir` has an equivalent fallback.
-    if err.error == Errno::ENOENT && is_relative_cd_path(dir_in) {
-        if let Ok(mut real_pwd) = wrealpath(L!(".")) {
-            if !real_pwd.ends_with('/') {
-                real_pwd.push('/');
+    if error_class(&err.error) == CdErrorClass::Missing && is_relative_cd_path(dir_in) {
+        #[cfg(unix)]
+        let physical_pwd = wrealpath(L!("."));
+        #[cfg(windows)]
+        let physical_pwd = parser.vars().get_working_directory();
+        if let Ok(mut real_pwd) = physical_pwd {
+            if !real_pwd.ends_with('/') && !(cfg!(windows) && real_pwd.ends_with('\\')) {
+                real_pwd.push(if cfg!(windows) && real_pwd.starts_with(L!("\\\\?\\")) { '\\' } else { '/' });
             }
             if real_pwd != pwd {
                 let dirs = path_apply_cdpath(dir_in, &real_pwd, parser.vars());
@@ -251,7 +331,7 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
         broken_symlink,
     } = err;
 
-    let mut err = if errno == Errno::ENOTDIR {
+    let mut err = if error_class(&errno) == CdErrorClass::NotDirectory {
         err_fmt!("'%s' is not a directory", dir_in)
     } else if let Some((symlink, symlink_dest)) = &broken_symlink {
         err_fmt!(
@@ -259,17 +339,18 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
             symlink,
             symlink_dest
         )
-    } else if errno == Errno::ELOOP {
+    } else if error_class(&errno) == CdErrorClass::Loop {
         err_fmt!("Too many levels of symbolic links: '%s'", dir_in)
-    } else if errno == Errno::ENOENT {
+    } else if error_class(&errno) == CdErrorClass::Missing {
         err_fmt!(DIR_DOES_NOT_EXIST, dir_in)
-    } else if errno == Errno::EACCES || errno == Errno::EPERM {
+    } else if error_class(&errno) == CdErrorClass::Denied {
         err_fmt!("Permission denied: '%s'", dir_in)
     } else {
+        #[cfg(unix)]
         err_raw!(str2wcstring(errno.to_string()))
             .cmd(L!("cd"))
             .finish(streams);
-        err_fmt!("Unknown error trying to locate directory '%s'", dir_in)
+        err_fmt!("Could not change directory to '%s': %s", dir_in, errno.to_string())
     };
 
     if !parser.is_interactive() {

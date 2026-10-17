@@ -1,6 +1,8 @@
 //! Implementation of the pwd builtin.
 use super::prelude::*;
-use crate::{builtins::Error, env::Environment as _, err_fmt, wutil::wrealpath};
+use crate::{builtins::Error, env::Environment as _, err_fmt};
+#[cfg(unix)]
+use crate::wutil::wrealpath;
 
 // The pwd builtin. Respect -P to resolve symbolic links. Respect -L to not do that (the default).
 const SHORT_OPTIONS: &wstr = L!("LPh");
@@ -21,7 +23,7 @@ pub fn pwd(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) -> 
             'P' => resolve_symlinks = true,
             'h' => {
                 builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return if cfg!(windows) { Err(STATUS_CMD_ERROR) } else { Ok(SUCCESS) };
             }
             ';' => {
                 builtin_unexpected_argument(parser, streams, cmd, argv[w.wopt_index - 1], false);
@@ -47,7 +49,11 @@ pub fn pwd(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) -> 
         pwd = tmp.as_string();
     }
     if resolve_symlinks {
-        match wrealpath(&pwd) {
+        #[cfg(unix)]
+        let physical_pwd = wrealpath(&pwd);
+        #[cfg(windows)]
+        let physical_pwd = parser.vars().get_working_directory();
+        match physical_pwd {
             Ok(real_pwd) => pwd = real_pwd,
             Err(error) => {
                 err_fmt!("%s failed: %s", "realpath", error.to_string())

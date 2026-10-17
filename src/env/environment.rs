@@ -119,6 +119,33 @@ pub(crate) fn handle_env_return(
     }
 }
 
+pub(super) fn pwd_with_trailing_separator(mut pwd: WString) -> WString {
+    #[cfg(windows)]
+    let terminated = pwd.ends_with('/') || pwd.ends_with('\\');
+    #[cfg(not(windows))]
+    let terminated = pwd.ends_with('/');
+    if !terminated {
+        #[cfg(windows)]
+        let separator = if pwd.starts_with(L!("\\\\?\\")) { '\\' } else { '/' };
+        #[cfg(not(windows))]
+        let separator = '/';
+        pwd.push(separator);
+    }
+    pwd
+}
+
+#[cfg(windows)]
+fn working_directory_from_variables<E: Environment + ?Sized>(vars: &E) -> std::io::Result<WString> {
+    match vars.get_unless_empty(L!("PWD")) {
+        Some(pwd) => {
+            let pwd = pwd.as_string();
+            crate::path::native_absolute_path(&pwd)?;
+            Ok(pwd)
+        }
+        None => crate::wutil::wgetcwd(),
+    }
+}
+
 /// An environment is read-only access to variable values.
 pub trait Environment {
     /// Get a variable by name using default flags.
@@ -139,11 +166,13 @@ pub trait Environment {
         let Some(var) = self.get_unless_empty(L!("PWD")) else {
             return WString::from("/");
         };
-        let mut pwd = var.as_string();
-        if !pwd.ends_with('/') {
-            pwd.push('/');
-        }
-        pwd
+        pwd_with_trailing_separator(var.as_string())
+    }
+
+    /// Resolve filesystem operations through the context's retained directory identity.
+    #[cfg(windows)]
+    fn get_working_directory(&self) -> std::io::Result<WString> {
+        working_directory_from_variables(self)
     }
 
     /// Get a variable by name using default flags, unless it is empty.
@@ -202,6 +231,11 @@ impl Environment for EnvDyn {
 
     fn get_pwd_slash(&self) -> WString {
         self.inner.get_pwd_slash()
+    }
+
+    #[cfg(windows)]
+    fn get_working_directory(&self) -> std::io::Result<WString> {
+        self.inner.get_working_directory()
     }
 }
 
@@ -268,6 +302,24 @@ impl EnvStack {
         self.lock().base.set_last_statuses(statuses);
     }
 
+    #[cfg(windows)]
+    pub fn native_cwd(&self) -> Option<Arc<crate::path::NativeCwd>> {
+        self.lock().base.native_cwd()
+    }
+
+    #[cfg(windows)]
+    pub fn set_native_cwd(&self, cwd: Arc<crate::path::NativeCwd>) -> EnvStackSetResult {
+        let result = self.lock().set_native_cwd(cwd);
+        if result.status == EnvStackSetResult::Ok && self.dispatches_var_changes {
+            env_dispatch_var_change(
+                VarChangeMilieu { is_repainting: false, global_or_universal: false },
+                L!("PWD"),
+                self,
+            );
+        }
+        result.status
+    }
+
     /// Sets the variable with the specified name to the given values.
     pub fn set(&self, key: &wstr, mode: EnvSetMode, mut vals: Vec<WString>) -> EnvStackSetResult {
         // Historical behavior.
@@ -277,11 +329,11 @@ impl EnvStack {
 
         // Hacky stuff around PATH and CDPATH: #3914.
         // Not MANPATH; see #4158.
-        // Replace empties with dot. Note we ignore pathvar here.
+        // Unix PATH empties mean "."; native discovery requires an explicit "." entry.
         if key == "PATH" || (!cfg!(windows) && key == "CDPATH") {
-            // Split on colons.
+            // Split with the platform list separator, retaining native empty entries.
             let mut munged_vals = colon_split(&vals);
-            // Replace empties with dots.
+            #[cfg(not(windows))]
             for val in munged_vals.iter_mut() {
                 if val.is_empty() {
                     val.push('.');
@@ -487,6 +539,15 @@ impl Environment for EnvScoped {
     fn get_pwd_slash(&self) -> WString {
         self.lock().get_pwd_slash()
     }
+
+    #[cfg(windows)]
+    fn get_working_directory(&self) -> std::io::Result<WString> {
+        let cwd = self.lock().native_cwd();
+        match cwd {
+            Some(cwd) => cwd.physical_path(),
+            None => working_directory_from_variables(self),
+        }
+    }
 }
 
 /// Necessary for [`Arc<EnvStack>`] to be sync.
@@ -503,6 +564,14 @@ impl Environment for EnvStack {
 
     fn get_pwd_slash(&self) -> WString {
         self.lock().get_pwd_slash()
+    }
+
+    #[cfg(windows)]
+    fn get_working_directory(&self) -> std::io::Result<WString> {
+        match self.native_cwd() {
+            Some(cwd) => cwd.physical_path(),
+            None => working_directory_from_variables(self),
+        }
     }
 }
 

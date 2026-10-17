@@ -1,11 +1,16 @@
 use super::prelude::*;
 use crate::{
     builtins::Error,
-    err_fmt, err_str, function,
-    highlight::highlight_and_colorize,
-    parse_util::{apply_indents, compute_indents},
+    err_fmt, err_str,
     path::{path_get_path, path_get_paths},
 };
+#[cfg(unix)]
+use crate::{
+    function,
+    highlight::highlight_and_colorize,
+    parse_util::{apply_indents, compute_indents},
+};
+#[cfg(unix)]
 use fish_widestring::bytes2wcstring;
 
 #[derive(Default)]
@@ -52,7 +57,7 @@ pub fn r#type(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) 
             'q' => opts.query = true,
             'h' => {
                 builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return if cfg!(windows) { Err(STATUS_INVALID_ARGS) } else { Ok(SUCCESS) };
             }
             ':' => {
                 builtin_missing_argument(
@@ -103,6 +108,10 @@ pub fn r#type(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) 
     let optind = w.wopt_index;
     for arg in argv.iter().take(argc).skip(optind) {
         let mut found = 0;
+        // Function definition/autoload services are not available in native batch
+        // fish. Builtin and executable discovery below use the same native resolver
+        // as launch; do not substitute an external function-search implementation.
+        #[cfg(unix)]
         if !opts.force_path && !opts.no_functions {
             if let Some(props) = function::get_props_autoload(arg, parser) {
                 found += 1;

@@ -37,7 +37,7 @@ pub fn r#command(
             'v' => opts.find_path = true,
             'h' => {
                 builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return if cfg!(windows) { Err(STATUS_INVALID_ARGS) } else { Ok(SUCCESS) };
             }
             ':' => {
                 builtin_missing_argument(

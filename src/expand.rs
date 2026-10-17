@@ -18,22 +18,20 @@ use crate::{
     parse_constants::{ParseError, ParseErrorCode, ParseErrorList, SOURCE_LOCATION_UNKNOWN},
     parse_util::{expand_variable_error, locate_cmdsubst_range},
     prelude::*,
-    wildcard::wildcard_has_internal,
+    path::path_apply_working_directory,
+    wildcard::{WildcardResult, wildcard_expand_string, wildcard_has_internal},
     wutil::{normalize_path, wcstoi, wcstoi_partial},
 };
 #[cfg(unix)]
 use crate::{
     exec::exec_subshell_for_expand,
     history::{History, history_id},
-    path::path_apply_working_directory,
-    wildcard::{WildcardResult, wildcard_expand_string},
 };
 use fish_common::{
     EscapeFlags, EscapeStringStyle, UnescapeFlags, UnescapeStringStyle, escape, escape_string,
     escape_string_for_double_quotes, unescape_string,
 };
 use fish_feature_flags::{FeatureFlag, feature_test};
-#[cfg(unix)]
 use fish_util::wcsfilecmp_glob;
 use fish_wcstringutil::{join_strings, trim};
 #[cfg(unix)]
@@ -1592,7 +1590,6 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
         ExpandResult::ok()
     }
 
-    #[cfg(unix)]
     fn stage_wildcards(
         &mut self,
         path_to_expand: WString,
@@ -1614,7 +1611,21 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
             //
             // So we're going to treat this input as a file path. Compute the "working directories",
             // which may be CDPATH if the special flag is set.
+            #[cfg(unix)]
             let working_dir = self.ctx.vars().get_pwd_slash();
+            #[cfg(windows)]
+            let working_dir = match self.ctx.vars().get_working_directory() {
+                Ok(directory) => directory,
+                Err(error) => {
+                    append_syntax_error!(
+                        self.errors,
+                        SOURCE_LOCATION_UNKNOWN,
+                        "Unable to resolve the working directory for wildcard expansion: %s",
+                        error.to_string()
+                    );
+                    return ExpandResult::make_error(STATUS_EXPAND_ERROR);
+                }
+            };
             let mut effective_working_dirs = vec![];
 
             // We can handle executables and cd arguments mostly the same way. There's the
@@ -1634,11 +1645,20 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
             // PATH.
             let for_cd = self.flags.is_cd_argument();
             let for_command = self.flags.executables_only();
+            #[cfg(windows)]
+            let native_explicit = path_to_expand.starts_with('\\')
+                || path_to_expand.starts_with(L!(".\\"))
+                || path_to_expand.starts_with(L!("..\\"))
+                || (path_to_expand.len() >= 2 && path_to_expand.char_at(1) == ':')
+                || (for_command && path_to_expand.contains('\\'));
+            #[cfg(unix)]
+            let native_explicit = false;
             if (!for_cd && !for_command)
                 || path_to_expand.starts_with(L!("/"))
                 || path_to_expand.starts_with(L!("./"))
                 || path_to_expand.starts_with(L!("../"))
                 || (for_command && path_to_expand.contains('/'))
+                || native_explicit
             {
                 effective_working_dirs.push(working_dir);
             } else {
@@ -1651,9 +1671,14 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
                     .map(|var| var.as_list().to_owned())
                     .unwrap_or_default();
 
-                // The current directory is always valid.
+                #[cfg(unix)]
                 paths.push(if for_cd { L!(".") } else { L!("") }.to_owned());
+                // Native discovery never implicitly searches cwd or empty PATH elements.
+                #[cfg(windows)]
+                if for_cd { paths.push(L!(".").to_owned()); }
                 for next_path in paths {
+                    #[cfg(windows)]
+                    if for_command && next_path.is_empty() { continue; }
                     effective_working_dirs
                         .push(path_apply_working_directory(&next_path, &working_dir));
                 }
@@ -1674,6 +1699,15 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
                     WildcardResult::NoMatch => (),
                     WildcardResult::Overflow => return append_overflow_error(self.errors, None),
                     WildcardResult::Cancel => return ExpandResult::new(ExpandResultCode::Cancel),
+                    WildcardResult::Error(error) => {
+                        append_syntax_error!(
+                            self.errors,
+                            SOURCE_LOCATION_UNKNOWN,
+                            "Filesystem wildcard expansion failed: %s",
+                            error.to_string()
+                        );
+                        return ExpandResult::make_error(STATUS_EXPAND_ERROR);
+                    }
                 }
             }
 
@@ -1696,25 +1730,6 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
         result
     }
 
-    #[cfg(windows)]
-    fn stage_wildcards(
-        &mut self,
-        path_to_expand: WString,
-        out: &mut CompletionReceiver,
-    ) -> ExpandResult {
-        if self.flags.for_completions || wildcard_has_internal(&path_to_expand) {
-            append_syntax_error!(
-                self.errors,
-                SOURCE_LOCATION_UNKNOWN,
-                "Filesystem wildcard expansion and completion are not supported on native Windows"
-            );
-            return ExpandResult::make_error(STATUS_EXPAND_ERROR);
-        }
-        if out.add(path_to_expand).is_err() {
-            return append_overflow_error(self.errors, None);
-        }
-        ExpandResult::ok()
-    }
 
     // Given an original input string, if it starts with a tilde, "unexpand" the expanded home
     // directory.  Note this may be just a tilde or a user name like ~foo/.
@@ -2384,7 +2399,7 @@ mod portable_tests {
         assert!(completions.empty());
         assert!(ctx.vars().get(L!("forbidden")).is_none());
 
-        for input in [L!("*"), L!("$history")] {
+        for input in [L!("$history")] {
             let mut output = CompletionList::new();
             errors.clear();
             assert_eq!(
@@ -2400,5 +2415,43 @@ mod portable_tests {
             );
             assert!(output.is_empty());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_filesystem_expansion_uses_shared_stages() {
+        let tree = fish_tempfile::new_dir().unwrap();
+        std::fs::write(tree.path().join("b.txt"), b"").unwrap();
+        std::fs::write(tree.path().join("a魚.txt"), b"").unwrap();
+        std::fs::write(tree.path().join(".hidden.txt"), b"").unwrap();
+        std::fs::create_dir(tree.path().join("nested")).unwrap();
+        std::fs::write(tree.path().join("nested").join("deep.txt"), b"").unwrap();
+        let vars = EnvStack::new();
+        vars.initialize_native_from(
+            std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(), tree.path(),
+        ).unwrap();
+        let mut ctx = OperationContext::background(&vars, EXPANSION_LIMIT_DEFAULT);
+        let cases: &[(&wstr, &[&wstr])] = &[
+            (L!("*.txt"), &[L!("a魚.txt"), L!("b.txt")]),
+            (L!("**/*.txt"), &[L!("a魚.txt"), L!("b.txt"), L!("nested/deep.txt")]),
+            (L!(".*.txt"), &[L!(".hidden.txt")]),
+            (L!("'*.txt'"), &[L!("*.txt")]),
+        ];
+        for &(input, expected) in cases {
+            let mut output = CompletionList::new();
+            let mut errors = ParseErrorList::new();
+            let result = expand_string(input.to_owned(), &mut output, ExpandFlags::FAIL_ON_CMDSUBST,
+                &mut ctx, Some(&mut errors));
+            assert_eq!(result.result, ExpandResultCode::Ok, "{input}: {errors:?}");
+            let actual: Vec<&wstr> = output.iter().map(|completion| completion.completion.as_utfstr()).collect();
+            assert_eq!(actual.as_slice(), expected, "{input}");
+        }
+        let mut output = CompletionList::new();
+        let mut errors = ParseErrorList::new();
+        let result = expand_string(L!("*.missing").to_owned(), &mut output,
+            ExpandFlags::FAIL_ON_CMDSUBST, &mut ctx, Some(&mut errors));
+        assert_eq!(result.result, ExpandResultCode::WildcardNoMatch);
+        assert!(output.is_empty());
+        assert!(errors.is_empty());
     }
 }

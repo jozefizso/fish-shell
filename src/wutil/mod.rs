@@ -1,16 +1,21 @@
 #[cfg(not(windows))]
 pub mod dir_iter;
+#[cfg(windows)]
+#[path = "dir_iter_windows.rs"]
+pub mod dir_iter;
 mod errors;
-#[cfg(not(windows))]
 mod fileid;
 mod hex_float;
 #[macro_use]
 pub mod printf;
 pub mod wcstod;
 pub mod wcstoi;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::*;
 
 pub use errors::*;
-#[cfg(not(windows))]
 pub use fileid::*;
 pub use printf::{eprintf, fprintf, printf, sprintf};
 pub use wcstoi::{
@@ -47,6 +52,7 @@ pub fn wopendir(name: &wstr) -> *mut libc::DIR {
 }
 
 /// Wide character version of stat().
+#[cfg(not(windows))]
 pub fn wstat(file_name: &wstr) -> io::Result<fs::Metadata> {
     #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
@@ -56,6 +62,7 @@ pub fn wstat(file_name: &wstr) -> io::Result<fs::Metadata> {
 }
 
 /// Wide character version of lstat().
+#[cfg(not(windows))]
 pub fn lwstat(file_name: &wstr) -> io::Result<fs::Metadata> {
     #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
@@ -79,6 +86,7 @@ pub fn waccess(file_name: &wstr, amode: AccessFlags) -> nix::Result<()> {
 }
 
 /// Wide character version of unlink().
+#[cfg(not(windows))]
 pub fn wunlink(file_name: &wstr) -> io::Result<()> {
     #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
@@ -106,14 +114,6 @@ pub fn wgetcwd() -> WString {
             WString::new()
         }
     }
-}
-
-/// Native identity conversion is fallible: never replace invalid UTF-16 or return a fake cwd.
-#[cfg(windows)]
-pub fn wgetcwd() -> io::Result<WString> {
-    let cwd = native_to_shell_text_owned(osstr2wcstring(std::env::current_dir()?)?);
-    crate::path::native_absolute_path(&cwd)?;
-    Ok(cwd)
 }
 
 /// Wide character version of readlink().
@@ -187,6 +187,7 @@ pub fn wrealpath(pathname: &wstr) -> io::Result<WString> {
 /// 1. Collapse multiple /s into a single /, except maybe at the beginning.
 /// 2. .. goes up a level.
 /// 3. Remove /./ in the middle.
+#[cfg(not(windows))]
 pub fn normalize_path(path: &wstr, allow_leading_double_slashes: bool) -> WString {
     // Count the leading slashes.
     let sep = '/';
@@ -235,6 +236,7 @@ pub fn normalize_path(path: &wstr, allow_leading_double_slashes: bool) -> WStrin
 /// appropriate for cd. That is, return effectively wd + path while resolving leading ../s from
 /// path. The intent here is to allow 'cd' out of a directory which may no longer exist, without
 /// allowing 'cd' into a directory that may not exist; see #5341.
+#[cfg(not(windows))]
 pub fn path_normalize_for_cd(wd: &wstr, path: &wstr) -> WString {
     use std::collections::VecDeque;
 
@@ -288,6 +290,7 @@ pub fn path_normalize_for_cd(wd: &wstr, path: &wstr) -> WString {
 }
 
 /// Wide character version of dirname().
+#[cfg(not(windows))]
 pub fn wdirname(mut path: &wstr) -> &wstr {
     // Do not use system-provided dirname (#7837).
     // On Mac it's not thread safe, and will error for paths exceeding PATH_MAX.
@@ -330,6 +333,7 @@ pub fn wdirname(mut path: &wstr) -> &wstr {
 }
 
 /// Wide character version of basename().
+#[cfg(not(windows))]
 pub fn wbasename(mut path: &wstr) -> &wstr {
     // This follows OpenGroup basename recipe.
     // 1: empty => allowed to return ".". This is what system impls do.

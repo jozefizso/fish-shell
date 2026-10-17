@@ -64,14 +64,15 @@ impl EnvStack {
             ));
         }
         crate::path::path_make_canonical(&mut pwd);
+        let native_cwd = std::sync::Arc::new(crate::path::NativeCwd::open(&pwd, &pwd, false)?);
         let mut imported = HashMap::new();
         let mut path_value = None;
         let mut uppercase_path = false;
         for (key, value) in inherited {
             let key = native_to_shell_text_owned(osstr2wcstring(key)?);
             let value = native_to_shell_text_owned(osstr2wcstring(value)?);
-            // Windows' hidden per-drive cwd entries are not fish variables. Drive-relative
-            // resolution is outside this runtime's path contract.
+            // Hidden per-drive entries are not fish variables. Drive-relative resolution
+            // uses the native path service, never an imported variable spelling.
             if key.starts_with('=') {
                 continue;
             }
@@ -114,11 +115,9 @@ impl EnvStack {
             str2wcstring(crate::BUILD_VERSION),
         );
         self.set_one(L!("fish_pid"), global, std::process::id().to_wstring());
-        self.set_one(
-            L!("PWD"),
-            EnvSetMode::new_at_early_startup(EnvMode::GLOBAL_EXPORTED),
-            pwd,
-        );
+        if self.set_native_cwd(native_cwd) != EnvStackSetResult::Ok {
+            return Err(io::Error::other("unable to initialize native PWD"));
+        }
         Ok(())
     }
 

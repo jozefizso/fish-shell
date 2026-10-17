@@ -4,20 +4,15 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{Read, Write};
-use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    mpsc,
-};
-use std::time::Duration;
+use std::process::Command;
 
 #[path = "windows_native/provenance.rs"]
 mod provenance;
+#[path = "windows_native/fixture.rs"]
+mod fixture;
+use fixture::{exact, quote, run, Captured, Fixture};
 
-const LIMIT: Duration = Duration::from_secs(30);
 const CASES: &[&str] = &[
     "W2-RUNTIME",
     "W3-BYTES",
@@ -35,157 +30,6 @@ const CASES: &[&str] = &[
     "W6-BOUNDARY",
     "W6-CLEAN-RUN",
 ];
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn WaitForSingleObject(handle: *mut std::ffi::c_void, millis: u32) -> u32;
-}
-
-struct Captured {
-    code: u32,
-    out: Vec<u8>,
-    err: Vec<u8>,
-}
-fn run(command: &mut Command, input: &[u8]) -> Captured {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn {command:?}: {e}"));
-    let mut stdin = child.stdin.take().unwrap();
-    let input = input.to_vec();
-    let (send, receive) = mpsc::channel();
-    let sender = send.clone();
-    std::thread::spawn(move || {
-        let result = stdin.write_all(&input);
-        drop(stdin);
-        let _ = sender.send((0, result.map(|_| Vec::new())));
-    });
-    for (index, mut stream) in [
-        (
-            1,
-            Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
-        ),
-        (
-            2,
-            Box::new(child.stderr.take().unwrap()) as Box<dyn Read + Send>,
-        ),
-    ] {
-        let sender = send.clone();
-        std::thread::spawn(move || {
-            let mut data = Vec::new();
-            let result = stream.read_to_end(&mut data).map(|_| data);
-            let _ = sender.send((index, result));
-        });
-    }
-    drop(send);
-    let wait = unsafe { WaitForSingleObject(child.as_raw_handle(), LIMIT.as_millis() as u32) };
-    if wait != 0 {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("bounded process wait failed ({wait:#x}): {command:?}");
-    }
-    let status = child.wait().unwrap();
-    let mut streams = BTreeMap::new();
-    for _ in 0..3 {
-        let (index, result) = receive
-            .recv_timeout(LIMIT)
-            .expect("child-owned streams did not reach EOF within bound");
-        streams.insert(index, result.expect("native stream I/O failed"));
-    }
-    Captured {
-        code: status.code().expect("native exit code") as u32,
-        out: streams.remove(&1).unwrap(),
-        err: streams.remove(&2).unwrap(),
-    }
-}
-
-struct Fixture {
-    root: PathBuf,
-    fish: PathBuf,
-    probe: PathBuf,
-    state: PathBuf,
-}
-impl Fixture {
-    fn new(fish: &Path, probe: &Path, profile: &str) -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "fish native 雪 🐟 {} {} {profile}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&root).unwrap();
-        let fish_copy = root.join("fish.exe");
-        let probe_copy = root.join("native probe 雪.exe");
-        fs::copy(fish, &fish_copy)
-            .unwrap_or_else(|e| panic!("required {profile} fish artifact {}: {e}", fish.display()));
-        fs::copy(probe, &probe_copy).expect("required native probe artifact");
-        let state = root.join("user state");
-        fs::create_dir(&state).unwrap();
-        for dir in ["home", "config", "data", "cache"] {
-            fs::create_dir(state.join(dir)).unwrap();
-        }
-        Self {
-            root,
-            fish: fish_copy,
-            probe: probe_copy,
-            state,
-        }
-    }
-    fn command(&self, args: &[&OsStr]) -> Command {
-        let mut cmd = Command::new(&self.fish);
-        cmd.args(args)
-            .current_dir(&self.root)
-            .env_clear()
-            .env("PATH", "");
-        // SystemRoot is required by some native Windows loader/runtime configurations.
-        if let Some(value) = std::env::var_os("SystemRoot") {
-            cmd.env("SystemRoot", value);
-        }
-        for (key, dir) in [
-            ("HOME", "home"),
-            ("USERPROFILE", "home"),
-            ("XDG_CONFIG_HOME", "config"),
-            ("APPDATA", "config"),
-            ("XDG_DATA_HOME", "data"),
-            ("LOCALAPPDATA", "data"),
-            ("XDG_CACHE_HOME", "cache"),
-        ] {
-            cmd.env(key, self.state.join(dir));
-        }
-        cmd
-    }
-    fn eval(&self, code: &str) -> Captured {
-        self.input(code, b"")
-    }
-    fn input(&self, code: &str, bytes: &[u8]) -> Captured {
-        run(
-            &mut self.command(&[OsStr::new("-N"), OsStr::new("-c"), OsStr::new(code)]),
-            bytes,
-        )
-    }
-    fn probe(&self) -> String {
-        quote(self.probe.to_str().unwrap())
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-fn exact(result: Captured, code: u32, out: &[u8], err: &[u8]) {
-    assert_eq!(
-        result.code,
-        code,
-        "stderr={}",
-        String::from_utf8_lossy(&result.err)
-    );
-    assert_eq!(result.out, out);
-    assert_eq!(result.err, err);
-}
 fn rejected(result: Captured) {
     assert_ne!(result.code, 0, "unsupported operation succeeded");
     assert!(
@@ -289,7 +133,6 @@ fn reject(f: &Fixture) {
         "bg",
         "set -U forbidden yes",
         "source missing.fish",
-        "echo *",
     ];
     for job in jobs {
         let result = f.eval(job);
@@ -323,29 +166,9 @@ fn paths(f: &Fixture) {
     let result = f.eval(&format!("{} report", f.probe()));
     assert_eq!(result.code, 0);
     assert!(result.err.is_empty());
-    assert_eq!(
-        String::from_utf8(result.out).unwrap(),
-        format!("cwd={}\n", hex(f.root.to_str().unwrap()))
-    );
-    for path in [
-        "C:relative.exe",
-        "\\\\server\\share\\probe.exe",
-        "\\\\?\\C:\\probe.exe",
-    ] {
-        rejected(f.eval(&quote(path)));
-    }
-    let marker = f.root.join("drive-relative-must-not-run");
-    let drive = &f.probe.to_str().unwrap()[..2];
-    let relative = format!("{drive}{}", f.probe.file_name().unwrap().to_str().unwrap());
-    rejected(f.eval(&format!(
-        "{} marker {}",
-        quote(&relative),
-        quote(marker.to_str().unwrap())
-    )));
-    assert!(
-        !marker.exists(),
-        "drive-relative path launched a real executable"
-    );
+    assert_eq!(check_report_cwd(&String::from_utf8(result.out).unwrap(), &f.root), "");
+    // N1 namespace resolution, drive-relative execution and UNC fixtures are now
+    // positive/failure coverage in the mandatory windows_n1 acceptance gates.
     let root = f.root.ancestors().last().unwrap();
     let mut command = f.command(&[
         OsStr::new("-N"),
@@ -372,6 +195,19 @@ fn assert_cwd(observed: &str, expected: &Path) {
 fn hex(text: &str) -> String {
     text.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
 }
+fn check_report_cwd<'a>(report: &'a str, expected: &Path) -> &'a str {
+    let (record, remaining) = report.split_once('\n').unwrap();
+    let encoded = record.strip_prefix("cwd=").unwrap();
+    let mut units = encoded.as_bytes().chunks_exact(2);
+    let decoded = units
+        .by_ref()
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect::<Vec<_>>();
+    assert!(units.remainder().is_empty());
+    assert_cwd(&String::from_utf8(decoded).unwrap(), expected);
+    remaining
+}
+
 fn child(f: &Fixture) {
     let code = "printf 'export=<%s>\\n' $FISH_ACCEPT_EXPORTED; set -q FISH_ACCEPT_LOCAL; and echo leaked-local; set -q FISH_ACCEPT_ERASED; and echo leaked-erased; printf 'cwd=<%s>\\n' $PWD; printf 'arg=<%s>\\n' $argv; exit 7";
     let args = ["", "two words", "a\"b", "tail\\", "雪🐟", "'quoted'"];
@@ -403,16 +239,19 @@ fn child(f: &Fixture) {
     );
     assert_eq!(records.next().unwrap(), expected);
     let result = f.eval(&format!("set -gx FISH_ACCEPT_EXPORTED 'visible 雪'; set -g FISH_ACCEPT_LOCAL hidden; set -gx FISH_ACCEPT_ERASED gone; set -e FISH_ACCEPT_ERASED; {} report {}", f.probe(), args.iter().map(|s| quote(s)).collect::<Vec<_>>().join(" ")));
+    assert_eq!(result.code, 0);
+    assert!(result.err.is_empty());
+    let text = String::from_utf8(result.out).unwrap();
+    let remaining = check_report_cwd(&text, &f.root);
     let expected = format!(
-        "cwd={}\n{}FISH_ACCEPT_EXPORTED={}\n",
-        hex(f.root.to_str().unwrap()),
+        "{}FISH_ACCEPT_EXPORTED={}\n",
         args.iter()
             .enumerate()
             .map(|(i, s)| format!("arg{i}={}\n", hex(s)))
             .collect::<String>(),
         hex("visible 雪")
     );
-    exact(result, 0, expected.as_bytes(), b"");
+    assert_eq!(remaining, expected);
 }
 fn streams(f: &Fixture) {
     let bytes = b"\0\n\r\n\xff\x80native\0";

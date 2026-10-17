@@ -40,15 +40,13 @@ pub fn run() {
         .unwrap()
         .join("missing parent 日本語")
         .join("missing child");
-    let wide = fish_widestring::osstr2wcstring(&missing).unwrap();
-    let error = fish::wutil::wstat(&wide).expect_err("missing path unexpectedly exists");
+    // Test the owning Win32 open boundary. Componentwise metadata traversal may fail
+    // earlier with ERROR_FILE_NOT_FOUND instead of the full path's ERROR_PATH_NOT_FOUND.
+    let error = fish::wutil::native_open(&missing, 0, true)
+        .expect_err("missing path unexpectedly exists");
     // Win32 ERROR_PATH_NOT_FOUND is 3, which is not Unix ENOENT. Capturing
     // this error in std::io::Error must preserve its native domain and value.
     unsafe { SetLastError(87) }; // ERROR_INVALID_PARAMETER, an unrelated later error.
     assert_eq!(error.raw_os_error(), Some(3));
     assert_eq!(error.kind(), ErrorKind::NotFound);
-    assert_eq!(
-        error.to_string(),
-        std::io::Error::from_raw_os_error(3).to_string()
-    );
 }

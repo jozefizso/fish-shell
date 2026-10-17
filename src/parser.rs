@@ -461,8 +461,8 @@ impl ParserEnvSetMode {
 }
 
 impl Parser {
-    /// Create a parser.
-    pub fn new(variables: EnvStack, cancel_behavior: CancelBehavior) -> Parser {
+    /// Create a parser, retaining the native directory identity before evaluation can begin.
+    pub fn new(variables: EnvStack, cancel_behavior: CancelBehavior) -> std::io::Result<Parser> {
         let mut result = Self {
             interactive_initialized: false,
             current_node: ScopedRefCell::new(None),
@@ -493,7 +493,22 @@ impl Parser {
             }
         }
 
-        result
+        #[cfg(windows)]
+        if result.variables.native_cwd().is_none() {
+            let cwd = Arc::new(match result.variables.get_unless_empty(L!("PWD")) {
+                Some(pwd) => {
+                    let pwd = pwd.as_string();
+                    crate::path::NativeCwd::open(&pwd, &pwd, false)?
+                }
+                None => crate::path::NativeCwd::from_process()?,
+            });
+            let status = result.variables.set_native_cwd(cwd);
+            if status != EnvStackSetResult::Ok {
+                return Err(std::io::Error::other("unable to initialize native PWD"));
+            }
+        }
+
+        Ok(result)
     }
 
     /// Adds a job to the beginning of the job list.
@@ -2267,7 +2282,8 @@ mod tests {
     #[serial]
     fn test_cancellation() {
         test_init();
-        let parser = &mut Parser::new(EnvStack::new(), CancelBehavior::Clear);
+        let parser = &mut Parser::new(EnvStack::new(), CancelBehavior::Clear)
+            .expect("test parser initialization");
         let mut reader = fake_scoped_reader(parser);
         let parser = &mut *reader.parser;
 

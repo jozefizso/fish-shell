@@ -1,13 +1,13 @@
 // Enumeration of all wildcard types.
 
 #[cfg(unix)]
-use crate::{
-    common::{WSL, is_windows_subsystem_for_linux},
-    wutil::{
-        dir_iter::{DirEntry, DirEntryType},
-        lwstat, waccess,
-    },
+use crate::common::{WSL, is_windows_subsystem_for_linux};
+use crate::wutil::{
+    dir_iter::{DirEntry, DirEntryType},
+    lwstat, waccess,
 };
+#[cfg(windows)]
+use crate::wutil::AccessFlags;
 use crate::{
     complete::{
         CompleteFlags, Completion, CompletionReceiver, PROG_COMPLETE_SEP, ReplacementScope,
@@ -19,16 +19,16 @@ use crate::{
 use fish_common::{UnescapeFlags, UnescapeStringStyle, unescape_string};
 use fish_fallback::wcscasecmp;
 use fish_feature_flags::{FeatureFlag, feature_test};
-use fish_wcstringutil::{
-    CaseSensitivity, string_fuzzy_match_string, string_suffixes_string_case_insensitive,
-    strip_executable_suffix,
-};
+use fish_wcstringutil::{CaseSensitivity, string_fuzzy_match_string};
+#[cfg(unix)]
+use fish_wcstringutil::{string_suffixes_string_case_insensitive, strip_executable_suffix};
 use fish_widestring::{ANY_CHAR, ANY_STRING, ANY_STRING_RECURSIVE};
 #[cfg(unix)]
 use nix::unistd::AccessFlags;
 use std::cmp::Ordering;
+use std::{borrow::Cow, cell::LazyCell, collections::HashSet, io};
 #[cfg(unix)]
-use std::{borrow::Cow, cell::LazyCell, collections::HashSet, os::unix::fs::MetadataExt as _};
+use std::os::unix::fs::MetadataExt as _;
 
 localizable_consts!(
     COMPLETE_EXEC_DESC "command"
@@ -39,7 +39,7 @@ localizable_consts!(
     COMPLETE_DIRECTORY_DESC "directory"
 );
 
-#[derive(PartialEq)]
+#[derive(Debug)]
 pub enum WildcardResult {
     /// The wildcard did not match.
     NoMatch,
@@ -49,6 +49,19 @@ pub enum WildcardResult {
     Cancel,
     /// Expansion produced too many results.
     Overflow,
+    /// Native identity or filesystem policy could not be represented safely.
+    Error(io::Error),
+}
+
+impl PartialEq for WildcardResult {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Error(left), Self::Error(right)) => {
+                left.kind() == right.kind() && left.raw_os_error() == right.raw_os_error()
+            }
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
 }
 
 // This does something horrible refactored from an even more horrible function.
@@ -250,7 +263,9 @@ fn wildcard_complete_internal(
                         continue;
                     }
                     // Note early return
-                    WildcardResult::Cancel | WildcardResult::Overflow => return submatch_res,
+                    WildcardResult::Cancel | WildcardResult::Overflow | WildcardResult::Error(_) => {
+                        return submatch_res;
+                    }
                 }
             }
 
@@ -292,7 +307,6 @@ pub fn wildcard_complete(
 /// \param is_dir Whether the file is a directory or not (might be behind a link)
 /// \param is_link Whether it's a link (that might point to a directory)
 /// \param definitely_executable Whether we know that it is executable, or don't know
-#[cfg(unix)]
 fn file_get_desc(
     filename: &wstr,
     is_dir: bool,
@@ -323,7 +337,6 @@ fn file_get_desc(
 /// Test if the given file is an executable (if executables_only) or directory (if
 /// directories_only). If it matches, call wildcard_complete() with some description that we make
 /// up. Note that the filename came from a readdir() call, so we know it exists.
-#[cfg(unix)]
 fn wildcard_test_flags_then_complete(
     filepath: &wstr,
     mut filename: &wstr,
@@ -331,7 +344,7 @@ fn wildcard_test_flags_then_complete(
     expand_flags: ExpandFlags,
     out: &mut CompletionReceiver,
     entry: &DirEntry,
-) -> bool {
+) -> WildcardResult {
     let executables_only = expand_flags.executables_only();
     let need_directory = expand_flags.directories_only();
     let mut flags = CompleteFlags::default();
@@ -341,18 +354,19 @@ fn wildcard_test_flags_then_complete(
 
     // Check if it will match before stat().
     if wildcard_complete(filename, wc, None, None, expand_flags, flags) != WildcardResult::Match {
-        return false;
+        return WildcardResult::NoMatch;
     }
 
     if need_directory && !entry.is_dir() {
-        return false;
+        return WildcardResult::NoMatch;
     }
 
+    #[cfg(unix)]
     if executables_only
         && is_windows_subsystem_for_linux(WSL::Any)
         && string_suffixes_string_case_insensitive(L!(".dll"), filename)
     {
-        return false;
+        return WildcardResult::NoMatch;
     }
 
     // regular file *excludes* broken links - we have no use for them as commands.
@@ -361,11 +375,12 @@ fn wildcard_test_flags_then_complete(
     let is_executable =
         LazyCell::new(|| *is_regular_file && waccess(filepath, AccessFlags::X_OK).is_ok());
     if executables_only && !*is_executable {
-        return false;
+        return WildcardResult::NoMatch;
     }
 
     let filepath_stat = LazyCell::new(|| lwstat(filepath));
 
+    #[cfg(unix)]
     // For executables on Cygwin, prefer the name without the .exe, to match
     // better with Unix names, but only if there isn't also a file without that
     // extension and the user hasn't started to type the extension
@@ -398,13 +413,13 @@ fn wildcard_test_flags_then_complete(
                     md.is_symlink()
                 } else {
                     // This file is no longer be usable, skip it.
-                    return false;
+                    return WildcardResult::NoMatch;
                 }
             }
         };
         // If we have executables_only, we already checked waccess above,
         // so we tell file_get_desc that this file is definitely executable so it can skip the check.
-        Some(file_get_desc(filename, entry.is_dir(), is_link, executables_only).to_owned())
+        Some(file_get_desc(filepath, entry.is_dir(), is_link, executables_only).to_owned())
     } else {
         None
     };
@@ -425,16 +440,23 @@ fn wildcard_test_flags_then_complete(
     };
 
     wildcard_complete(&filename, wc, desc_func, Some(out), expand_flags, flags)
-        == WildcardResult::Match
 }
 
-#[cfg(unix)]
 mod expander {
 
     use crate::{
         expand::ForCdArgument,
         path::append_path_component,
-        wutil::{DevInode, dir_iter::DirIter, normalize_path},
+        wutil::dir_iter::DirIter,
+    };
+    #[cfg(unix)]
+    use crate::wutil::DevInode as DirectoryIdentity;
+    #[cfg(unix)]
+    use crate::wutil::normalize_path;
+    #[cfg(windows)]
+    use crate::{
+        path::{native_path_text, native_resolve_path},
+        wutil::NativeFileIdentity as DirectoryIdentity,
     };
 
     use super::*;
@@ -456,8 +478,8 @@ mod expander {
         working_directory: &'e wstr,
         /// The set of items we have resolved, used to efficiently avoid duplication.
         completion_set: HashSet<WString>,
-        /// The set of (device, inode) pairs we have visited, used to avoid symlink loops.
-        visited_files: HashSet<DevInode>,
+        /// Complete directory identities on the active ancestry, not a global deduplication set.
+        visited_files: HashSet<DirectoryIdentity>,
         /// Flags controlling expansion.
         flags: ExpandFlags,
         /// Resolved items get inserted into here. This is transient of course.
@@ -468,6 +490,8 @@ mod expander {
         did_overflow: bool,
         /// Whether we have successfully added any completions.
         did_add: bool,
+        /// Latched native identity/policy failure. Ordinary inaccessible branches remain nonmatches.
+        error: Option<io::Error>,
     }
 
     impl<'e> WildCardExpander<'e> {
@@ -490,6 +514,7 @@ mod expander {
                 did_add: false,
                 did_interrupt: false,
                 did_overflow: false,
+                error: None,
             }
         }
 
@@ -538,7 +563,10 @@ mod expander {
                     prefix.push('/');
                     self.expand(base_dir, wc_remainder.unwrap(), &prefix, info);
                 }
-            } else if !segment_has_wildcards && !is_last_segment {
+            } else if !segment_has_wildcards
+                && !is_last_segment
+                && (cfg!(unix) || wc_segment == "." || wc_segment == "..")
+            {
                 // Literal intermediate match. Note that we may not be able to actually read the directory
                 // (issue #2099).
                 let wc_remainder = wc_remainder.unwrap(); // TODO: if-let-chains
@@ -559,7 +587,7 @@ mod expander {
                     && waccess(&intermediate_dirpath, AccessFlags::F_OK).is_err()
                 {
                     assert!(self.flags.for_completions);
-                    if let Ok(mut base_dir_iter) = self.open_dir(base_dir, false) {
+                    if let Some(mut base_dir_iter) = self.open_dir(base_dir, false) {
                         self.expand_literal_intermediate_segment_with_fuzz(
                             base_dir,
                             &mut base_dir_iter,
@@ -571,8 +599,9 @@ mod expander {
                     }
                 }
             } else {
-                // Either a wildcard intermediate segment or the last segment.
-                assert!(!wc_segment.is_empty() && (segment_has_wildcards || is_last_segment));
+                // Wildcard or final segment. Windows also enumerates literal ancestors to retain
+                // native spelling and the parent directory's actual case policy.
+                assert!(!wc_segment.is_empty());
 
                 if !is_last_segment && matches!(wc_segment.as_char_slice(), [ANY_STRING_RECURSIVE])
                 {
@@ -589,7 +618,7 @@ mod expander {
                 }
 
                 // return "." and ".." entries if we're doing completions
-                let Ok(mut dir) = self.open_dir(
+                let Some(mut dir) = self.open_dir(
                     base_dir, /* return . and .. */
                     self.flags.for_completions,
                 ) else {
@@ -605,6 +634,7 @@ mod expander {
                         wc_remainder,
                         effective_prefix,
                         info,
+                        false,
                     );
                 } else {
                     // Last wildcard segment, nonempty wildcard.
@@ -638,15 +668,18 @@ mod expander {
                     any_tail,
                     effective_prefix,
                     info,
+                    true,
                 );
             }
         }
 
-        pub fn status_code(&self) -> WildcardResult {
+        pub fn status_code(&mut self) -> WildcardResult {
             if self.did_interrupt {
                 WildcardResult::Cancel
             } else if self.did_overflow {
                 WildcardResult::Overflow
+            } else if let Some(error) = self.error.take() {
+                WildcardResult::Error(error)
             } else if self.did_add {
                 WildcardResult::Match
             } else {
@@ -664,13 +697,17 @@ mod expander {
 
             if !self.flags.for_completions {
                 // Trailing slash and not accepting incomplete, e.g. `echo /xyz/`. Insert this file after checking it exists.
-                if waccess(base_dir, AccessFlags::F_OK).is_ok() {
+                #[cfg(unix)]
+                let exists = waccess(base_dir, AccessFlags::F_OK).is_ok();
+                #[cfg(windows)]
+                let exists = self.open_dir(base_dir, false).is_some();
+                if exists {
                     self.add_expansion_result(base_dir.to_owned());
                 }
                 return;
             }
             // Trailing slashes and accepting incomplete, e.g. `echo /xyz/<tab>`. Everything is added.
-            let Ok(mut dir) = self.open_dir(base_dir, false) else {
+            let Some(mut dir) = self.open_dir(base_dir, false) else {
                 return;
             };
 
@@ -689,14 +726,27 @@ mod expander {
             wc_remainder: &wstr,
             prefix: &wstr,
             info: ParentInfo,
+            recursive_descent: bool,
         ) {
+            #[cfg(windows)]
+            let case_sensitive = base_dir_iter.case_sensitive();
+            #[cfg(unix)]
+            let case_sensitive = true;
+            #[cfg(unix)]
             let is_final = wc_remainder.is_empty() && !wc_segment.contains(ANY_STRING_RECURSIVE);
+            #[cfg(windows)]
+            let root_identity = recursive_descent.then(|| base_dir_iter.file_identity());
+            #[cfg(windows)]
+            let remove_root_identity =
+                root_identity.is_some_and(|identity| self.visited_files.insert(identity));
             while !self.interrupted_or_overflowed() {
-                let Some(Ok(entry)) = base_dir_iter.next() else {
-                    break;
+                let entry = match base_dir_iter.next() {
+                    Some(Ok(entry)) => entry,
+                    Some(Err(error)) => { self.traversal_error(error); break; }
+                    None => break,
                 };
                 // Note that it's critical we ignore leading dots here, else we may descend into . and ..
-                if !wildcard_match(&entry.name, wc_segment, true) {
+                if !wildcard_match_with_case_policy(&entry.name, wc_segment, true, case_sensitive) {
                     // Doesn't match the wildcard for this segment, skip it.
                     continue;
                 }
@@ -710,7 +760,11 @@ mod expander {
                 //
                 // We only do this when we are the last `*/` component,
                 // because we're a bit inconsistent on when we will enter loops.
-                if is_final && entry.is_possible_link() == Some(false) {
+                let skip_cycle_check = cfg!(windows) && !recursive_descent;
+                #[cfg(unix)]
+                let skip_cycle_check =
+                    skip_cycle_check || (is_final && entry.is_possible_link() == Some(false));
+                if skip_cycle_check {
                     let full_path: WString = base_dir.to_owned() + entry.name.as_utfstr() + L!("/");
                     let prefix: WString = prefix.to_owned() + wc_segment + L!("/");
 
@@ -718,8 +772,14 @@ mod expander {
                     continue;
                 }
 
+                #[cfg(unix)]
                 let Some(dev_inode) = entry.dev_inode() else {
                     continue;
+                };
+                #[cfg(windows)]
+                let dev_inode = match entry.file_identity() {
+                    Ok(identity) => identity,
+                    Err(error) => { self.traversal_error(error); continue; }
                 };
 
                 if !self.visited_files.insert(dev_inode) {
@@ -735,6 +795,10 @@ mod expander {
                 // Now remove the visited file. This is for #2414: only directories "beneath" us should be
                 // considered visited.
                 self.visited_files.remove(&dev_inode);
+            }
+            #[cfg(windows)]
+            if remove_root_identity {
+                self.visited_files.remove(&root_identity.unwrap());
             }
         }
 
@@ -752,8 +816,10 @@ mod expander {
             // Mark that all children of this directory have a fuzzy ancestor.
             info.has_fuzzy_ancestor = true;
             while !self.interrupted_or_overflowed() {
-                let Some(Ok(entry)) = base_dir_iter.next() else {
-                    break;
+                let entry = match base_dir_iter.next() {
+                    Some(Ok(entry)) => entry,
+                    Some(Err(error)) => { self.traversal_error(error); break; }
+                    None => break,
                 };
 
                 // Don't bother with . and ..
@@ -818,9 +884,15 @@ mod expander {
             // So we can use the information in case we need it.
             let need_dir = self.flags.directories_only();
 
+            #[cfg(windows)]
+            let case_sensitive = base_dir_iter.case_sensitive();
+            #[cfg(unix)]
+            let case_sensitive = true;
             while !self.interrupted_or_overflowed() {
-                let Some(Ok(entry)) = base_dir_iter.next() else {
-                    break;
+                let entry = match base_dir_iter.next() {
+                    Some(Ok(entry)) => entry,
+                    Some(Err(error)) => { self.traversal_error(error); break; }
+                    None => break,
                 };
 
                 // Note that is_dir() may cause a stat() call.
@@ -839,10 +911,11 @@ mod expander {
                     );
                 } else {
                     // Normal wildcard expansion, not for completions.
-                    if wildcard_match(
+                    if wildcard_match_with_case_policy(
                         &entry.name,
                         wc,
                         true, /* skip files with leading dots */
+                        case_sensitive,
                     ) {
                         self.add_expansion_result(base_dir.to_owned() + entry.name.as_utfstr());
                     }
@@ -853,16 +926,30 @@ mod expander {
         /// Indicate whether we should cancel wildcard expansion. This latches 'interrupt'.
         fn interrupted_or_overflowed(&mut self) -> bool {
             self.did_interrupt |= (self.cancel_checker)();
-            self.did_interrupt || self.did_overflow
+            self.did_interrupt || self.did_overflow || self.error.is_some()
         }
 
         fn add_expansion_result(&mut self, result: WString) {
             // This function is only for the non-completions case.
             assert!(!self.flags.for_completions);
+            #[cfg(windows)]
+            let result = {
+                let mut result = result;
+                native_glob_restore_namespace(&mut result);
+                // A physical cwd may be an extended path, but a relative result still has
+                // ordinary-name rules. Never emit a spelling that aliases a different object.
+                if let Err(error) = native_resolve_path(&result, self.working_directory) {
+                    self.traversal_error(error);
+                    return;
+                }
+                result
+            };
             #[allow(clippy::collapsible_if)]
             if self.completion_set.insert(result.clone()) {
                 if self.resolved_completions.add(result).is_err() {
                     self.did_overflow = true;
+                } else {
+                    self.did_add = true;
                 }
             }
         }
@@ -873,30 +960,46 @@ mod expander {
         //
         // The result does not have a leading slash, but does have a trailing slash if non-empty.
         fn descend_unique_hierarchy(&mut self, start_point: &mut WString) -> WString {
-            assert!(!start_point.is_empty() && start_point.starts_with('/'));
+            assert!(!start_point.is_empty());
 
             let mut unique_hierarchy = WString::new();
             let abs_unique_hierarchy = start_point;
 
-            // Ensure we don't fall into a symlink loop.
-            // Ideally we would compare both devices and inodes, but devices require a stat call, so we
-            // use inodes exclusively.
+            #[cfg(unix)]
             let mut visited_inodes: HashSet<libc::ino_t> = HashSet::new();
+            // Native IDs must retain the volume and all 128 file-ID bits.
+            #[cfg(windows)]
+            let mut visited: HashSet<DirectoryIdentity> = HashSet::new();
 
             loop {
                 let mut unique_entry = WString::new();
-                let Ok(mut dir) = DirIter::new(abs_unique_hierarchy) else {
-                    break;
+                let mut dir = match DirIter::new(abs_unique_hierarchy) {
+                    Ok(dir) => dir,
+                    Err(error) => {
+                        self.traversal_error(error);
+                        break;
+                    }
                 };
 
-                while let Some(Ok(entry)) = dir.next() {
+                while !self.interrupted_or_overflowed() {
+                    let entry = match dir.next() {
+                        Some(Ok(entry)) => entry,
+                        Some(Err(error)) => { self.traversal_error(error); unique_entry.clear(); break; }
+                        None => break,
+                    };
                     if entry.name.is_empty() || entry.name.starts_with('.') {
                         // either hidden, or . and .. entries -- skip them
                         continue;
                     }
-                    if !visited_inodes.insert(entry.inode) {
-                        // Either we've visited this inode already or there's multiple files;
-                        // either way stop.
+                    #[cfg(unix)]
+                    let already_visited = !visited_inodes.insert(entry.inode);
+                    #[cfg(windows)]
+                    let already_visited = match entry.file_identity() {
+                        Ok(identity) => !visited.insert(identity),
+                        Err(error) => { self.traversal_error(error); true }
+                    };
+                    if already_visited {
+                        unique_entry.clear();
                         break;
                     } else if entry.is_dir() && unique_entry.is_empty() {
                         // first candidate
@@ -918,7 +1021,10 @@ mod expander {
                 unique_hierarchy.push('/');
 
                 append_path_component(abs_unique_hierarchy, &unique_entry);
+                #[cfg(unix)]
                 abs_unique_hierarchy.push('/');
+                #[cfg(windows)]
+                abs_unique_hierarchy.push(if abs_unique_hierarchy.starts_with(L!("\\\\?\\")) { '\\' } else { '/' });
             }
 
             unique_hierarchy
@@ -935,17 +1041,26 @@ mod expander {
         ) {
             // This function is only for the completions case.
             assert!(self.flags.for_completions);
-            let mut abs_path = self.working_directory.to_owned();
-            append_path_component(&mut abs_path, filepath);
-
-            // We must normalize the path to allow 'cd ..' to operate on logical paths.
-            if self.flags.is_cd_argument() {
-                abs_path = normalize_path(&abs_path, true);
-            }
+            #[cfg(unix)]
+            let mut abs_path = {
+                let mut path = self.working_directory.to_owned();
+                append_path_component(&mut path, filepath);
+                if self.flags.is_cd_argument() {
+                    path = normalize_path(&path, true);
+                }
+                path
+            };
+            #[cfg(windows)]
+            let mut abs_path = match native_resolve_path(&native_glob_filesystem_text(filepath), self.working_directory)
+                .and_then(|path| native_path_text(&path))
+            {
+                Ok(path) => path,
+                Err(error) => { self.traversal_error(error); return; }
+            };
 
             let before = self.resolved_completions.len();
 
-            if wildcard_test_flags_then_complete(
+            let did_match = match wildcard_test_flags_then_complete(
                 &abs_path,
                 filename,
                 wildcard,
@@ -953,6 +1068,13 @@ mod expander {
                 self.resolved_completions,
                 entry,
             ) {
+                WildcardResult::Match => true,
+                WildcardResult::NoMatch => false,
+                WildcardResult::Overflow => { self.did_overflow = true; false }
+                WildcardResult::Cancel => { self.did_interrupt = true; false }
+                WildcardResult::Error(error) => { self.error = Some(error); false }
+            };
+            if did_match {
                 // Hack. We added this completion result based on the last component of the wildcard.
                 // Prepend our prefix to each wildcard that replaces its token.
                 // Note that prepend_token_prefix is a no-op unless COMPLETE_REPLACES_TOKEN is set
@@ -989,21 +1111,85 @@ mod expander {
 
         // Helper to resolve using our prefix.
         /// dotdot default is false
-        fn open_dir(&self, base_dir: &wstr, dotdot: bool) -> std::io::Result<DirIter> {
-            let mut path = self.working_directory.to_owned();
-            append_path_component(&mut path, base_dir);
-            if self.flags.is_cd_argument() {
-                // cd operates on logical paths.
-                // for example, cd ../<tab> should complete "without resolving symlinks".
-                path = normalize_path(&path, true);
-            }
-
-            match dotdot {
-                true => DirIter::new_with_dots(&path),
-                false => DirIter::new(&path),
+        fn open_dir(&mut self, base_dir: &wstr, dotdot: bool) -> Option<DirIter> {
+            let result = (|| {
+                #[cfg(unix)]
+                let path = {
+                    let mut path = self.working_directory.to_owned();
+                    append_path_component(&mut path, base_dir);
+                    if self.flags.is_cd_argument() {
+                        path = normalize_path(&path, true);
+                    }
+                    path
+                };
+                #[cfg(windows)]
+                let path = if base_dir.is_empty() {
+                    self.working_directory.to_owned()
+                } else {
+                    native_path_text(&native_resolve_path(
+                        &native_glob_filesystem_text(base_dir), self.working_directory,
+                    )?)?
+                };
+                if dotdot { DirIter::new_with_dots(&path) } else { DirIter::new(&path) }
+            })();
+            match result {
+                Ok(dir) => Some(dir),
+                Err(error) => { self.traversal_error(error); None }
             }
         }
+
+        fn traversal_error(&mut self, error: io::Error) {
+            #[cfg(windows)]
+            if !matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory | io::ErrorKind::PermissionDenied) {
+                self.error.get_or_insert(error);
+            }
+            #[cfg(unix)]
+            let _ = error;
+        }
+
     }
+}
+
+/// The shared walker uses '/', while explicit Win32 extended identities require '\\'.
+#[cfg(windows)]
+fn native_glob_restore_namespace(path: &mut WString) {
+    if path.starts_with(L!("//?/")) {
+        for character in path.as_char_slice_mut() {
+            if *character == '/' { *character = '\\'; }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn native_glob_filesystem_text(path: &wstr) -> Cow<'_, wstr> {
+    if path.starts_with(L!("//?/")) {
+        let mut native = path.to_owned();
+        native_glob_restore_namespace(&mut native);
+        Cow::Owned(native)
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
+/// Separate a supported native root without treating its server/share/drive as a glob segment.
+/// All namespace and identity validation remains in the common native path policy.
+#[cfg(windows)]
+fn native_glob_root(pattern: &wstr, cwd: &wstr) -> io::Result<usize> {
+    let mut identity_pattern = pattern.to_owned();
+    for character in identity_pattern.as_char_slice_mut() {
+        if matches!(*character, ANY_CHAR | ANY_STRING | ANY_STRING_RECURSIVE) {
+            *character = 'x';
+        }
+    }
+    let native_pattern = native_glob_filesystem_text(&identity_pattern);
+    crate::path::native_resolve_path(
+        if native_pattern.is_empty() { L!(".") } else { &native_pattern }, cwd,
+    )?;
+    let root = crate::path::native_root_length(&native_pattern);
+    if wildcard_has_internal(&pattern[..root]) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "wildcards are not supported in native filesystem roots"));
+    }
+    Ok(root)
 }
 
 /// Expand the wildcard by matching against the filesystem.
@@ -1014,8 +1200,9 @@ mod expander {
 /// wildcard_expand for matches. On the last segment, matching is made to any file, and all matches
 /// are inserted to the list.
 ///
-/// If wildcard_expand encounters any errors (such as insufficient privileges) during matching, no
-/// error messages will be printed and wildcard_expand will continue the matching process.
+/// Inaccessible or disappearing branches remain nonmatches, as on Unix. Windows identity-codec,
+/// unknown-reparse and unsupported file-ID/case-policy failures return Error rather than guessing
+/// names, disabling loop protection or inventing a case policy. No diagnostic is printed here.
 ///
 /// \param wc The wildcard string
 /// \param working_directory The working directory
@@ -1024,7 +1211,6 @@ mod expander {
 /// \param cancel_checker A function to call to check for cancellation
 /// \param output The completion receiver to receive expanded wildcards
 ///
-#[cfg(unix)]
 pub fn wildcard_expand_string<'closure>(
     wc: &wstr,
     working_directory: &wstr,
@@ -1045,6 +1231,9 @@ pub fn wildcard_expand_string<'closure>(
     // Hackish fix for issue #1631. Embedded nulls are never allowed in a filename,
     // so we just check for them and return 0 (no matches) if there is an embedded null.
     if wc.contains('\0') {
+        #[cfg(windows)]
+        return WildcardResult::Error(io::Error::new(io::ErrorKind::InvalidInput, "NUL in filesystem wildcard"));
+        #[cfg(unix)]
         return WildcardResult::NoMatch;
     }
 
@@ -1062,11 +1251,35 @@ pub fn wildcard_expand_string<'closure>(
     // Check for a leading slash. If we find one, we have an absolute path: the prefix is empty, the
     // base dir is /, and the wildcard is the remainder. If we don't find one, the prefix is the
     // working directory, the base dir is empty.
+    #[cfg(unix)]
     let (prefix, base_dir, effective_wc) = if wc.starts_with(L!("/")) {
         (L!(""), L!("/"), wc.slice_from(1))
     } else {
         (working_directory, L!(""), wc)
     };
+    #[cfg(windows)]
+    if wc.starts_with(L!("//?/")) {
+        return WildcardResult::Error(io::Error::new(io::ErrorKind::InvalidInput, "extended filesystem paths require backslash separators"));
+    }
+    #[cfg(windows)]
+    let normalized_wc = if wc.contains('\\') {
+        let mut normalized = wc.to_owned();
+        for character in normalized.as_char_slice_mut() {
+            if *character == '\\' { *character = '/'; }
+        }
+        Cow::Owned(normalized)
+    } else {
+        Cow::Borrowed(wc)
+    };
+    #[cfg(windows)]
+    let root_len = match native_glob_root(&normalized_wc, working_directory) {
+        Ok(root_len) => root_len,
+        Err(error) => return WildcardResult::Error(error),
+    };
+    #[cfg(windows)]
+    let (prefix, base_dir, effective_wc) = (
+        working_directory, &normalized_wc[..root_len], &normalized_wc[root_len..],
+    );
 
     let mut expander = WildCardExpander::new(prefix, flags, &mut cancel_checker, output);
     expander.expand(base_dir, effective_wc, base_dir, ParentInfo::default());
@@ -1087,8 +1300,15 @@ pub fn wildcard_match(
     pattern: impl AsRef<wstr>,
     leading_dots_fail_to_match: bool,
 ) -> bool {
-    let name = name.as_ref();
-    let pattern = pattern.as_ref();
+    wildcard_match_with_case_policy(name.as_ref(), pattern.as_ref(), leading_dots_fail_to_match, true)
+}
+
+fn wildcard_match_with_case_policy(
+    name: &wstr,
+    pattern: &wstr,
+    leading_dots_fail_to_match: bool,
+    case_sensitive: bool,
+) -> bool {
     // Hackish fix for issue #270. Prevent wildcards from matching . or .., but we must still allow
     // literal matches.
     if leading_dots_fail_to_match && (name == "." || name == "..") {
@@ -1137,7 +1357,7 @@ pub fn wildcard_match(
                 }
                 c => {
                     // ordinary char
-                    if nx < name.len() && name.char_at(nx) == c {
+                    if nx < name.len() && wildcard_char_equal(name.char_at(nx), c, case_sensitive) {
                         px += 1;
                         nx += 1;
                         continue;
@@ -1156,6 +1376,26 @@ pub fn wildcard_match(
     }
     // Matched all of pattern to all of name. Success.
     true
+}
+
+#[inline]
+fn wildcard_char_equal(left: char, right: char, case_sensitive: bool) -> bool {
+    if left == right { return true; }
+    if case_sensitive { return false; }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CompareStringOrdinal(left: *const u16, left_len: i32, right: *const u16, right_len: i32, ignore_case: i32) -> i32;
+        }
+        let mut left_units = [0; 2];
+        let mut right_units = [0; 2];
+        let left = left.encode_utf16(&mut left_units);
+        let right = right.encode_utf16(&mut right_units);
+        return unsafe { CompareStringOrdinal(left.as_ptr(), left.len() as i32, right.as_ptr(), right.len() as i32, 1) } == 2;
+    }
+    #[cfg(unix)]
+    false
 }
 
 // Check if the string has any unescaped wildcards (e.g. ANY_STRING).

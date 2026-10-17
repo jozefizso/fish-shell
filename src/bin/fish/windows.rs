@@ -77,7 +77,10 @@ fn run() -> i32 {
             "unable to initialize native environment/current directory: {error}"
         ));
     }
-    let mut parser = Parser::new(variables, CancelBehavior::Return);
+    let mut parser = match Parser::new(variables, CancelBehavior::Return) {
+        Ok(parser) => parser,
+        Err(error) => return diagnostic(&format!("unable to initialize native parser: {error}")),
+    };
     parser.set_var(
         L!("argv"),
         ParserEnvSetMode::new(EnvMode::GLOBAL),

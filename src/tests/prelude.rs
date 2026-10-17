@@ -96,7 +96,8 @@ pub struct TestParser {
 impl TestParser {
     pub fn new() -> TestParser {
         TestParser {
-            parser: Parser::new(EnvStack::new(), CancelBehavior::default()),
+            parser: Parser::new(EnvStack::new(), CancelBehavior::default())
+                .expect("test parser initialization"),
             pushed_dirs: Vec::new(),
         }
     }

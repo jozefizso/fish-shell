@@ -477,7 +477,14 @@ fn throwing_main() -> i32 {
 
     // Construct the root parser!
     let env = EnvStack::globals().create_child(true /* dispatches_var_changes */);
-    let parser = &mut Parser::new(env, CancelBehavior::Clear);
+    let mut parser = match Parser::new(env, CancelBehavior::Clear) {
+        Ok(parser) => parser,
+        Err(error) => {
+            eprintf!("fish: Unable to initialize parser: %s\n", error.to_string());
+            return 1;
+        }
+    };
+    let parser = &mut parser;
     parser.set_syncs_uvars(!opts.no_config);
 
     if !opts.no_exec && !opts.no_config {
