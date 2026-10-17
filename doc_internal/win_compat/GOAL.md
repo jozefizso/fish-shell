@@ -8,7 +8,7 @@ The first runnable milestone is builtin-only `fish.exe -N -c ...`. The completed
 
 This goal implements the five workstreams from the reviewed proposal. The fifth workstream is split into two phases so builtin evaluation and external process execution have separate, testable deliveries. It does **not** promise full Windows feature parity. ARM64, interactive use and additional shell capabilities require separately approved scope.
 
-**Status:** implementation in progress. Native build-support behavior is verified below; remaining phase gates are not yet complete. Test IDs define acceptance requirements, not a claim that all suites already exist or pass.
+**Status:** all six phase deliveries are implemented and locally verified for the contract below. Native debug/release acceptance is green; this is a batch proof of concept, not full Windows fish support. Local execution evidence and the native CI procedure are recorded at the end of this document; no remote GitHub run is claimed.
 
 ## Explicitly out-of-scope contracts
 
@@ -79,7 +79,7 @@ Native path support initially covers ordinary local absolute drive paths, includ
 
 **Depends on:** Phase 1.
 
-**Owners:** [widestring](../../crates/widestring/src/lib.rs), [common](../../crates/common/src/lib.rs), [util](../../crates/util/src/lib.rs), [thread initialization](../../src/threads/threads.rs), [locale](../../src/locale.rs), and any retained [tempfile](../../crates/tempfile/src/lib.rs) functionality.
+**Owners:** [widestring](../../crates/widestring/src/lib.rs), [common](../../crates/common/src/lib.rs), [util](../../crates/util/src/lib.rs), [native thread initialization](../../src/threads/windows.rs), [locale](../../src/locale.rs), and retained [tempfile](../../crates/tempfile/src/lib.rs) functionality.
 
 ### Delivery
 
@@ -101,8 +101,8 @@ Native path support initially covers ordinary local absolute drive paths, includ
 
 ### Phase 2 implementation and test entry points
 
-The string/leaf-runtime implementation is present; execution evidence is still
-pending integration, so this is not a Phase 2 completion claim.
+The native string and leaf-runtime services are implemented and exercised through
+the production components. Runtime initialization is tested separately from codecs.
 
 - `fish-widestring` retains the Unix OS-string signatures and byte-stream codec.
   Windows `osstr2wcstring` and `wcs2osstring` return `Result<_, NativeStringError>`.
@@ -111,6 +111,13 @@ pending integration, so this is not a Phase 2 completion claim.
   Unicode. `utf16_to_wcstring` and `wcstring_to_utf16` expose the same checked
   UTF-16 boundary without terminators; redirected bytes continue to use
   `bytes2wcstring`/`wcs2bytes`, not these identity-bearing conversions.
+  Native text entering the interpreter must pass through `native_to_shell_text`
+  (or its ownership-preserving `native_to_shell_text_owned` variant) exactly
+  once: literal reserved Unicode becomes the byte codec's canonical
+  representation, so builtin output cannot mistake literal private-use text for
+  raw bytes. At interpreter-to-OS identity boundaries, use
+  `shell_text_to_osstring`; it decodes that representation and rejects invalid
+  UTF-8 or NUL instead of replacing bytes. Literal OS conversions remain separate.
 - Portable `fish-common` escaping/guards and `fish-util` sorting/time helpers no
   longer compile Unix descriptor, terminal, signal or errno helpers on Windows.
   Native callers must use their real native I/O and captured `std::io::Error`;
@@ -129,16 +136,35 @@ cargo test --target x86_64-pc-windows-msvc -p fish-tempfile --test runtime -- --
 cargo test --target x86_64-pc-windows-msvc -p fish-common -p fish-util --lib
 ```
 
-The first command must execute all three tests:
-`tests::w2_text_native_os_roundtrip` (W2-TEXT),
-`tests::w2_invalid_native_os_rejects` and
+The first command must execute all five tests:
+`tests::w2_text_native_os_roundtrip` and
+`tests::w2_text_native_shell_roundtrip` (W2-TEXT),
+`tests::w2_invalid_native_os_rejects`,
+`tests::w2_invalid_shell_identity_rejects` and
 `tests::w2_invalid_redirected_bytes_roundtrip` (W2-INVALID).
+The canonical-interpreter tests additionally cover every reserved scalar and
+distinguish native private-use characters, arbitrary bytes and replacement text.
 The tempfile command must execute both
 `w2_runtime_tempfile_collision_and_cleanup` and
 `creation_errors_are_not_retried_as_collisions`; these exercise real filesystem
-storage, not mocked creation. They cover only the retained-tempfile portion of
-W2-RUNTIME; actual initialization, main/worker identity and native-error-domain
-integration remain separate mandatory acceptance assertions.
+storage, not mocked creation. They cover the retained-tempfile portion of
+W2-RUNTIME. The real initialization assertions are in the probe module
+`tests/windows_native/runtime.rs`, invoked by the isolated native integration
+test `native_runtime_initialization`:
+
+```text
+cargo test --target x86_64-pc-windows-msvc --no-default-features --test windows_native native_runtime_initialization -- --exact --nocapture
+```
+
+This command must discover and execute exactly one test. Its child calls the
+production thread/locale initializers on the actual process startup thread,
+checks main-versus-worker identity and CRT/numeric `C` locale despite inherited
+locale settings, and propagates a real `wstat` missing-parent error as Win32
+`ERROR_PATH_NOT_FOUND` (3), even after a later last-error overwrite. Repeat with
+`--release` for release-library evidence. The combined native acceptance registry
+also includes W2-RUNTIME: 15 required cases per profile, 30 executions across
+the selected debug and release fish artifacts. Executed counts and toolchains are
+recorded under Implementation evidence.
 
 Relevant Unix regression command:
 
@@ -151,7 +177,7 @@ cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile
 
 **Depends on:** Phases 1–2.
 
-**Owners:** [I/O streams](../../src/io.rs), [descriptor wrappers](../../src/fds.rs), [common I/O helpers](../../crates/common/src/lib.rs), [logging](../../src/flog.rs) and [panic handling](../../src/panic.rs).
+**Owners:** [native I/O streams](../../src/io_windows.rs), [native handle wrappers](../../src/fds_windows.rs), [common I/O helpers](../../crates/common/src/lib.rs), [logging](../../src/flog.rs) and [panic handling](../../src/panic.rs).
 
 ### Delivery
 
@@ -175,7 +201,7 @@ cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile
 
 **Depends on:** Phases 1–3.
 
-**Owners:** [environment startup](../../src/env/environment.rs), [variable representation](../../src/env/var.rs), [scope/export implementation](../../src/env/impl/environment.rs), [dispatch](../../src/env_dispatch.rs), [paths](../../src/path.rs), [path utilities](../../src/wutil/mod.rs) and [parser directory state](../../src/parser.rs).
+**Owners:** [native environment startup/export](../../src/env/native.rs), [shared environment](../../src/env/environment.rs), [variable representation](../../src/env/var.rs), [scope/export implementation](../../src/env/impl/environment.rs), [native dispatch](../../src/env_dispatch/windows.rs), [native paths](../../src/path/windows.rs), [path utilities](../../src/wutil/mod.rs) and [parser directory state](../../src/parser.rs).
 
 ### Delivery
 
@@ -199,7 +225,7 @@ cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile
 
 **Depends on:** Phases 1–4.
 
-**Owners:** [executable startup](../../src/bin/fish.rs), [parser](../../src/parser.rs), [evaluator](../../src/parse_execution.rs), [expansion](../../src/expand.rs), [execution dispatch](../../src/exec.rs) and [selected builtins](../../src/builtins/mod.rs).
+**Owners:** [native executable startup](../../src/bin/fish/windows.rs), [parser](../../src/parser.rs), [evaluator](../../src/parse_execution.rs), [expansion](../../src/expand.rs), [native execution dispatch](../../src/exec_windows.rs) and [selected builtins](../../src/builtins/mod.rs).
 
 ### Delivery
 
@@ -223,7 +249,7 @@ cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile
 
 **Depends on:** Phases 1–5.
 
-**Owners:** [execution](../../src/exec.rs), [process/status records](../../src/proc.rs), [job groups](../../src/job_group.rs), [command resolution](../../src/path.rs), [evaluator dispatch](../../src/parse_execution.rs), [native CI](../../.github/workflows/test.yml) and the native test harness.
+**Owners:** [native execution](../../src/exec_windows.rs), [shared process records](../../src/proc.rs), [native status](../../src/proc_status_windows.rs), [job groups](../../src/job_group.rs), [native command resolution](../../src/path/windows.rs), [evaluator dispatch](../../src/parse_execution.rs), [native CI](../../.github/workflows/test.yml) and the native test harness.
 
 ### Delivery
 
@@ -252,28 +278,163 @@ cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile
 - Native debug and release `fish.exe` evaluate the supported fish subset and complete real sequential child execution under the declared argument/environment/cwd/stream/status contract.
 - The three POSIX contracts remain explicitly unsupported. Deferred capabilities have clear nonzero diagnostics when reachable, without side effects from the rejected job.
 - Preserve existing Unix contracts and update affected documentation/test commands to match the implemented capability set. Do not silently broaden the Windows support claim to all features, architectures or console modes.
-- Record phase completion evidence here as work lands: test command, target/toolchain, executed IDs/count, result and CI/artifact reference. Until then, every phase remains not started.
+- Record phase completion evidence here: test command, target/toolchain, executed IDs/count, result and artifact reference. Distinguish local execution from a remotely published CI run.
 
 The exploratory analyses in this directory describe possible later-port architecture; they do not expand this goal. Use [the component inventory](coverage.md), [workspace/build analysis](14-workspace-crates.md), [build tooling analysis](15-build-packaging-documentation.md) and [test infrastructure analysis](16-tests-benchmarks-ci.md) as source evidence. None is a substitute for executing the phase tests.
 
 ## Implementation evidence
 
-### Build-support slice — verified, Phase 1 closure pending
+### Verified target and implementation boundary
 
-Native build-host version acquisition no longer executes a POSIX shell. The production helper preserves Git revision prefixes and falls back to the package version without Git; malformed successful Git output is an error.
+Native execution was verified on Windows x64 using
+`x86_64-pc-windows-msvc`, with Rust/Cargo **1.85.0** (the declared minimum and
+native CI pin) and **1.95.0**. Unix regression execution used the `ubuntu-dev`
+WSL distribution, Rust/Cargo **1.92.0**, and `x86_64-unknown-linux-gnu`.
+WSL was used only for Unix regression checks, never to run the Windows prototype.
 
-- Windows MSVC: `cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --nocapture` — 3 passed.
-- Windows MSVC: `cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --exact w1_host --nocapture` — 1 passed. W1-HOST executes the real production version acquisition in a native subprocess, in a space/Unicode source-archive fixture without host tools, and checks its result file.
-- Linux via `ubuntu-dev`: `cargo test --locked -p fish-build-helper` — 3 unit and 1 integration tests passed.
-- Local execution evidence: session command artifacts `bg_2` and `bg_3`; native CI runs the same named cases and rejects missing discovery. These local process IDs are not durable CI URLs.
+The Windows target selects native startup, synchronous inherited-stream I/O,
+environment/path initialization, and explicit child creation at the owning module
+boundaries. The existing `Parser`, `ExecutionContext`, scope model, expansion
+pipeline and selected builtin implementations remain the language implementation.
+The Unix startup body lives in `src/bin/fish/unix.rs`; native startup lives in
+`src/bin/fish/windows.rs`. Native builds exclude Unix-only consumers of `nix` and
+PCRE2 and require `--no-default-features`; localization and manpage tooling are not
+part of the native graph.
 
-The native runtime/module closure and full `fish.exe` remain pending. This slice does not mark Phase 1 or the overall goal complete.
+| Phase | Executed native acceptance | Result |
+|---|---|---|
+| 1 — build support | W1-VERSION: 3 unit cases; W1-HOST: 1 isolated tool-free source-archive case. Actual debug/release linkage also closes the module/dependency boundary. | Passed |
+| 2 — strings/runtime | W2-TEXT/W2-INVALID: 5 codec cases; 2 tempfile integration cases. W2-RUNTIME runs in the registry and as an isolated debug/release runtime-initialization test. | Passed |
+| 3 — standard streams | W3-BYTES, W3-ERRORS, W3-LIFETIME and W3-CONSOLE against both artifact profiles: 8 registry executions. | Passed |
+| 4 — environment/paths | W4-SCOPES and W4-ENV: 2 production-service unit cases; W4-PATHS against both artifact profiles. | Passed |
+| 5 — real batch evaluator | W5-LANGUAGE, W5-NO-CONFIG and W5-REJECT against both artifact profiles: 6 registry executions. | Passed |
+| 6 — real children | All 6 W6 cases against both profiles: 12 registry executions; 2 native status unit cases; focused consuming-text provenance regression in debug/release. | Passed |
 
-### String/shared-foundation slice — verified, Phase 2 runtime gate pending
+All **21 mandatory acceptance IDs** are covered. The native registry contains
+15 IDs and requires **30 successful executions**, one per ID/profile pair, with
+no skipped cases. The remaining IDs are covered by the named unit/integration
+gates rather than being counted as extra registry entries.
 
-- MSVC: `cargo test --target x86_64-pc-windows-msvc -p fish-widestring --lib w2_ -- --nocapture` — 3 passed.
-- MSVC: `cargo test --target x86_64-pc-windows-msvc -p fish-tempfile --test runtime -- --nocapture` — 2 passed, exercising real filesystem collision preservation, cleanup and errors.
-- MSVC: `cargo test --target x86_64-pc-windows-msvc -p fish-common -p fish-util --lib` — 6 passed.
-- Linux: `cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile` — 34 unit/integration tests and 7 doctests passed, including private-directory permissions.
+The native library gates execute 75 tests: 25 `fish-widestring`, 4 `fish-tempfile`,
+5 `fish-common`, 1 `fish-util`, and 40 `fish` tests. The separately filtered five
+codec cases are included in the 25 widestring tests, not additional unique cases.
+The integration target also discovers exactly
+`native_runtime_initialization`, `native_text_provenance`, and
+`native_required_acceptance_cases`; each focused invocation must actually execute
+its selected test.
 
-Native OS-string conversion and arbitrary-byte codecs are separate. Full CLI/builtin literal-private-use output, real main-thread initialization and native locale initialization remain runtime integration gates; these leaf-suite results do not complete Phase 2.
+### Native build, tests and artifacts
+
+Build the real executable and permanent test probe from the repository root:
+
+```powershell
+$env:RUSTUP_TOOLCHAIN = "1.85.0"
+cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin windows_native_probe
+cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features -p fish --lib
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_native -- --exact native_required_acceptance_cases --nocapture
+```
+
+The native job in [the CI workflow](../../.github/workflows/test.yml) contains
+the complete executable procedure, including W1, the leaf libraries, runtime
+initialization and provenance in both profiles. It checks required discovery,
+nonzero executed counts, zero ignored cases, required W4/status library cases,
+and the exact 30 registry PASS records. Existing Unix and MSYS jobs remain separate.
+The final workflow's complete run-step procedure passed locally with Rust 1.85.0;
+the same behavioral gates also passed with Rust 1.95.0.
+
+The acceptance harness copies the selected executable outside the checkout into
+isolated space/Unicode directories, supplies fresh user-state roots and a
+tool-free native environment, bounds waits, and asserts exact output/status and
+absence of configuration/history side effects. The child probe performs real
+process exit, filesystem and inherited-stream operations; it is not a replacement
+evaluator or mocked execution backend.
+
+Local logs are retained in the ignored repository-root
+`native-windows-results/` directory: `toolchain.txt`, `w1-version.txt`,
+`w1-host.txt`, build logs, per-library discovery/results,
+`runtime-initialization-{debug,release}.txt`,
+`native-text-provenance-{debug,release}.txt`, and `native-acceptance.txt`.
+The configured GitHub artifact is **`windows-native-goal`**, containing those logs
+and `target/x86_64-pc-windows-msvc/debug/{fish,windows_native_probe}.exe` plus
+`target/x86_64-pc-windows-msvc/release/fish.exe`. These are artifact locations,
+not a claim that a remote workflow has been run or uploaded.
+
+### Fidelity checks and declared limits
+
+Native identity ingress first validates literal UTF-16, then normalizes source,
+argv, inherited environment and cwd into fish's existing canonical byte-stream
+representation. Reserved literal Unicode cannot become an expansion marker or
+raw-byte escape. Native filesystem/process/environment exports decode strictly:
+invalid UTF-8, NUL and surrogate escapes fail instead of aliasing another OS name.
+The consuming regression covers every reserved scalar through source and Unicode
+escapes, argv/environment, child arguments/exports, cwd and distinguishable
+executable names. It separately preserves arbitrary redirected bytes and literal
+PUA/replacement-character filenames. Invalid argument unescaping returns an
+expansion error rather than an empty argument.
+
+Redirected output uses synchronous native handles without CRT newline conversion.
+Console text uses UTF-16 and retains at most one incomplete UTF-8 scalar between
+builtin appends; invalid/incomplete sequences fail. W3-CONSOLE observes BMP text
+through the legacy screen buffer and full `native 雪 🐟` text through the
+test-only ConPTY host in `tests/windows_native/conpty.rs`. It also runs the actual
+fish builtin numeric-escape path and observes exact `é🐟` output. The launcher
+opens and checks real `CONIN$`/`CONOUT$` handles, so inherited pipes cannot
+accidentally satisfy the console test. ConPTY is an observation fixture, not a
+supported interactive fish backend. See Microsoft's
+[pseudoconsole lifecycle](https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session)
+and [UTF-8 output contract](https://learn.microsoft.com/en-us/windows/console/createpseudoconsole).
+
+Children receive only the supported inherited standard streams, fish's exported
+environment and the real cwd. Completion is synchronous.
+`ProcStatus::native_raw()` retains the full DWORD; codes above 255 map to shell
+status 1 and produce a diagnostic containing the raw hexadecimal value.
+Normal Windows Ctrl-C termination remains in effect; graceful cancellation and
+cleanup guarantees are not implemented. The three excluded POSIX contracts and
+all other deferred capabilities above remain out of scope.
+
+### Retained Unix verification and runtime smokes
+
+The retained no-default-feature gate executed **219 tests**: 181 root-library
+tests, 34 selected foundation/build-helper library tests, 1 build-host integration
+test and 3 tempfile integration tests. Commands:
+
+```text
+cargo test --locked --no-default-features -p fish -p fish-build-helper -p fish-widestring -p fish-common -p fish-util -p fish-tempfile --lib
+cargo test --locked -p fish-build-helper --test host
+cargo test --locked -p fish-tempfile --test runtime
+cargo build --locked --no-default-features --bin fish --bin fish_indent --bin fish_key_reader
+```
+
+The Unix default-feature build also passed: the same 215 library cases and
+7 foundation doctests executed successfully, and all three Unix binaries linked:
+
+```text
+cargo test --locked -p fish -p fish-build-helper -p fish-widestring -p fish-common -p fish-util -p fish-tempfile --lib
+cargo test --locked -p fish-widestring -p fish-common -p fish-util -p fish-tempfile --doc
+cargo build --locked --bin fish --bin fish_indent --bin fish_key_reader
+```
+
+Sphinx and `msgfmt` were absent on that Unix host, so its existing build warnings
+reported that manpages and message catalogs were not generated; these optional
+outputs are not claimed as verified. Local Unix command logs are retained as
+`native-windows-results/unix-no-default.txt` and `unix-default.txt`.
+
+A real shared-language smoke produced identical exact Unicode/list/scope,
+conditional/loop/boolean and arithmetic output under native debug, native release
+and Unix fish, with empty stderr and exit 7. The actual Unix `fish_indent` also
+normalized `echo    hello` to `echo hello`, and `fish_key_reader --version` exited
+successfully. Their Unix entrypoints remain available with
+`--no-default-features`; Windows entrypoints explicitly reject these deferred tools.
+
+### Worktree and commit layout
+
+Implementation used separate build, string-foundation, runtime and acceptance
+worktrees. The integrated implementation is in `../fish-windows-runtime` on the
+stack culminating in `platform/windows/native-ci`. Topic branches preserve the
+logical build-support, native-strings, runtime-foundations, synchronous-io,
+environment-paths, text-identity, native-identities, console-utf8, native-processes
+and batch-evaluator changes under the required `platform/windows/` prefix.
+Commit messages explain the Windows semantic mismatch and why the chosen boundary
+preserves the prototype contract. The original checkout and its unrelated
+`uv.lock` modification are not part of these changes.

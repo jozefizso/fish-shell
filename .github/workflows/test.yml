@@ -201,22 +201,116 @@ jobs:
         targets: "x86_64-pc-windows-msvc"
     - name: Record native toolchain
       run: |
-        rustc -Vv
-        cargo -V
+        New-Item -ItemType Directory -Force native-windows-results | Out-Null
+        rustc -Vv | Tee-Object native-windows-results/toolchain.txt
+        cargo -V | Tee-Object -Append native-windows-results/toolchain.txt
     - name: W1-VERSION (three required unit cases)
       run: |
-        $cases = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --list
+        $cases = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --list 2>&1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        if (@($cases | Select-String '^version::tests::w1_version_.*: test$').Count -ne 3) { throw "W1-VERSION requires exactly three discovered cases" }
-        cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --nocapture
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $required = @('version::tests::w1_version_archive_fallback: test', 'version::tests::w1_version_matching_git: test', 'version::tests::w1_version_revision_prefix: test')
+        $discovered = @($cases | ForEach-Object { if ("$_" -match '^version::tests::w1_version_.*: test$') { "$_" } })
+        if (@(Compare-Object ($required | Sort-Object) ($discovered | Sort-Object)).Count -ne 0) { throw "W1-VERSION requires the exact three cases" }
+        $output = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --nocapture 2>&1
+        $code = $LASTEXITCODE
+        $output | Tee-Object native-windows-results/w1-version.txt
+        if ($code -ne 0) { exit $code }
+        if (@($output | Select-String '^test result: ok\. 3 passed; 0 failed; 0 ignored;').Count -ne 1) { throw "W1-VERSION must execute all three cases without skips" }
     - name: W1-HOST (isolated tool-free native archive)
       run: |
-        $cases = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --list
+        $cases = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --list 2>&1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         if (@($cases | Select-String '^w1_host: test$').Count -ne 1) { throw "W1-HOST case missing" }
-        cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --exact w1_host --nocapture
+        $output = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --exact w1_host --nocapture 2>&1
+        $code = $LASTEXITCODE
+        $output | Tee-Object native-windows-results/w1-host.txt
+        if ($code -ne 0) { exit $code }
+        if (@($output | Select-String '^test result: ok\. 1 passed; 0 failed; 0 ignored;').Count -ne 1) { throw "W1-HOST must execute without skips" }
+    - name: Build native debug fish and probe, and release fish
+      run: |
+        New-Item -ItemType Directory -Force native-windows-results | Out-Null
+        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin windows_native_probe 2>&1 | Tee-Object native-windows-results/build-debug.txt
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish 2>&1 | Tee-Object native-windows-results/build-release.txt
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: Native GOAL leaf, library, initialization and acceptance gates
+      run: |
+        function Invoke-NativeTests {
+          param([string]$Name, [string[]]$CargoArgs, [string[]]$Required = @(), [switch]$Exact)
+          $base = @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '--no-default-features') + $CargoArgs
+          $harness = @()
+          if ($Exact) { $harness += '--exact' }
+          $listing = & cargo @base -- @harness --list 2>&1
+          $code = $LASTEXITCODE
+          $listing | Tee-Object "native-windows-results/$Name-discovery.txt"
+          if ($code -ne 0) { throw "$Name discovery failed ($code)" }
+          $cases = @($listing | ForEach-Object { if ("$_" -match '^(.+): test$') { $Matches[1] } })
+          if ($cases.Count -eq 0) { throw "$Name discovered zero tests" }
+          if ($Required.Count -gt 0) {
+            if (@(Compare-Object ($Required | Sort-Object) ($cases | Sort-Object)).Count -ne 0) {
+              throw "$Name did not discover exactly the required cases"
+            }
+          }
+          $output = & cargo @base -- @harness --nocapture 2>&1
+          $code = $LASTEXITCODE
+          $output | Tee-Object "native-windows-results/$Name.txt"
+          if ($code -ne 0) { throw "$Name failed ($code)" }
+          $summary = @($output | Select-String '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;')
+          if ($summary.Count -ne 1) { throw "$Name must execute tests without skips" }
+          return
+        }
+
+        Invoke-NativeTests -Name w2-codecs -CargoArgs @('-p', 'fish-widestring', '--lib', 'w2_') -Required @(
+          'tests::w2_text_native_os_roundtrip',
+          'tests::w2_invalid_native_os_rejects',
+          'tests::w2_invalid_redirected_bytes_roundtrip',
+          'tests::w2_text_native_shell_roundtrip',
+          'tests::w2_invalid_shell_identity_rejects'
+        )
+        Invoke-NativeTests -Name w2-tempfile -CargoArgs @('-p', 'fish-tempfile', '--test', 'runtime') -Required @(
+          'w2_runtime_tempfile_collision_and_cleanup',
+          'creation_errors_are_not_retried_as_collisions'
+        )
+        foreach ($package in @('fish-widestring', 'fish-tempfile', 'fish-common', 'fish-util', 'fish')) {
+          Invoke-NativeTests -Name "$package-lib" -CargoArgs @('-p', $package, '--lib')
+        }
+        $libraryCases = Get-Content native-windows-results/fish-lib-discovery.txt
+        foreach ($case in @(
+          'env::environment::native::tests::w4_scopes_native_export_selection',
+          'env::environment::native::tests::w4_env_native_path_and_name_policy',
+          'proc::native_status::tests::native_exit_codes_keep_raw_bits_and_map_shell_status',
+          'proc::native_status::tests::builtin_and_empty_statuses_are_not_native_exit_codes'
+        )) {
+          if (@($libraryCases | Where-Object { $_ -eq "$($case): test" }).Count -ne 1) {
+            throw "Required native library case missing: $case"
+          }
+        }
+        foreach ($profile in @('debug', 'release')) {
+          $profileArgs = @()
+          if ($profile -eq 'release') { $profileArgs += '--release' }
+          Invoke-NativeTests -Name "runtime-initialization-$profile" -CargoArgs ($profileArgs + @('--test', 'windows_native', 'native_runtime_initialization')) -Required @('native_runtime_initialization') -Exact
+          Invoke-NativeTests -Name "native-text-provenance-$profile" -CargoArgs ($profileArgs + @('--test', 'windows_native', 'native_text_provenance')) -Required @('native_text_provenance') -Exact
+        }
+        $env:FISH_NATIVE_TEST_BIN = (Resolve-Path 'target/x86_64-pc-windows-msvc/debug/fish.exe').Path
+        $env:FISH_NATIVE_TEST_RELEASE_BIN = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/fish.exe').Path
+        Invoke-NativeTests -Name native-acceptance -CargoArgs @('--test', 'windows_native', 'native_required_acceptance_cases') -Required @('native_required_acceptance_cases') -Exact
+        $required = @('W2-RUNTIME', 'W3-BYTES', 'W3-ERRORS', 'W3-LIFETIME', 'W3-CONSOLE', 'W4-PATHS', 'W5-LANGUAGE', 'W5-NO-CONFIG', 'W5-REJECT', 'W6-CHILD', 'W6-STREAMS', 'W6-STATUS', 'W6-FAILURE', 'W6-BOUNDARY', 'W6-CLEAN-RUN')
+        $passes = @(Get-Content native-windows-results/native-acceptance.txt | Where-Object { $_ -match '^PASS (debug|release) ' })
+        $expected = @(foreach ($profile in @('debug', 'release')) { foreach ($case in $required) { "PASS $profile $case" } })
+        if ($passes.Count -ne 30 -or @(Compare-Object ($expected | Sort-Object) ($passes | Sort-Object)).Count -ne 0) {
+          throw "Native acceptance must execute the exact 15-case registry in both profiles"
+        }
+    - name: Upload native Windows evidence
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, build_tools/update-dependencies.sh
+      with:
+        name: windows-native-goal
+        if-no-files-found: error
+        path: |
+          native-windows-results/
+          target/x86_64-pc-windows-msvc/debug/fish.exe
+          target/x86_64-pc-windows-msvc/debug/windows_native_probe.exe
+          target/x86_64-pc-windows-msvc/release/fish.exe
 
   windows:
     runs-on: windows-latest

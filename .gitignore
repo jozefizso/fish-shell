@@ -60,6 +60,7 @@ __pycache__/
 /share/__fish_build_paths.fish
 /tests/.last-check-all-files
 /.venv/
+/native-windows-results/
 
 # xcode
 ## Build generated
