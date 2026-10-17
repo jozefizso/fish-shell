@@ -8,6 +8,7 @@ A native `x86_64-pc-windows-msvc` batch proof of concept is implemented. It uses
 
 - [GOAL.md](GOAL.md) records the completed prototype contract and its native/Unix verification evidence.
 - [ROADMAP.md](ROADMAP.md) defines the next eleven dependency-ordered phases, native semantic decisions and mandatory acceptance gates for full Windows functionality.
+- The standalone phase contracts run from [GOAL_01.md](GOAL_01.md) through [GOAL_11.md](GOAL_11.md); each roadmap phase links to its delivery and mandatory tests.
 
 The component analyses and coverage counts below describe the original pre-prototype source audit. They explain portability boundaries and candidate APIs, not current implementation status. Use GOAL.md for the implemented baseline and ROADMAP.md for remaining work; proposed future tests are not passing results.
 

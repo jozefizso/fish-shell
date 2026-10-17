@@ -67,17 +67,17 @@ generically replaced after launch.
 
 | Phase | User-visible delivery | Suggested branch topic |
 |---|---|---|
-| N1 | Native navigation, discovery and filesystem expansion | `platform/windows/paths-discovery` |
-| N2 | Streaming pipelines, redirects and capture infrastructure | `platform/windows/streaming-io` |
-| N3 | Complete batch language, functions and portable builtins | `platform/windows/batch-parity` |
-| N4 | Real config startup, autoload and persistent user state | `platform/windows/persistent-state` |
-| N5 | Cancellation, asynchronous jobs, events and accounting | `platform/windows/process-supervision` |
-| N6 | Usable native interactive editor and terminal lifecycle | `platform/windows/interactive-reader` |
-| N7 | Completion, suggestions, pager and editing feature parity | `platform/windows/interactive-parity` |
-| N8 | Native tool/script interoperability and platform services | `platform/windows/native-interop` |
-| N9 | Complete shipped asset, help and localization coverage | `platform/windows/assets-localization` |
-| N10 | Installable, relocatable native release | `platform/windows/native-release` |
-| N11 | Full compatibility, security and quality release gate | `platform/windows/parity-closure` |
+| [N1](GOAL_01.md) | Native navigation, discovery and filesystem expansion | `platform/windows/paths-discovery` |
+| [N2](GOAL_02.md) | Streaming pipelines, redirects and capture infrastructure | `platform/windows/streaming-io` |
+| [N3](GOAL_03.md) | Complete batch language, functions and portable builtins | `platform/windows/batch-parity` |
+| [N4](GOAL_04.md) | Real config startup, autoload and persistent user state | `platform/windows/persistent-state` |
+| [N5](GOAL_05.md) | Cancellation, asynchronous jobs, events and accounting | `platform/windows/process-supervision` |
+| [N6](GOAL_06.md) | Usable native interactive editor and terminal lifecycle | `platform/windows/interactive-reader` |
+| [N7](GOAL_07.md) | Completion, suggestions, pager and editing feature parity | `platform/windows/interactive-parity` |
+| [N8](GOAL_08.md) | Native tool/script interoperability and platform services | `platform/windows/native-interop` |
+| [N9](GOAL_09.md) | Complete shipped asset, help and localization coverage | `platform/windows/assets-localization` |
+| [N10](GOAL_10.md) | Installable, relocatable native release | `platform/windows/native-release` |
+| [N11](GOAL_11.md) | Full compatibility, security and quality release gate | `platform/windows/parity-closure` |
 
 ```mermaid
 flowchart LR
