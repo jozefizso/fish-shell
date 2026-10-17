@@ -1,0 +1,247 @@
+//! Synchronous inherited standard streams for the native batch runtime.
+use crate::{fds::{BorrowedFdFile, is_console, standard_handle}, prelude::*, proc::JobGroupRef};
+use fish_widestring::bytes2wcstring;
+use std::io::{self, Write};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle, RawHandle};
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn WriteFile(handle: RawHandle, buffer: *const u8, count: u32, written: *mut u32, overlapped: *mut std::ffi::c_void) -> i32;
+    fn WriteConsoleW(handle: RawHandle, buffer: *const u16, count: u32, written: *mut u32, reserved: *mut std::ffi::c_void) -> i32;
+}
+
+enum OutputHandle<'a> {
+    Borrowed(BorrowedHandle<'a>),
+    Owned(OwnedHandle),
+}
+
+/// A native output endpoint. Borrowed endpoints never close the underlying handle;
+/// owned endpoints close it exactly once, using `OwnedHandle`'s normal ownership.
+/// Redirected handles carry arbitrary bytes; console writes require complete UTF-8.
+pub struct NativeOutput<'a> {
+    handle: OutputHandle<'a>,
+}
+
+impl<'a> NativeOutput<'a> {
+    pub fn borrowed(handle: BorrowedHandle<'a>) -> Self {
+        Self { handle: OutputHandle::Borrowed(handle) }
+    }
+
+    pub fn owned(handle: OwnedHandle) -> Self {
+        Self { handle: OutputHandle::Owned(handle) }
+    }
+
+    fn handle(&self) -> BorrowedHandle<'_> {
+        match &self.handle {
+            OutputHandle::Borrowed(handle) => *handle,
+            OutputHandle::Owned(handle) => handle.as_handle(),
+        }
+    }
+
+    pub fn is_console(&self) -> bool { is_console(self.handle()) }
+}
+
+impl NativeOutput<'static> {
+    pub fn stdout() -> io::Result<Self> {
+        standard_handle(-11i32 as u32).map(Self::borrowed)
+    }
+
+    pub fn stderr() -> io::Result<Self> {
+        standard_handle(-12i32 as u32).map(Self::borrowed)
+    }
+}
+
+impl Write for NativeOutput<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.is_empty() { return Ok(0); }
+        if !self.is_console() {
+            let mut written = 0;
+            if unsafe { WriteFile(self.handle().as_raw_handle(), buffer.as_ptr(), buffer.len().min(u32::MAX as usize) as u32, &mut written, std::ptr::null_mut()) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if written == 0 { return Err(io::ErrorKind::WriteZero.into()); }
+            return Ok(written as usize);
+        }
+        let text = std::str::from_utf8(buffer)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        // Bounded stack storage avoids allocating for console transcoding. A chunk
+        // always ends between Unicode scalars, never between a surrogate pair.
+        let mut chars = text.chars().peekable();
+        let mut wide = [0u16; 4096];
+        while chars.peek().is_some() {
+            let mut count = 0;
+            while let Some(&ch) = chars.peek() {
+                if count + ch.len_utf16() > wide.len() { break; }
+                ch.encode_utf16(&mut wide[count..]);
+                count += ch.len_utf16();
+                chars.next();
+            }
+            let mut offset = 0;
+            while offset < count {
+                let mut written = 0;
+                if unsafe { WriteConsoleW(self.handle().as_raw_handle(), wide[offset..].as_ptr(), (count - offset) as u32, &mut written, std::ptr::null_mut()) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if written == 0 { return Err(io::ErrorKind::WriteZero.into()); }
+                offset += written as usize;
+            }
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // WriteFile/WriteConsoleW above are synchronous and this wrapper buffers
+        // nothing. FlushFileBuffers would incorrectly require disk/pipe semantics
+        // (and can wait for a pipe reader); it is not a stream flush operation.
+        Ok(())
+    }
+}
+
+/// Flush Rust's standard-stream buffers before handing inherited streams to a child.
+pub fn flush_standard_streams() -> io::Result<()> {
+    let out = std::io::stdout().flush();
+    let err = std::io::stderr().flush();
+    out.and(err)
+}
+
+/// Native batch jobs have no redirections. Unsupported syntax is rejected before
+/// expansion, so the type cannot represent an unavailable transport operation.
+#[derive(Clone, Default)]
+pub struct IoChain;
+impl IoChain {
+    pub fn new() -> Self { Self }
+    pub fn is_empty(&self) -> bool { true }
+    pub fn len(&self) -> usize { 0 }
+    pub fn clear(&mut self) {}
+    pub fn append(&mut self, _chain: &IoChain) -> bool { true }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum SeparationType { Inferred, Explicitly }
+
+pub enum OutputStream {
+    /// Intentional discard sink, used when a caller explicitly does not want output.
+    Null,
+    Fd(FdOutputStream),
+    String(StringOutputStream),
+}
+
+impl OutputStream {
+    pub fn stdout() -> Self { Self::Fd(FdOutputStream::new(1)) }
+    pub fn stderr() -> Self { Self::Fd(FdOutputStream::new(2)) }
+    pub fn contents(&self) -> &wstr {
+        match self { Self::String(stream) => &stream.contents, _ => L!("") }
+    }
+    pub fn take(self) -> WString {
+        match self { Self::String(stream) => stream.contents, _ => WString::new() }
+    }
+    pub fn flush_and_check_error(&mut self) -> libc::c_int {
+        match self { Self::Fd(stream) => stream.flush_and_check_error(), _ => 0 }
+    }
+    pub fn append(&mut self, s: impl IntoCharIter) -> bool {
+        match self {
+            Self::Null => true,
+            Self::Fd(stream) => stream.append(s),
+            Self::String(stream) => stream.append(s),
+        }
+    }
+    /// Append explicitly byte-oriented output, without reinterpreting text PUA.
+    pub fn append_bytes(&mut self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Null => true,
+            Self::Fd(stream) => stream.append_bytes(bytes),
+            Self::String(stream) => stream.append(&bytes2wcstring(bytes)),
+        }
+    }
+    pub fn appendln(&mut self, s: impl IntoCharIter) -> bool {
+        self.append(s.chars().chain(std::iter::once('\n')))
+    }
+    pub fn append_with_separation(&mut self, s: impl IntoCharIter, typ: SeparationType, want_newline: bool) -> bool {
+        if typ == SeparationType::Explicitly && want_newline { self.appendln(s) } else { self.append(s) }
+    }
+}
+
+/// Compatibility name for the builtin API. `new` accepts only standard-stream
+/// indices, never Unix descriptors and never integer representations of HANDLEs.
+pub struct FdOutputStream {
+    endpoint: Option<NativeOutput<'static>>,
+    error: Option<io::Error>,
+}
+impl FdOutputStream {
+    pub fn new(stream: i32) -> Self {
+        let endpoint = match stream {
+            1 => NativeOutput::stdout(),
+            2 => NativeOutput::stderr(),
+            _ => Err(io::Error::new(io::ErrorKind::Unsupported, "only inherited standard output streams are supported")),
+        };
+        match endpoint {
+            Ok(endpoint) => Self { endpoint: Some(endpoint), error: None },
+            Err(error) => Self { endpoint: None, error: Some(error) },
+        }
+    }
+    pub fn error(&self) -> Option<&io::Error> { self.error.as_ref() }
+    fn append(&mut self, s: impl IntoCharIter) -> bool {
+        if self.error.is_some() { return false; }
+        let mut buffer = [0u8; 4096];
+        let mut used = 0;
+        for ch in s.chars() {
+            if used + ch.len_utf8() > buffer.len() {
+                if !self.append_bytes(&buffer[..used]) { return false; }
+                used = 0;
+            }
+            ch.encode_utf8(&mut buffer[used..]);
+            used += ch.len_utf8();
+        }
+        self.append_bytes(&buffer[..used])
+    }
+
+    pub fn append_bytes(&mut self, bytes: &[u8]) -> bool {
+        if self.error.is_some() { return false; }
+        if let Err(error) = self.endpoint.as_mut().expect("successful endpoint construction").write_all(bytes) {
+            self.error = Some(error);
+        }
+        self.error.is_none()
+    }
+    fn flush_and_check_error(&mut self) -> libc::c_int {
+        if self.error.is_none() {
+            if let Some(endpoint) = &mut self.endpoint {
+                if let Err(error) = endpoint.flush() { self.error = Some(error); }
+            }
+        }
+        i32::from(self.error.is_some())
+    }
+}
+
+#[derive(Default)]
+pub struct StringOutputStream { contents: WString }
+impl StringOutputStream {
+    pub fn new() -> Self { Self::default() }
+    fn append(&mut self, s: impl IntoCharIter) -> bool {
+        if !s.extend_wstring(&mut self.contents) { self.contents.extend(s.chars()); }
+        true
+    }
+}
+
+pub struct IoStreams<'a> {
+    pub out: &'a mut OutputStream,
+    pub err: &'a mut OutputStream,
+    pub stdin_file: Option<BorrowedFdFile>,
+    pub stdin_is_directly_redirected: bool,
+    pub out_is_piped: bool,
+    pub err_is_piped: bool,
+    pub out_is_redirected: bool,
+    pub err_is_redirected: bool,
+    pub io_chain: &'a IoChain,
+    pub job_group: Option<JobGroupRef>,
+}
+impl<'a> IoStreams<'a> {
+    pub fn new(out: &'a mut OutputStream, err: &'a mut OutputStream, io_chain: &'a IoChain) -> Self {
+        Self { out, err, stdin_file: BorrowedFdFile::stdin().ok(), stdin_is_directly_redirected: false,
+            out_is_piped: false, err_is_piped: false, out_is_redirected: false, err_is_redirected: false,
+            io_chain, job_group: None }
+    }
+    pub fn out_is_terminal(&self) -> bool {
+        !self.out_is_redirected && NativeOutput::stdout().is_ok_and(|output| output.is_console())
+    }
+    pub fn is_stdin_closed(&self) -> bool { self.stdin_file.is_none() }
+}
