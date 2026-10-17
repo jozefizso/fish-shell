@@ -607,7 +607,7 @@ impl<'a, 'b> State<'a, 'b> {
             if esc_length == 0 {
                 self.fatal_error(err_str!("missing hexadecimal number in escape"));
             }
-            self.append_output(encode_byte_to_char((esc_value % 256) as u8));
+            self.append_raw_byte((esc_value % 256) as u8);
         } else if is_octal_digit(p.char_at(0)) {
             // Parse \0ooo (if octal_0 && *p == L'0') or \ooo (otherwise). Allow \ooo if octal_0 && *p
             // != L'0'; this is an undocumented extension to POSIX that is compatible with Bash 2.05b.
@@ -621,7 +621,7 @@ impl<'a, 'b> State<'a, 'b> {
                 esc_length += 1;
                 p = &p[1..];
             }
-            self.append_output(encode_byte_to_char((esc_value % 256) as u8));
+            self.append_raw_byte((esc_value % 256) as u8);
         } else if "\"\\abcefnrtv".contains(p.char_at(0)) {
             self.print_esc_char(p.char_at(0));
             p = &p[1..];
@@ -643,9 +643,12 @@ impl<'a, 'b> State<'a, 'b> {
             }
             match char::from_u32(uni_value) {
                 Some(c) => {
-                    // Test if this character would be treated specially when decoding.
-                    // If so, PUA-encode it.
-                    if decode_byte_from_char(c).is_some() {
+                    // Keep Unicode escapes in the same canonical shell-text representation
+                    // as literal Unicode entering the interpreter. Unix retains its byte-PUA
+                    // guard; native ingress quotes every fish-reserved codepoint.
+                    if decode_byte_from_char(c).is_some()
+                        || (cfg!(windows) && fish_widestring::fish_reserved_codepoint(c))
+                    {
                         // A `char` represents an Unicode scalar value, which takes up at most 4 bytes when encoded in UTF-8.
                         let mut converted = [0_u8; 4];
                         for byte in c.encode_utf8(&mut converted).as_bytes() {
@@ -730,6 +733,23 @@ impl<'a, 'b> State<'a, 'b> {
             _ => {
                 self.append_output(c);
             }
+        }
+    }
+
+    /// Emit a numeric byte escape without conflating native literal PUA text with bytes.
+    fn append_raw_byte(&mut self, byte: u8) {
+        #[cfg(unix)]
+        self.append_output(encode_byte_to_char(byte));
+        #[cfg(windows)]
+        {
+            if self.early_exit {
+                return;
+            }
+            if !self.buff.is_empty() {
+                self.streams.out.append(&self.buff);
+                self.buff.clear();
+            }
+            self.streams.out.append_bytes(&[byte]);
         }
     }
 

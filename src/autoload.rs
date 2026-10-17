@@ -1,5 +1,7 @@
 //! The classes responsible for autoloading functions and completions.
 
+#![cfg(unix)]
+
 use crate::{
     env::Environment,
     flogf,

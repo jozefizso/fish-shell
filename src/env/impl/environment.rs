@@ -51,7 +51,11 @@ pub fn colon_split<T: AsRef<wstr>>(val: &[T]) -> Vec<WString> {
 
 /// Return true if a variable should become a path variable by default. See #436.
 fn variable_should_auto_pathvar(name: &wstr) -> bool {
-    if cfg!(windows) { name == "PATH" } else { name.ends_with("PATH") || name == "LANGUAGE" }
+    if cfg!(windows) {
+        name == "PATH"
+    } else {
+        name.ends_with("PATH") || name == "LANGUAGE"
+    }
 }
 
 /// We cache our null-terminated export list. However an exported variable may change for lots of
@@ -704,7 +708,8 @@ impl EnvStackImpl {
             // Existing global variable.
             Self::set_in_node(&mut node, key, val, flags);
             result.global_modified = true;
-        } else if self.base.getf(key, EnvMode::UNIVERSAL).is_some() && !UVAR_SCOPE_IS_GLOBAL.load() {
+        } else if self.base.getf(key, EnvMode::UNIVERSAL).is_some() && !UVAR_SCOPE_IS_GLOBAL.load()
+        {
             #[cfg(not(windows))]
             {
                 self.set_universal(key, val, query);

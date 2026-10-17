@@ -199,11 +199,14 @@ pub use wgettext_fmt;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::prelude::*;
+    #[cfg(unix)]
+    use crate::tests::prelude::test_init;
+    use serial_test::serial;
 
     #[test]
     #[serial]
     fn test_unlocalized() {
+        #[cfg(unix)]
         test_init();
         let abc_str = LocalizableString::from_external_source(WString::from("abc"));
         let s: &'static wstr = wgettext!(abc_str);

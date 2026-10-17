@@ -31,7 +31,10 @@ pub fn is_main_thread() -> bool {
 }
 
 pub fn assert_is_main_thread() {
-    assert!(is_main_thread(), "Function is not running on the main thread!");
+    assert!(
+        is_main_thread(),
+        "Function is not running on the main thread!"
+    );
 }
 
 pub fn assert_is_background_thread() {

@@ -1,17 +1,20 @@
 // Enumeration of all wildcard types.
 
+#[cfg(unix)]
 use crate::{
     common::{WSL, is_windows_subsystem_for_linux},
+    wutil::{
+        dir_iter::{DirEntry, DirEntryType},
+        lwstat, waccess,
+    },
+};
+use crate::{
     complete::{
         CompleteFlags, Completion, CompletionReceiver, PROG_COMPLETE_SEP, ReplacementScope,
         WantsSuffix,
     },
     expand::{ExpandFlags, PathFilter},
     prelude::*,
-    wutil::{
-        dir_iter::{DirEntry, DirEntryType},
-        lwstat, waccess,
-    },
 };
 use fish_common::{UnescapeFlags, UnescapeStringStyle, unescape_string};
 use fish_fallback::wcscasecmp;
@@ -21,11 +24,11 @@ use fish_wcstringutil::{
     strip_executable_suffix,
 };
 use fish_widestring::{ANY_CHAR, ANY_STRING, ANY_STRING_RECURSIVE};
+#[cfg(unix)]
 use nix::unistd::AccessFlags;
-use std::{
-    borrow::Cow, cell::LazyCell, cmp::Ordering, collections::HashSet,
-    os::unix::fs::MetadataExt as _,
-};
+use std::cmp::Ordering;
+#[cfg(unix)]
+use std::{borrow::Cow, cell::LazyCell, collections::HashSet, os::unix::fs::MetadataExt as _};
 
 localizable_consts!(
     COMPLETE_EXEC_DESC "command"
@@ -289,6 +292,7 @@ pub fn wildcard_complete(
 /// \param is_dir Whether the file is a directory or not (might be behind a link)
 /// \param is_link Whether it's a link (that might point to a directory)
 /// \param definitely_executable Whether we know that it is executable, or don't know
+#[cfg(unix)]
 fn file_get_desc(
     filename: &wstr,
     is_dir: bool,
@@ -319,6 +323,7 @@ fn file_get_desc(
 /// Test if the given file is an executable (if executables_only) or directory (if
 /// directories_only). If it matches, call wildcard_complete() with some description that we make
 /// up. Note that the filename came from a readdir() call, so we know it exists.
+#[cfg(unix)]
 fn wildcard_test_flags_then_complete(
     filepath: &wstr,
     mut filename: &wstr,
@@ -423,6 +428,7 @@ fn wildcard_test_flags_then_complete(
         == WildcardResult::Match
 }
 
+#[cfg(unix)]
 mod expander {
 
     use crate::{
@@ -1018,6 +1024,7 @@ mod expander {
 /// \param cancel_checker A function to call to check for cancellation
 /// \param output The completion receiver to receive expanded wildcards
 ///
+#[cfg(unix)]
 pub fn wildcard_expand_string<'closure>(
     wc: &wstr,
     working_directory: &wstr,

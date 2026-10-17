@@ -44,12 +44,22 @@ fn main() {
         // The native slice has no POSIX capability probes or C compiler requirement.
         // Still register these names so shared cfg annotations remain checked.
         for name in [
-            "apple", "bsd", "cygwin", "have_eventfd", "have_localeconv_l",
-            "have_getexecpath", "have_posix_spawn", "small_main_stack", "solarish",
+            "apple",
+            "bsd",
+            "cygwin",
+            "have_eventfd",
+            "have_localeconv_l",
+            "have_getexecpath",
+            "have_posix_spawn",
+            "small_main_stack",
+            "solarish",
         ] {
             rsconf::declare_cfg(name, false);
         }
-        rsconf::declare_cfg("using_cmake", option_env!("FISH_CMAKE_BINARY_DIR").is_some());
+        rsconf::declare_cfg(
+            "using_cmake",
+            option_env!("FISH_CMAKE_BINARY_DIR").is_some(),
+        );
         return;
     }
 
@@ -182,7 +192,11 @@ fn setup_paths() {
         Some(join_if_relative(
             &prefix,
             env_sysconfdir.unwrap_or_else(|| {
-                if target_os() == "windows" { "etc".to_owned() } else { "/etc/".to_owned() }
+                if target_os() == "windows" {
+                    "etc".to_owned()
+                } else {
+                    "/etc/".to_owned()
+                }
             }),
         ))
     });
@@ -205,7 +219,13 @@ fn setup_paths() {
 }
 
 fn get_version() -> String {
-    for path in [".git", ".git/HEAD", ".git/index", ".git/packed-refs", ".git/refs"] {
+    for path in [
+        ".git",
+        ".git/HEAD",
+        ".git/index",
+        ".git/packed-refs",
+        ".git/refs",
+    ] {
         fish_build_helper::rebuild_if_path_changed(path);
     }
     fish_build_helper::version::acquire_version(workspace_root(), env!("CARGO_PKG_VERSION"))

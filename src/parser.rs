@@ -11,8 +11,7 @@ use crate::{
     },
     event::{self, Event},
     expand::{ExpandFlags, expand_string, replace_home_directory_with_tilde},
-    fds::{BEST_O_SEARCH, open_dir},
-    flog, flogf, function,
+    flog, flogf,
     io::IoChain,
     job_group::MaybeJobId,
     operation_context::{EXPANSION_LIMIT_DEFAULT, OperationContext},
@@ -26,6 +25,11 @@ use crate::{
     proc::{InternalJobId, Job, JobGroupRef, Pid, ProcStatus, job_reap},
     signal::{RawSignal, signal_check_cancel, signal_clear_cancel},
     wait_handle::WaitHandleStore,
+};
+#[cfg(unix)]
+use crate::{
+    fds::{BEST_O_SEARCH, open_dir},
+    function,
     wutil::perror_nix,
 };
 use assert_matches::assert_matches;
@@ -40,6 +44,7 @@ use std::fs::File;
 use std::io::Write as _;
 use std::num::NonZeroU32;
 use std::ops::DerefMut;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -282,6 +287,7 @@ pub struct LibraryData {
     /// Either resolve full paths, or use the _at() family of syscalls with this fd.
     /// This is never null and never invalid except in crazy error conditions
     /// (e.g. starting fish in a chmod 000 directory) which have yet to be rationalized.
+    #[cfg(unix)]
     pub cwd_fd: Option<Arc<OwnedFd>>,
 
     /// Variables supporting the "status" builtin.
@@ -419,6 +425,7 @@ pub struct Parser {
 
     /// If set, we synchronize universal variables after external commands,
     /// including sending on-variable change events.
+    #[cfg(unix)]
     syncs_uvars: bool,
 
     /// The behavior when fish itself receives a signal and there are no blocks on the stack.
@@ -466,6 +473,7 @@ impl Parser {
             variables,
             scoped_data: ScopedCell::new(ScopedData::default()),
             library_data: LibraryData::new(),
+            #[cfg(unix)]
             syncs_uvars: false,
             cancel_behavior,
             profile_items: Default::default(),
@@ -475,6 +483,7 @@ impl Parser {
             test_only_suppress_stderr: false,
         };
 
+        #[cfg(unix)]
         match open_dir(c".", BEST_O_SEARCH) {
             Ok(fd) => {
                 result.libdata_mut().cwd_fd = Some(Arc::new(fd));
@@ -948,6 +957,7 @@ impl Parser {
         vals: Vec<WString>,
     ) -> EnvStackSetResult {
         let res = self.set_var(key, mode, vals);
+        #[cfg(unix)]
         if res == EnvStackSetResult::Ok {
             event::fire(self, Event::variable_set(key.to_owned()));
         }
@@ -999,6 +1009,7 @@ impl Parser {
     /// Update any universal variables and send event handlers.
     /// If `always` is set, then do it even if we have no pending changes (that is, look for
     /// changes from other fish instances); otherwise only sync if this instance has changed uvars.
+    #[cfg(unix)]
     pub fn sync_uvars_and_fire(&mut self, always: bool) {
         if self.syncs_uvars {
             let evts = self.vars().universal_sync(always, self.is_repainting());
@@ -1195,6 +1206,7 @@ impl Parser {
     pub fn current_filename(&self) -> Option<FilenameRef> {
         self.blocks_iter_rev()
             .find_map(|b| match b.data() {
+                #[cfg(unix)]
                 Some(BlockData::Function { name, .. }) => {
                     function::get_props(name).and_then(|props| props.definition_file.clone())
                 }
@@ -1242,6 +1254,7 @@ impl Parser {
     }
 
     /// Mark whether we should sync universal variables.
+    #[cfg(unix)]
     pub fn set_syncs_uvars(&mut self, flag: bool) {
         self.syncs_uvars = flag;
     }
@@ -1490,7 +1503,7 @@ pub enum LoopStatus {
     Continues,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{CancelBehavior, Parser};
     use crate::{

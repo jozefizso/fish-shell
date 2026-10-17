@@ -139,13 +139,15 @@ itertools.workspace = true
 libc.workspace = true
 lru.workspace = true
 macro_rules_attribute = "0.2.2"
-nix.workspace = true
 num-traits.workspace = true
 once_cell.workspace = true
-pcre2.workspace = true
 rand.workspace = true
 strum_macros.workspace = true
 xterm-color.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+pcre2.workspace = true
 
 [target.'cfg(not(target_has_atomic = "64"))'.dependencies]
 portable-atomic.workspace = true
@@ -175,9 +177,6 @@ phf_codegen = { workspace = true, optional = true }
 rsconf.workspace = true
 rustc_version.workspace = true
 
-[target.'cfg(windows)'.build-dependencies]
-unix_path.workspace = true
-
 [lib]
 crate-type = ["rlib"]
 path = "src/lib.rs"
@@ -193,6 +192,16 @@ path = "src/bin/fish_indent.rs"
 [[bin]]
 name = "fish_key_reader"
 path = "src/bin/fish_key_reader.rs"
+
+[[test]]
+name = "windows_native"
+path = "tests/windows_native.rs"
+
+[[bin]]
+name = "windows_native_probe"
+path = "tests/windows_native/probe.rs"
+test = false
+bench = false
 
 [features]
 default = ["embed-manpages", "localize-messages"]

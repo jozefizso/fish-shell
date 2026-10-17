@@ -18,7 +18,10 @@ pub struct BuildVersion {
 
 /// Apply the release script's version policy without depending on host tools.
 /// A successful but empty Git response is an error, not archive fallback.
-pub fn select_version(package_version: &str, git_version: Option<&str>) -> io::Result<BuildVersion> {
+pub fn select_version(
+    package_version: &str,
+    git_version: Option<&str>,
+) -> io::Result<BuildVersion> {
     let Some(git_version) = git_version else {
         return Ok(BuildVersion {
             value: package_version.to_owned(),
@@ -27,7 +30,10 @@ pub fn select_version(package_version: &str, git_version: Option<&str>) -> io::R
     };
     let git_version = git_version.trim_ascii_end();
     if git_version.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Git returned an empty version"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Git returned an empty version",
+        ));
     }
     Ok(BuildVersion {
         value: if git_version.starts_with(package_version) {
@@ -43,7 +49,10 @@ pub fn select_version(package_version: &str, git_version: Option<&str>) -> io::R
 /// the manifest's package version remains authoritative (including release archives).
 pub fn acquire_version(source_dir: &Path, package_version: &str) -> io::Result<BuildVersion> {
     let mut command = Command::new("git");
-    command.arg("-C").arg(source_dir).args(["describe", "--always", "--dirty"]);
+    command
+        .arg("-C")
+        .arg(source_dir)
+        .args(["describe", "--always", "--dirty"]);
     // Do not accidentally describe a repository containing an unpacked source archive.
     if let Some(parent) = source_dir.parent() {
         command.env("GIT_CEILING_DIRECTORIES", parent);
@@ -63,23 +72,38 @@ mod tests {
 
     #[test]
     fn w1_version_matching_git() {
-        assert_eq!(select_version("4.9.3", Some("4.9.3-12-gabcdef-dirty\n")).unwrap(), BuildVersion {
-            value: "4.9.3-12-gabcdef-dirty".into(), source: VersionSource::Git,
-        });
+        assert_eq!(
+            select_version("4.9.3", Some("4.9.3-12-gabcdef-dirty\n")).unwrap(),
+            BuildVersion {
+                value: "4.9.3-12-gabcdef-dirty".into(),
+                source: VersionSource::Git,
+            }
+        );
     }
 
     #[test]
     fn w1_version_revision_prefix() {
-        assert_eq!(select_version("4.9.3", Some("abcdef\n")).unwrap(), BuildVersion {
-            value: "4.9.3-gabcdef".into(), source: VersionSource::Git,
-        });
+        assert_eq!(
+            select_version("4.9.3", Some("abcdef\n")).unwrap(),
+            BuildVersion {
+                value: "4.9.3-gabcdef".into(),
+                source: VersionSource::Git,
+            }
+        );
     }
 
     #[test]
     fn w1_version_archive_fallback() {
-        assert_eq!(select_version("4.9.3", None).unwrap(), BuildVersion {
-            value: "4.9.3".into(), source: VersionSource::Package,
-        });
-        assert_eq!(select_version("4.9.3", Some("\n")).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            select_version("4.9.3", None).unwrap(),
+            BuildVersion {
+                value: "4.9.3".into(),
+                source: VersionSource::Package,
+            }
+        );
+        assert_eq!(
+            select_version("4.9.3", Some("\n")).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

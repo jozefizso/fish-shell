@@ -4,25 +4,33 @@
 
 use crate::{
     ast::{self, Node as _},
+    global_safety::RelaxedAtomicBool,
+    parse_tree::NodeRef,
+    prelude::*,
+};
+use fish_common::{FilenameRef, assert_sync};
+use std::{num::NonZeroU32, sync::Arc};
+
+#[cfg(unix)]
+use crate::{
     autoload::{Autoload, AutoloadResult},
     common::valid_func_name,
     complete::complete_wrap_map,
     env::{EnvStack, Environment},
     event::{self, EventDescription},
-    global_safety::RelaxedAtomicBool,
-    parse_tree::NodeRef,
     parser::Parser,
     parser_keywords::parser_keywords_is_reserved,
-    prelude::*,
     proc::Pid,
     wutil::dir_iter::DirIter,
 };
-use fish_common::{FilenameRef, assert_sync, escape};
+#[cfg(unix)]
+use fish_common::escape;
+#[cfg(unix)]
 use fish_widestring::wcs2bytes;
+#[cfg(unix)]
 use std::{
     collections::{HashMap, HashSet},
-    num::NonZeroU32,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{LazyLock, Mutex},
 };
 
 #[derive(Clone)]
@@ -60,6 +68,7 @@ const _: () = assert_sync::<FunctionProperties>();
 
 /// Type wrapping up the set of all functions.
 /// There's only one of these; it's managed by a lock.
+#[cfg(unix)]
 struct FunctionSet {
     /// The map of all functions by name.
     funcs: HashMap<WString, Arc<FunctionProperties>>,
@@ -71,6 +80,7 @@ struct FunctionSet {
     autoloader: Autoload,
 }
 
+#[cfg(unix)]
 impl FunctionSet {
     /// Remove a function.
     /// Return true if successful, false if it doesn't exist.
@@ -101,6 +111,7 @@ impl FunctionSet {
 }
 
 /// The big set of all functions.
+#[cfg(unix)]
 static FUNCTION_SET: LazyLock<Mutex<FunctionSet>> = LazyLock::new(|| {
     Mutex::new(FunctionSet {
         funcs: HashMap::new(),
@@ -111,6 +122,7 @@ static FUNCTION_SET: LazyLock<Mutex<FunctionSet>> = LazyLock::new(|| {
 
 /// Make sure that if the specified function is a dynamically loaded function, it has been fully
 /// loaded. Note this executes fish script code.
+#[cfg(unix)]
 pub fn load(name: &wstr, parser: &mut Parser) -> bool {
     let mut path_to_autoload: Option<_> = None;
     // Note we can't autoload while holding the funcset lock.
@@ -141,6 +153,7 @@ pub fn load(name: &wstr, parser: &mut Parser) -> bool {
 }
 
 /// Insert a list of all dynamically loaded functions into the specified list.
+#[cfg(unix)]
 fn autoload_names(names: &mut HashSet<WString>, vars: &dyn Environment, get_hidden: bool) {
     let Some(path_var) = vars.get_unless_empty(L!("fish_function_path")) else {
         return;
@@ -174,6 +187,7 @@ fn autoload_names(names: &mut HashSet<WString>, vars: &dyn Environment, get_hidd
 }
 
 /// Add a function. This may mutate `props` to set is_autoload.
+#[cfg(unix)]
 pub fn add(name: WString, props: Arc<FunctionProperties>) {
     let mut funcset = FUNCTION_SET.lock().unwrap();
 
@@ -199,6 +213,7 @@ pub fn add(name: WString, props: Arc<FunctionProperties>) {
 }
 
 /// Return the properties for a function, or None. This does not trigger autoloading.
+#[cfg(unix)]
 pub fn get_props(name: &wstr) -> Option<Arc<FunctionProperties>> {
     if parser_keywords_is_reserved(name) {
         None
@@ -208,6 +223,7 @@ pub fn get_props(name: &wstr) -> Option<Arc<FunctionProperties>> {
 }
 
 /// Return the properties for a function, or None, perhaps triggering autoloading.
+#[cfg(unix)]
 pub fn get_props_autoload(name: &wstr, parser: &mut Parser) -> Option<Arc<FunctionProperties>> {
     if parser_keywords_is_reserved(name) {
         return None;
@@ -218,6 +234,7 @@ pub fn get_props_autoload(name: &wstr, parser: &mut Parser) -> Option<Arc<Functi
 
 /// Returns true if the function named `cmd` exists.
 /// This may autoload.
+#[cfg(unix)]
 pub fn exists(cmd: &wstr, parser: &mut Parser) -> bool {
     if !valid_func_name(cmd) {
         return false;
@@ -227,6 +244,7 @@ pub fn exists(cmd: &wstr, parser: &mut Parser) -> bool {
 
 /// Returns true if the function `cmd` either is loaded, or exists on disk in an autoload
 /// directory.
+#[cfg(unix)]
 pub fn exists_no_autoload(cmd: &wstr) -> bool {
     if !valid_func_name(cmd) {
         return false;
@@ -251,6 +269,7 @@ pub fn exists_no_autoload(cmd: &wstr) -> bool {
 }
 
 /// Remove the function with the specified name.
+#[cfg(unix)]
 pub fn remove(name: &wstr) {
     let mut funcset = FUNCTION_SET.lock().unwrap();
     funcset.remove(name);
@@ -259,6 +278,7 @@ pub fn remove(name: &wstr) {
 }
 
 // Return the body of a function (everything after the header, up to but not including the 'end').
+#[cfg(unix)]
 fn get_function_body_source(props: &FunctionProperties) -> &wstr {
     // We want to preserve comments that the AST attaches to the header (#5285).
     // Take everything from the end of the header to the 'end' keyword.
@@ -284,6 +304,7 @@ fn get_function_body_source(props: &FunctionProperties) -> &wstr {
 
 /// Sets the description of the function with the name \c name.
 /// This triggers autoloading.
+#[cfg(unix)]
 pub(crate) fn set_desc(name: &wstr, desc: WString, parser: &mut Parser) {
     load(name, parser);
     let mut funcset = FUNCTION_SET.lock().unwrap();
@@ -300,6 +321,7 @@ pub(crate) fn set_desc(name: &wstr, desc: WString, parser: &mut Parser) {
 
 /// Creates a new function using the same definition as the specified function. Returns true if copy
 /// is successful.
+#[cfg(unix)]
 pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
     let mut funcset = FUNCTION_SET.lock().unwrap();
     let Some(props) = funcset.get_props(name) else {
@@ -321,6 +343,7 @@ pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
 /// Returns all function names.
 ///
 /// \param get_hidden whether to include hidden functions, i.e. ones starting with an underscore.
+#[cfg(unix)]
 pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
     let mut names = HashSet::<WString>::new();
     let funcset = FUNCTION_SET.lock().unwrap();
@@ -350,6 +373,7 @@ pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
 }
 
 /// Observes that fish_function_path has changed.
+#[cfg(unix)]
 pub fn invalidate_path() {
     // Remove all autoloaded functions and update the autoload path.
     let mut funcset = FUNCTION_SET.lock().unwrap();
@@ -394,6 +418,7 @@ impl FunctionProperties {
     /// Return a definition of the function, annotated with properties like event handlers and wrap
     /// targets. This is to support the 'functions' builtin.
     /// Note callers must provide the function name, since the function does not know its own name.
+    #[cfg(unix)]
     pub fn annotated_definition(&self, name: &wstr) -> WString {
         let mut out = WString::new();
         let desc = self.description.localize();

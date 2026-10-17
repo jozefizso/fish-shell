@@ -1,5 +1,5 @@
 //! W1-HOST executes the same production version path used by root build.rs.
-use fish_build_helper::version::{acquire_version, VersionSource};
+use fish_build_helper::version::{VersionSource, acquire_version};
 use std::{
     fs,
     io::Read,
@@ -16,10 +16,14 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new() -> Self {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         for attempt in 0..100 {
             let path = std::env::temp_dir().join(format!(
-                "fish native archive 日本語 🐟 {} {nonce} {attempt}", std::process::id()
+                "fish native archive 日本語 🐟 {} {nonce} {attempt}",
+                std::process::id()
             ));
             match fs::create_dir(&path) {
                 Ok(()) => return Self(path),
@@ -44,7 +48,10 @@ fn w1_host() {
         // Verify both this fixture and the deliberately tool-free child environment.
         assert!(!source_dir.join(".git").exists());
         for tool in ["sh", "awk", "git"] {
-            assert!(Command::new(tool).output().is_err(), "unexpected host tool: {tool}");
+            assert!(
+                Command::new(tool).output().is_err(),
+                "unexpected host tool: {tool}"
+            );
         }
         let version = acquire_version(&source_dir, PACKAGE_VERSION).unwrap();
         assert_eq!(version.source, VersionSource::Package);
@@ -56,11 +63,14 @@ fn w1_host() {
     let fixture = Fixture::new();
     let empty_path = fixture.0.join("empty tools");
     fs::create_dir(&empty_path).unwrap();
-    fs::write(fixture.0.join("Cargo.toml"), format!(
-        "[package]\nname = \"fish\"\nversion = \"{PACKAGE_VERSION}\"\n"
-    )).unwrap();
+    fs::write(
+        fixture.0.join("Cargo.toml"),
+        format!("[package]\nname = \"fish\"\nversion = \"{PACKAGE_VERSION}\"\n"),
+    )
+    .unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", "w1_host", "--nocapture"])
+    command
+        .args(["--exact", "w1_host", "--nocapture"])
         .current_dir(&fixture.0)
         .env_clear()
         .env("PATH", &empty_path)
@@ -72,7 +82,9 @@ fn w1_host() {
     if let Some(root) = std::env::var_os("SystemRoot") {
         command.env("SystemRoot", root);
     }
-    let mut child = command.spawn().expect("start native build-support test child");
+    let mut child = command
+        .spawn()
+        .expect("start native build-support test child");
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let out = thread::spawn(move || {
@@ -99,8 +111,14 @@ fn w1_host() {
     };
     let stdout = out.join().unwrap();
     let stderr = err.join().unwrap();
-    assert!(status.is_some_and(|status| status.success()),
+    assert!(
+        status.is_some_and(|status| status.success()),
         "native helper failed or timed out: {status:?}\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&stdout), String::from_utf8_lossy(&stderr));
-    assert_eq!(fs::read_to_string(fixture.0.join("actual-version")).unwrap(), PACKAGE_VERSION);
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("actual-version")).unwrap(),
+        PACKAGE_VERSION
+    );
 }

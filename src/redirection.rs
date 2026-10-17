@@ -3,8 +3,13 @@
 use crate::io::IoChain;
 use crate::prelude::*;
 use crate::wutil::fish_wcstoi;
+#[cfg(unix)]
 use nix::fcntl::OFlag;
+#[cfg(unix)]
 use std::os::fd::RawFd;
+// These are syntax-level descriptor numbers, never native Windows handles.
+#[cfg(windows)]
+type RawFd = i32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Hash)]
 pub enum RedirectionMode {
@@ -32,6 +37,7 @@ pub struct Dup2List {
     pub actions: Vec<Dup2Action>,
 }
 
+#[cfg(unix)]
 impl RedirectionMode {
     /// The open flags for this redirection mode.
     pub fn oflags(self) -> Option<OFlag> {
@@ -78,6 +84,7 @@ impl RedirectionSpec {
     }
 
     /// Return the open flags for this redirection.
+    #[cfg(unix)]
     pub fn oflags(&self) -> OFlag {
         match self.mode.oflags() {
             Some(flags) => flags,
@@ -91,6 +98,7 @@ pub type RedirectionSpecList = Vec<RedirectionSpec>;
 /// Produce a dup_fd_list_t from an io_chain. This may not be called before fork().
 /// The result contains the list of fd actions (dup2 and close), as well as the list
 /// of fds opened.
+#[cfg(unix)]
 pub fn dup2_list_resolve_chain(io_chain: &IoChain) -> Dup2List {
     let mut result = Dup2List { actions: vec![] };
     for io in &io_chain.0 {
@@ -153,7 +161,7 @@ impl Dup2List {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use crate::io::{IoChain, IoClose, IoFd};
     use crate::redirection::dup2_list_resolve_chain;

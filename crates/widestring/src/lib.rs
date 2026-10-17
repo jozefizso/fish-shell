@@ -6,15 +6,14 @@
 
 pub mod word_char;
 
-use std::{
-    ffi::{CStr, CString, OsStr, OsString},
-    iter,
-    slice,
-};
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt as _;
+use std::{
+    ffi::{CStr, CString, OsStr, OsString},
+    iter, slice,
+};
 pub use widestring::{Utf32Str as wstr, Utf32String as WString, utf32str as L, utfstr::CharsUtf32};
 
 pub mod prelude {
@@ -178,10 +177,16 @@ impl std::fmt::Display for NativeStringError {
         match self {
             Self::EmbeddedNul => formatter.write_str("native text contains an embedded NUL"),
             Self::UnpairedSurrogate(unit) => {
-                write!(formatter, "native text contains an unpaired UTF-16 surrogate 0x{unit:04X}")
+                write!(
+                    formatter,
+                    "native text contains an unpaired UTF-16 surrogate 0x{unit:04X}"
+                )
             }
             Self::InvalidUtf8(error) => {
-                write!(formatter, "shell text is not valid Unicode for a native name: {error}")
+                write!(
+                    formatter,
+                    "shell text is not valid Unicode for a native name: {error}"
+                )
             }
         }
     }
@@ -201,9 +206,8 @@ impl From<NativeStringError> for std::io::Error {
 fn decode_native_utf16(input: impl Iterator<Item = u16>) -> Result<WString, NativeStringError> {
     let mut result = WString::with_capacity(input.size_hint().0);
     for decoded in char::decode_utf16(input) {
-        let character = decoded.map_err(|error| {
-            NativeStringError::UnpairedSurrogate(error.unpaired_surrogate())
-        })?;
+        let character = decoded
+            .map_err(|error| NativeStringError::UnpairedSurrogate(error.unpaired_surrogate()))?;
         if character == '\0' {
             return Err(NativeStringError::EmbeddedNul);
         }
@@ -1284,10 +1288,7 @@ mod tests {
                 Err(NativeStringError::EmbeddedNul)
             );
             let fish = WString::from_str(text);
-            assert_eq!(
-                wcs2osstring(&fish),
-                Err(NativeStringError::EmbeddedNul)
-            );
+            assert_eq!(wcs2osstring(&fish), Err(NativeStringError::EmbeddedNul));
             assert_eq!(
                 wcstring_to_utf16(&fish),
                 Err(NativeStringError::EmbeddedNul)

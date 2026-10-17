@@ -1917,24 +1917,25 @@ mod tests {
         ERROR_NOT_PID, ERROR_NOT_STATUS,
     };
     use crate::prelude::*;
+    #[cfg(unix)]
     use crate::tests::prelude::*;
-    use pcre2::utf32::Regex;
+    use serial_test::serial;
 
     #[test]
     #[serial]
     fn test_error_messages() {
+        #[cfg(unix)]
         test_init();
         // Given a format string, returns a list of non-empty strings separated by format specifiers. The
         // format specifiers themselves are omitted.
         fn separate_by_format_specifiers(format: &wstr) -> Vec<&wstr> {
-            let format_specifier_regex = Regex::new(L!(r"%[cds]").as_char_slice()).unwrap();
             let mut result = vec![];
             let mut offset = 0;
-            for mtch in format_specifier_regex.find_iter(format.as_char_slice()) {
-                let mtch = mtch.unwrap();
-                let component = &format[offset..mtch.start()];
-                result.push(component);
-                offset = mtch.end();
+            for (start, pair) in format.as_char_slice().windows(2).enumerate() {
+                if pair[0] == '%' && matches!(pair[1], 'c' | 'd' | 's') {
+                    result.push(&format[offset..start]);
+                    offset = start + 2;
+                }
             }
             result.push(&format[offset..]);
             // Avoid mismatch from localized  quotes.
@@ -2016,6 +2017,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_get_cmdsubst_extent() {
+        #[cfg(unix)]
         test_init();
         let a = L!("echo (echo (echo hi");
         assert_eq!(get_cmdsubst_extent(a, 0), 0..a.len());
@@ -2032,6 +2034,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_slice_length() {
+        #[cfg(unix)]
         test_init();
         assert_eq!(slice_length(L!("")), Some(0));
         assert_eq!(slice_length(L!("foo]bar")), Some(0));
@@ -2053,6 +2056,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_indents() {
+        #[cfg(unix)]
         test_init();
         // A struct which is either text or a new indent.
         struct Segment {

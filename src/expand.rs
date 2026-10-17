@@ -14,29 +14,37 @@ use crate::{
     common::valid_var_name_char,
     complete::{Completion, CompletionList, CompletionReceiver},
     env::{EnvVar, Environment},
-    exec::exec_subshell_for_expand,
-    history::{History, history_id},
     operation_context::OperationContext,
     parse_constants::{ParseError, ParseErrorCode, ParseErrorList, SOURCE_LOCATION_UNKNOWN},
     parse_util::{expand_variable_error, locate_cmdsubst_range},
-    path::path_apply_working_directory,
     prelude::*,
-    wildcard::{WildcardResult, wildcard_expand_string, wildcard_has_internal},
+    wildcard::wildcard_has_internal,
     wutil::{normalize_path, wcstoi, wcstoi_partial},
+};
+#[cfg(unix)]
+use crate::{
+    exec::exec_subshell_for_expand,
+    history::{History, history_id},
+    path::path_apply_working_directory,
+    wildcard::{WildcardResult, wildcard_expand_string},
 };
 use fish_common::{
     EscapeFlags, EscapeStringStyle, UnescapeFlags, UnescapeStringStyle, escape, escape_string,
     escape_string_for_double_quotes, unescape_string,
 };
 use fish_feature_flags::{FeatureFlag, feature_test};
+#[cfg(unix)]
 use fish_util::wcsfilecmp_glob;
 use fish_wcstringutil::{join_strings, trim};
+#[cfg(unix)]
+use fish_widestring::osstr2wcstring;
 use fish_widestring::{
     ANY_CHAR, ANY_STRING, ANY_STRING_RECURSIVE, BRACE_BEGIN, BRACE_END, BRACE_SEP, BRACE_SPACE,
     HOME_DIRECTORY, INTERNAL_SEPARATOR, PROCESS_EXPAND_SELF, SLICE_BEGIN, SLICE_END,
-    VARIABLE_EXPAND, VARIABLE_EXPAND_EMPTY, VARIABLE_EXPAND_SINGLE, osstr2wcstring,
+    VARIABLE_EXPAND, VARIABLE_EXPAND_EMPTY, VARIABLE_EXPAND_SINGLE,
 };
-use nix::unistd::{User, getpid};
+#[cfg(unix)]
+use nix::unistd::User;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum CmdsubstMode {
@@ -682,13 +690,29 @@ fn expand_variables(
     // Do a dirty hack to make sliced history fast (#4650). We expand from either a variable, or a
     // history_t. Note that "history" is read only in env.rs so it's safe to special-case it in
     // this way (it cannot be shadowed, etc).
+    #[cfg(windows)]
+    if var_name == "history" {
+        append_syntax_error!(
+            errors,
+            varexp_char_idx,
+            "History expansion is not supported on native Windows"
+        );
+        return ExpandResult::make_error(STATUS_EXPAND_ERROR);
+    }
+    #[cfg(unix)]
     let mut history = None;
     let mut var = None;
+    #[cfg(unix)]
     if var_name == "history" {
         history = Some(History::new(history_id(vars)));
-    } else if var_name.as_char_slice() != [VARIABLE_EXPAND_EMPTY] {
+    }
+    if var_name != "history" && var_name.as_char_slice() != [VARIABLE_EXPAND_EMPTY] {
         var = vars.get(var_name);
     }
+    #[cfg(unix)]
+    let has_history = history.is_some();
+    #[cfg(windows)]
+    let has_history = false;
 
     // Parse out any following slice.
     // Record the end of the variable name and any following slice.
@@ -704,7 +728,9 @@ fn expand_variables(
         let mut effective_val_count = 1;
         if let Some(ref var) = var {
             effective_val_count = var.as_list().len();
-        } else if let Some(ref history) = history {
+        }
+        #[cfg(unix)]
+        if let Some(history) = &history {
             effective_val_count = history.size();
         }
         match parse_slice(
@@ -733,9 +759,9 @@ fn expand_variables(
             }
         }
     }
-    let var_idx_list = var_idx_list.iter().filter_map(|&n| n.try_into().ok());
+    let mut var_idx_list = var_idx_list.iter().filter_map(|&n| usize::try_from(n).ok());
 
-    if var.is_none() && history.is_none() {
+    if var.is_none() && !has_history {
         // Expanding a non-existent variable.
         if !is_single {
             // Normal expansions of missing variables successfully expand to nothing.
@@ -755,30 +781,39 @@ fn expand_variables(
     // Ok, we have a variable or a history. Let's expand it.
     // Start by respecting the sliced elements.
     assert!(
-        var.is_some() || history.is_some(),
+        var.is_some() || has_history,
         "Should have variable or history here",
     );
     let mut var_item_list = vec![];
     if all_values {
-        var_item_list = if let Some(ref history) = history {
-            history.get_history()
-        } else {
-            var.as_ref().unwrap().as_list().to_vec()
-        };
+        #[cfg(unix)]
+        {
+            var_item_list = if let Some(history) = &history {
+                history.get_history()
+            } else {
+                var.as_ref().unwrap().as_list().to_vec()
+            };
+        }
+        #[cfg(windows)]
+        {
+            var_item_list = var.as_ref().unwrap().as_list().to_vec();
+        }
     } else {
         // We have to respect the slice.
+        #[cfg(unix)]
         if let Some(ref history) = history {
             // Ask history to map indexes to item strings.
             // Note this may have missing entries for out-of-bounds.
             let item_map = history.items_at_indexes(var_idx_list.clone());
-            for item_index in var_idx_list {
+            for item_index in &mut var_idx_list {
                 if let Some(item) = item_map.get(&item_index) {
                     var_item_list.push(item.clone());
                 }
             }
-        } else {
+        }
+        if !has_history {
             let all_var_items = var.as_ref().unwrap().as_list();
-            for item_index in var_idx_list {
+            for item_index in &mut var_idx_list {
                 // Check that we are within array bounds. If not, skip the element. Note:
                 // Negative indices (`echo $foo[-1]`) are already converted to positive ones
                 // here, So tmp < 1 means it's definitely not in.
@@ -793,6 +828,9 @@ fn expand_variables(
     if is_single {
         // Quoted expansion. Here we expect the variable's delimiter.
         // Note history always has a space delimiter.
+        #[cfg(windows)]
+        let delimit = var.as_ref().unwrap().delimiter();
+        #[cfg(unix)]
         let delimit = if history.is_some() {
             ' '
         } else {
@@ -966,6 +1004,7 @@ fn expand_braces(
 
 /// Expand a command substitution `input`, executing on `ctx`, and inserting the results into
 /// `out_list`, or any errors into `errors`. Return an expand result.
+#[cfg(unix)]
 pub fn expand_cmdsubst(
     input: WString,
     ctx: &mut OperationContext,
@@ -1186,6 +1225,38 @@ pub fn expand_cmdsubst(
     ExpandResult::ok()
 }
 
+/// Native batch evaluation never executes command substitutions.
+#[cfg(windows)]
+pub fn expand_cmdsubst(
+    input: WString,
+    _ctx: &mut OperationContext,
+    out: &mut CompletionReceiver,
+    errors: &mut Option<&mut ParseErrorList>,
+) -> ExpandResult {
+    let mut cursor = 0;
+    match locate_cmdsubst_range(&input, &mut cursor, false, None, None) {
+        Err(()) => {
+            append_syntax_error!(errors, SOURCE_LOCATION_UNKNOWN, "Mismatched parenthesis");
+            ExpandResult::make_error(STATUS_EXPAND_ERROR)
+        }
+        Ok(Some(cmdsub)) => {
+            append_cmdsub_error!(
+                errors,
+                cmdsub.opening_paren_offset(),
+                cmdsub.end() - 1,
+                wgettext!("Command substitution is not supported on native Windows")
+            );
+            ExpandResult::make_error(STATUS_EXPAND_ERROR)
+        }
+        Ok(None) => {
+            if out.add(input).is_err() {
+                return append_overflow_error(errors, None);
+            }
+            ExpandResult::ok()
+        }
+    }
+}
+
 // Given that input[0] is HOME_DIRECTORY or tilde (ugh), return the user's name. Return the empty
 // string if it is just a tilde. Also return by reference the index of the first character of the
 // remaining part of the string (e.g. the subsequent slash).
@@ -1226,20 +1297,24 @@ fn expand_home_directory(input: &mut WString, vars: &dyn Environment) {
         }
     } else {
         // POSIX-conforming usernames are ASCII-only
+        #[cfg(unix)]
         if let Ok(Some(userinfo)) = User::from_name(&username.to_string()) {
             home = Some(osstr2wcstring(userinfo.dir));
         }
     }
 
     if let Some(home) = home {
+        #[cfg(unix)]
         input.replace_range(..tail_idx, &normalize_path(&home, true));
+        #[cfg(windows)]
+        input.replace_range(..tail_idx, &home);
     }
 }
 
 /// Expand the %self escape. Note this can only come at the beginning of the string.
 fn expand_percent_self(input: &mut WString) {
     if input.as_char_slice().first() == Some(&PROCESS_EXPAND_SELF) {
-        input.replace_range(0..1, &getpid().as_raw().to_wstring());
+        input.replace_range(0..1, &std::process::id().to_wstring());
     }
 }
 
@@ -1436,15 +1511,25 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
     fn stage_variables(&mut self, input: WString, out: &mut CompletionReceiver) -> ExpandResult {
         // We accept incomplete strings here, since complete uses expand_string to expand incomplete
         // strings from the commandline.
-        let mut next = unescape_string(
+        let next = unescape_string(
             &input,
             UnescapeStringStyle::Script(UnescapeFlags {
                 special: true,
                 incomplete: true,
                 ..Default::default()
             }),
-        )
-        .unwrap_or_default();
+        );
+        #[cfg(unix)]
+        let mut next = next.unwrap_or_default();
+        #[cfg(windows)]
+        let Some(mut next) = next else {
+            append_syntax_error!(
+                self.errors,
+                0,
+                "Invalid Unicode or escape sequence in native command argument"
+            );
+            return ExpandResult::make_error(STATUS_EXPAND_ERROR);
+        };
 
         if self.flags.skip_variables {
             for i in next.as_char_slice_mut() {
@@ -1484,6 +1569,19 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
     ) -> ExpandResult {
         remove_internal_separator(&mut input, self.flags.skip_wildcards);
 
+        #[cfg(windows)]
+        if input.as_char_slice().first() == Some(&HOME_DIRECTORY) {
+            let mut tail_idx = 0;
+            if !get_home_directory_name(&input, &mut tail_idx).is_empty() {
+                append_syntax_error!(
+                    self.errors,
+                    0,
+                    "Named-user home expansion is not supported on native Windows"
+                );
+                return ExpandResult::make_error(STATUS_EXPAND_ERROR);
+            }
+        }
+
         expand_home_directory(&mut input, self.ctx.vars());
         if !feature_test(FeatureFlag::RemovePercentSelf) {
             expand_percent_self(&mut input);
@@ -1494,6 +1592,7 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
         ExpandResult::ok()
     }
 
+    #[cfg(unix)]
     fn stage_wildcards(
         &mut self,
         path_to_expand: WString,
@@ -1597,6 +1696,26 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
         result
     }
 
+    #[cfg(windows)]
+    fn stage_wildcards(
+        &mut self,
+        path_to_expand: WString,
+        out: &mut CompletionReceiver,
+    ) -> ExpandResult {
+        if self.flags.for_completions || wildcard_has_internal(&path_to_expand) {
+            append_syntax_error!(
+                self.errors,
+                SOURCE_LOCATION_UNKNOWN,
+                "Filesystem wildcard expansion and completion are not supported on native Windows"
+            );
+            return ExpandResult::make_error(STATUS_EXPAND_ERROR);
+        }
+        if out.add(path_to_expand).is_err() {
+            return append_overflow_error(self.errors, None);
+        }
+        ExpandResult::ok()
+    }
+
     // Given an original input string, if it starts with a tilde, "unexpand" the expanded home
     // directory.  Note this may be just a tilde or a user name like ~foo/.
     fn unexpand_tildes(&self, input: &wstr, completions: &mut CompletionList) {
@@ -1694,7 +1813,7 @@ impl ExpandResult {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use crate::{
         abbrs::{self, Abbreviation, with_abbrs, with_abbrs_mut},
@@ -2179,5 +2298,107 @@ mod tests {
         assert_eq!(rhdwt("/home/testuser", &vars), "/home/testuser");
         assert_eq!(rhdwt("/other/path/", &vars), "/other/path/");
         assert_eq!(rhdwt("relative/path", &vars), "relative/path");
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+    use crate::env::{EnvMode, EnvSetMode, EnvStack, EnvStackSetResult};
+    use crate::operation_context::EXPANSION_LIMIT_DEFAULT;
+
+    #[test]
+    fn list_quote_and_slice_expansion() {
+        let vars = EnvStack::new();
+        assert_eq!(
+            vars.set(
+                L!("native_expansion_items"),
+                EnvSetMode::new_at_early_startup(EnvMode::LOCAL),
+                vec![
+                    L!("").to_owned(),
+                    L!("two words").to_owned(),
+                    L!("λ魚🐟").to_owned()
+                ],
+            ),
+            EnvStackSetResult::Ok
+        );
+        let mut ctx = OperationContext::background(&vars, EXPANSION_LIMIT_DEFAULT);
+        let cases: &[(&wstr, &[&wstr])] = &[
+            (
+                L!("$native_expansion_items"),
+                &[L!(""), L!("two words"), L!("λ魚🐟")],
+            ),
+            (
+                L!(r#""$native_expansion_items""#),
+                &[L!(" two words λ魚🐟")],
+            ),
+            (
+                L!("$native_expansion_items[3..1]"),
+                &[L!("λ魚🐟"), L!("two words"), L!("")],
+            ),
+            (
+                L!("prefix$native_expansion_items[2]suffix"),
+                &[L!("prefixtwo wordssuffix")],
+            ),
+            (L!("''"), &[L!("")]),
+        ];
+        for &(input, expected) in cases {
+            let mut completions = CompletionList::new();
+            let mut errors = ParseErrorList::new();
+            assert_eq!(
+                expand_string(
+                    input.to_owned(),
+                    &mut completions,
+                    ExpandFlags::FAIL_ON_CMDSUBST,
+                    &mut ctx,
+                    Some(&mut errors),
+                )
+                .result,
+                ExpandResultCode::Ok,
+                "{input}: {errors:?}"
+            );
+            let actual: Vec<&wstr> = completions
+                .iter()
+                .map(|c| c.completion.as_utfstr())
+                .collect();
+            assert_eq!(actual.as_slice(), expected, "{input}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unsupported_native_expansion_reports_errors() {
+        let mut ctx = OperationContext::empty();
+        let mut completions = CompletionReceiver::new(16);
+        let mut errors = ParseErrorList::new();
+        assert_eq!(
+            expand_cmdsubst(
+                L!("(set -g forbidden value)").to_owned(),
+                &mut ctx,
+                &mut completions,
+                &mut Some(&mut errors),
+            )
+            .result,
+            ExpandResultCode::Error
+        );
+        assert!(completions.empty());
+        assert!(ctx.vars().get(L!("forbidden")).is_none());
+
+        for input in [L!("*"), L!("$history")] {
+            let mut output = CompletionList::new();
+            errors.clear();
+            assert_eq!(
+                expand_string(
+                    input.to_owned(),
+                    &mut output,
+                    ExpandFlags::FAIL_ON_CMDSUBST,
+                    &mut ctx,
+                    Some(&mut errors),
+                )
+                .result,
+                ExpandResultCode::Error
+            );
+            assert!(output.is_empty());
+        }
     }
 }

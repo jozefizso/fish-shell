@@ -81,9 +81,9 @@ pub(super) mod electric_values {
         ElectricVar, Getter,
     };
     use crate::env::{
-        EnvVar, EnvVarFlags, FISH_BIN_DIR, FISH_CACHE_DIR, FISH_CONFIG_DIR,
-        FISH_DATADIR_VAR, FISH_HELPDIR_VAR, FISH_MANDIR_VAR, FISH_SYSCONFDIR_VAR,
-        FISH_TERMINAL_COLOR_THEME_VAR, FISH_USER_DATA_DIR,
+        EnvVar, EnvVarFlags, FISH_BIN_DIR, FISH_CACHE_DIR, FISH_CONFIG_DIR, FISH_DATADIR_VAR,
+        FISH_HELPDIR_VAR, FISH_MANDIR_VAR, FISH_SYSCONFDIR_VAR, FISH_TERMINAL_COLOR_THEME_VAR,
+        FISH_USER_DATA_DIR,
     };
     #[cfg(not(windows))]
     use crate::{

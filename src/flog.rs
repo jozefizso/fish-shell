@@ -249,14 +249,18 @@ static NATIVE_LOG: std::sync::Mutex<NativeLogDestination> =
 /// Transfer ownership of a real native logging endpoint to the logger.
 #[cfg(windows)]
 pub fn set_flog_file(handle: std::os::windows::io::OwnedHandle) -> std::io::Result<()> {
-    *NATIVE_LOG.lock().map_err(|_| std::io::Error::other("logging lock poisoned"))? =
+    *NATIVE_LOG
+        .lock()
+        .map_err(|_| std::io::Error::other("logging lock poisoned"))? =
         NativeLogDestination::File(handle);
     Ok(())
 }
 
 #[cfg(windows)]
 pub fn disable_flog() -> std::io::Result<()> {
-    *NATIVE_LOG.lock().map_err(|_| std::io::Error::other("logging lock poisoned"))? =
+    *NATIVE_LOG
+        .lock()
+        .map_err(|_| std::io::Error::other("logging lock poisoned"))? =
         NativeLogDestination::Disabled;
     Ok(())
 }
@@ -266,7 +270,9 @@ pub fn disable_flog() -> std::io::Result<()> {
 pub fn flog_impl(bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::windows::io::AsHandle;
-    let destination = NATIVE_LOG.lock().map_err(|_| std::io::Error::other("logging lock poisoned"))?;
+    let destination = NATIVE_LOG
+        .lock()
+        .map_err(|_| std::io::Error::other("logging lock poisoned"))?;
     let mut endpoint = match &*destination {
         NativeLogDestination::Stderr => crate::io::NativeOutput::stderr()?,
         NativeLogDestination::File(handle) => crate::io::NativeOutput::borrowed(handle.as_handle()),
@@ -275,7 +281,6 @@ pub fn flog_impl(bytes: &[u8]) -> std::io::Result<()> {
     endpoint.write_all(bytes)?;
     endpoint.flush()
 }
-
 
 /// The entry point for flogging.
 #[macro_export]
@@ -341,7 +346,9 @@ fn apply_one_wildcard(pattern: &wstr, sense: bool) {
     fn matches(text: &wstr, pattern: &wstr) -> bool {
         let (mut t, mut p, mut star, mut retry) = (0, 0, None, 0);
         while t < text.len() {
-            if p < pattern.len() && (pattern.char_at(p) == '?' || pattern.char_at(p) == text.char_at(t)) {
+            if p < pattern.len()
+                && (pattern.char_at(p) == '?' || pattern.char_at(p) == text.char_at(t))
+            {
                 t += 1;
                 p += 1;
             } else if p < pattern.len() && pattern.char_at(p) == '*' {
@@ -356,7 +363,9 @@ fn apply_one_wildcard(pattern: &wstr, sense: bool) {
                 return false;
             }
         }
-        while p < pattern.len() && pattern.char_at(p) == '*' { p += 1; }
+        while p < pattern.len() && pattern.char_at(p) == '*' {
+            p += 1;
+        }
         p == pattern.len()
     }
     let mut found = false;
@@ -367,10 +376,11 @@ fn apply_one_wildcard(pattern: &wstr, sense: bool) {
         }
     }
     if !found {
-        let _ = flog_impl(&crate::wutil::sprintf!("Failed to match debug category: %s\n", pattern).to_flog_str());
+        let _ = flog_impl(
+            &crate::wutil::sprintf!("Failed to match debug category: %s\n", pattern).to_flog_str(),
+        );
     }
 }
-
 
 /// Set the active flog categories according to the given wildcard `wc`.
 pub fn activate_flog_categories_by_pattern(wc_ptr: &wstr) {

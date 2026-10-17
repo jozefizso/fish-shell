@@ -30,9 +30,13 @@ use fish_widestring::{
 use fish_widestring::{native_to_shell_text_owned, shell_text_to_osstring};
 #[cfg(not(windows))]
 use nix::unistd::{self, AccessFlags};
-use std::{ffi::OsStr, fs::{self, canonicalize}, io};
 #[cfg(not(windows))]
 use std::os::unix::prelude::*;
+use std::{
+    ffi::OsStr,
+    fs::{self, canonicalize},
+    io,
+};
 
 /// Wide character version of opendir(). Note that opendir() is guaranteed to set close-on-exec by
 /// POSIX (hooray).
@@ -448,7 +452,8 @@ pub fn unescape_bytes_and_write_to_fd(input: impl IntoCharIter, stream: i32) -> 
         1 => crate::io::NativeOutput::stdout(),
         2 => crate::io::NativeOutput::stderr(),
         _ => return None,
-    }.ok()?;
+    }
+    .ok()?;
     let mut written = 0;
     let mut buffer = [0u8; 512];
     let mut used = 0;

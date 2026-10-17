@@ -1,6 +1,25 @@
-use super::r#impl::environment::{EnvMutex, EnvMutexGuard, EnvScopedImpl, EnvStackImpl, ModResult, colon_split};
+use super::r#impl::environment::{
+    EnvMutex, EnvMutexGuard, EnvScopedImpl, EnvStackImpl, ModResult, colon_split,
+};
 #[cfg(not(windows))]
 use super::r#impl::environment::{UVAR_SCOPE_IS_GLOBAL, uvars};
+#[cfg(not(windows))]
+use crate::{
+    abbrs::{Abbreviation, Position, abbrs_get_set},
+    env::config_paths::{ConfigPaths, PREFIX},
+    env_dispatch::env_dispatch_init,
+    event::Event,
+    input::{FISH_BIND_MODE_VAR, init_input},
+    null_terminated_array::OwningNullTerminatedArray,
+    path::{
+        path_emit_config_directory_messages, path_get_cache, path_get_config, path_get_data,
+        paths_are_same_file,
+    },
+    proc::is_interactive_session,
+    termsize,
+    universal_notifier::default_notifier,
+    wutil::fish_wcstol,
+};
 use crate::{
     builtins::{BuiltinResult, SUCCESS},
     env::{EnvMode, EnvSetMode, EnvVar, Statuses, r#impl::is_electric_var},
@@ -14,32 +33,24 @@ use crate::{
     prelude::*,
     wutil::wgetcwd,
 };
-#[cfg(not(windows))]
-use crate::{
-    abbrs::{Abbreviation, Position, abbrs_get_set},
-    env::config_paths::{ConfigPaths, PREFIX},
-    env_dispatch::env_dispatch_init,
-    event::Event,
-    input::{FISH_BIND_MODE_VAR, init_input},
-    null_terminated_array::OwningNullTerminatedArray,
-    path::{path_emit_config_directory_messages, path_get_cache, path_get_config, path_get_data, paths_are_same_file},
-    proc::is_interactive_session,
-    termsize,
-    universal_notifier::default_notifier,
-    wutil::fish_wcstol,
-};
 use fish_common::assert_send;
 #[cfg(not(windows))]
 use fish_common::{UnescapeStringStyle, unescape_string};
 #[cfg(not(windows))]
 use fish_wcstringutil::join_strings;
-use fish_widestring::{osstr2wcstring, str2wcstring};
 #[cfg(not(windows))]
 use fish_widestring::cstr2wcstring;
+use fish_widestring::{osstr2wcstring, str2wcstring};
 use libc::c_int;
 #[cfg(not(windows))]
-use nix::{NixPath as _, unistd::{Uid, User, gethostname, getpid}};
-use std::{collections::HashMap, sync::{Arc, OnceLock}};
+use nix::{
+    NixPath as _,
+    unistd::{Uid, User, gethostname, getpid},
+};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 #[cfg(not(windows))]
 use std::{ffi::CStr, path::PathBuf, sync::LazyLock};
 

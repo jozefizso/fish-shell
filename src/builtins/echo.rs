@@ -192,9 +192,26 @@ pub fn echo(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) ->
                     if let Some((digits_consumed, narrow_val)) =
                         parse_numeric_sequence(chars.clone())
                     {
-                        consumed = digits_consumed;
-                        // The narrow_val is a literal byte that we want to output (#1894).
-                        encode_byte_to_char(narrow_val)
+                        #[cfg(unix)]
+                        {
+                            consumed = digits_consumed;
+                            // Preserve fish's Unix byte-escape representation.
+                            encode_byte_to_char(narrow_val)
+                        }
+                        #[cfg(windows)]
+                        {
+                            // Byte escapes and literal Unicode must remain distinct on Windows.
+                            // Flush text before emitting the byte at its known provenance.
+                            if !out.is_empty() {
+                                streams.out.append(&out);
+                                out.clear();
+                            }
+                            streams.out.append_bytes(&[narrow_val]);
+                            for _ in 0..digits_consumed {
+                                _ = chars.next();
+                            }
+                            continue;
+                        }
                     } else {
                         consumed = 0;
                         '\\'

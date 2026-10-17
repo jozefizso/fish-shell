@@ -8,10 +8,13 @@ use crate::parser_keywords::parser_keywords_is_subcommand;
 use crate::prelude::*;
 use crate::redirection::RedirectionMode;
 use fish_feature_flags::{FeatureFlag, feature_test};
-use libc::{STDIN_FILENO, STDOUT_FILENO};
+const STDIN_FILENO: i32 = 0;
+const STDOUT_FILENO: i32 = 1;
+#[cfg(unix)]
 use nix::fcntl::OFlag;
 use std::ops::Range;
-use std::os::fd::RawFd;
+// Descriptor numbers in source syntax, not operating-system handles.
+type RawFd = i32;
 
 /// Token types. XXX Why this isn't ParseTokenType, I'm not really sure.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1085,6 +1088,7 @@ impl TryFrom<&wstr> for PipeOrRedir {
 
 impl PipeOrRedir {
     /// Return the oflags (as in open(2)) for this redirection.
+    #[cfg(unix)]
     pub fn oflags(&self) -> Option<OFlag> {
         self.mode.oflags()
     }
@@ -1150,10 +1154,11 @@ pub fn variable_assignment_equals_pos(txt: &wstr) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::STDOUT_FILENO;
     use super::{PipeOrRedir, TokFlags, TokenType, Tokenizer, TokenizerError};
     use crate::prelude::*;
     use crate::redirection::RedirectionMode;
-    use libc::{STDERR_FILENO, STDOUT_FILENO};
+    const STDERR_FILENO: i32 = 2;
 
     #[test]
     fn test_tokenizer() {

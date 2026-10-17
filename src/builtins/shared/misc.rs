@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::proc::{Pid, no_exec};
 use crate::{
     builtins::{prelude::*, *},
     err_fmt,
@@ -6,7 +8,7 @@ use crate::{
     parse_constants::UNKNOWN_BUILTIN_ERR_MSG,
     parse_util::argument_is_help,
     parser::{BlockType, LoopStatus},
-    proc::{Pid, ProcStatus, no_exec},
+    proc::ProcStatus,
     wutil,
 };
 use fish_common::{Named, assert_sorted_by_name, escape, get_by_sorted_name};
@@ -108,6 +110,7 @@ struct BuiltinData {
 // Data about all the builtin commands in fish.
 // Functions that are bound to builtin_generic are handled directly by the parser.
 // NOTE: These must be kept in sorted order!
+#[cfg(unix)]
 const BUILTIN_DATAS: &[BuiltinData] = &[
     BuiltinData {
         name: L!("!"),
@@ -366,6 +369,103 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         func: builtin_generic,
     },
 ];
+
+#[cfg(windows)]
+const BUILTIN_DATAS: &[BuiltinData] = &[
+    BuiltinData {
+        name: L!("echo"),
+        func: echo::echo,
+    },
+    BuiltinData {
+        name: L!("exit"),
+        func: exit::exit,
+    },
+    BuiltinData {
+        name: L!("false"),
+        func: r#false::r#false,
+    },
+    BuiltinData {
+        name: L!("math"),
+        func: math::math,
+    },
+    BuiltinData {
+        name: L!("printf"),
+        func: printf::printf,
+    },
+    BuiltinData {
+        name: L!("set"),
+        func: set::set,
+    },
+    BuiltinData {
+        name: L!("true"),
+        func: r#true::r#true,
+    },
+];
+
+/// Names reserved by fish which must never fall through to native executable lookup.
+#[cfg(windows)]
+pub fn builtin_is_unsupported(name: &wstr) -> bool {
+    [
+        L!("!"),
+        L!("."),
+        L!(":"),
+        L!("["),
+        L!("_"),
+        L!("abbr"),
+        L!("and"),
+        L!("argparse"),
+        L!("begin"),
+        L!("bg"),
+        L!("bind"),
+        L!("block"),
+        L!("break"),
+        L!("breakpoint"),
+        L!("builtin"),
+        L!("case"),
+        L!("cd"),
+        L!("command"),
+        L!("commandline"),
+        L!("complete"),
+        L!("contains"),
+        L!("continue"),
+        L!("count"),
+        L!("disown"),
+        L!("else"),
+        L!("emit"),
+        L!("end"),
+        L!("eval"),
+        L!("exec"),
+        L!("fg"),
+        L!("fish_indent"),
+        L!("fish_key_reader"),
+        L!("for"),
+        L!("function"),
+        L!("functions"),
+        L!("history"),
+        L!("if"),
+        L!("jobs"),
+        L!("not"),
+        L!("or"),
+        L!("path"),
+        L!("pwd"),
+        L!("random"),
+        L!("read"),
+        L!("realpath"),
+        L!("return"),
+        L!("set_color"),
+        L!("source"),
+        L!("status"),
+        L!("string"),
+        L!("switch"),
+        L!("test"),
+        L!("time"),
+        L!("type"),
+        L!("ulimit"),
+        L!("wait"),
+        L!("while"),
+    ]
+    .contains(&name)
+}
 assert_sorted_by_name!(BUILTIN_DATAS);
 
 impl Named for BuiltinData {
@@ -406,6 +506,7 @@ pub fn builtin_run(parser: &mut Parser, argv: &mut [&wstr], streams: &mut IoStre
     // We can be handed a keyword by the parser as if it was a command. This happens when the user
     // follows the keyword by `-h` or `--help`. Since it isn't really a builtin command we need to
     // handle displaying help for it here.
+    #[cfg(unix)]
     if argv.len() == 2 && argument_is_help(argv[1]) && cmd_needs_help(argv[0]) {
         builtin_print_help(parser, streams, argv[0]);
         return ProcStatus::from_exit_code(STATUS_CMD_OK);
@@ -415,6 +516,14 @@ pub fn builtin_run(parser: &mut Parser, argv: &mut [&wstr], streams: &mut IoStre
         flogf!(error, "%s", wgettext_fmt!(UNKNOWN_BUILTIN_ERR_MSG, argv[0]));
         return ProcStatus::from_exit_code(STATUS_CMD_ERROR);
     };
+
+    #[cfg(windows)]
+    if !native_builtin_options_supported(argv) {
+        err_fmt!("unsupported builtin options on native Windows")
+            .cmd(argv[0])
+            .finish(streams);
+        return ProcStatus::from_exit_code(STATUS_INVALID_ARGS);
+    }
 
     let builtin_ret = (builtin.func)(parser, streams, argv);
 
@@ -427,7 +536,9 @@ pub fn builtin_run(parser: &mut Parser, argv: &mut [&wstr], streams: &mut IoStre
     // Otherwise use any errors from writing to out and writing to err, in that order.
     let mut code = match builtin_ret {
         Ok(success) => {
-            if success.preserve_failure_exit_status {
+            if success.preserve_failure_exit_status
+                && (cfg!(unix) || (out_ret == 0 && err_ret == 0))
+            {
                 return ProcStatus::empty();
             } else {
                 0
@@ -551,6 +662,7 @@ pub fn builtin_get_desc(name: &wstr) -> Option<&'static wstr> {
 ///    builtin or function name to get up help for
 ///
 /// Process and print help for the specified builtin or function.
+#[cfg(unix)]
 pub fn builtin_print_help(parser: &mut Parser, streams: &mut IoStreams, cmd: &wstr) {
     // This won't ever work if no_exec is set.
     if no_exec() {
@@ -569,6 +681,13 @@ pub fn builtin_print_help(parser: &mut Parser, streams: &mut IoStreams, cmd: &ws
             .cmd(&name_esc)
             .finish(streams);
     }
+}
+
+#[cfg(windows)]
+pub fn builtin_print_help(_parser: &mut Parser, streams: &mut IoStreams, cmd: &wstr) {
+    err_fmt!("help tooling is unsupported on native Windows")
+        .cmd(cmd)
+        .finish(streams);
 }
 
 /// Perform error reporting for encounter with unknown option.
@@ -868,10 +987,12 @@ impl<'args> Iterator for Arguments<'args, '_> {
     }
 }
 
+#[cfg(unix)]
 pub fn parse_pid(streams: &mut IoStreams, cmd: &wstr, arg: &wstr) -> Result<Pid, ErrorCode> {
     parsed_pid(streams, cmd, arg, fish_wcstoi(arg))
 }
 
+#[cfg(unix)]
 pub fn parse_pid_may_be_zero(
     streams: &mut IoStreams,
     cmd: &wstr,
@@ -884,6 +1005,7 @@ pub fn parse_pid_may_be_zero(
     parsed_pid(streams, cmd, arg, parsed).map(Some)
 }
 
+#[cfg(unix)]
 fn parsed_pid(
     streams: &mut IoStreams,
     cmd: &wstr,
@@ -903,6 +1025,7 @@ fn parsed_pid(
 
 /// A generic builtin that only supports showing a help message. This is only a placeholder that
 /// prints the help message. Useful for commands that live in the parser.
+#[cfg(unix)]
 fn builtin_generic(
     parser: &mut Parser,
     streams: &mut IoStreams,
@@ -928,6 +1051,7 @@ fn builtin_generic(
 
 /// This function handles both the 'continue' and the 'break' builtins that are used for loop
 /// control.
+#[cfg(unix)]
 pub fn builtin_break_continue(
     parser: &mut Parser,
     streams: &mut IoStreams,
@@ -1025,5 +1149,142 @@ impl ColorEnabled {
 
             STATUS_INVALID_ARGS
         })
+    }
+}
+
+#[cfg(windows)]
+pub fn native_builtin_options_supported(argv: &[&wstr]) -> bool {
+    let Some(&cmd) = argv.first() else {
+        return false;
+    };
+    if cmd == "true" || cmd == "false" {
+        return argv.len() == 1;
+    }
+    if cmd == "set" {
+        for arg in &argv[1..] {
+            if *arg == "--" || !arg.starts_with("-") || *arg == "-" {
+                break;
+            }
+            if arg.starts_with("--") {
+                if ![
+                    L!("--local"),
+                    L!("--global"),
+                    L!("--export"),
+                    L!("--unexport"),
+                    L!("--query"),
+                    L!("--erase"),
+                ]
+                .contains(arg)
+                {
+                    return false;
+                }
+            } else if !arg[1..]
+                .chars()
+                .all(|c| matches!(c, 'l' | 'g' | 'x' | 'u' | 'q' | 'e'))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    if cmd == "echo" {
+        return !argv[1..]
+            .iter()
+            .take_while(|arg| arg.starts_with("-"))
+            .any(|arg| *arg == "--help" || *arg == "-h");
+    }
+    if cmd == "math" {
+        return !argv[1..].iter().any(|arg| {
+            arg.starts_with("--")
+                || (arg.starts_with("-") && arg.len() > 1 && arg.char_at(1).is_ascii_alphabetic())
+        });
+    }
+    if cmd == "printf" || cmd == "exit" {
+        return !argv
+            .get(1)
+            .is_some_and(|arg| *arg == "--help" || *arg == "-h");
+    }
+    builtin_exists(cmd)
+}
+
+#[cfg(all(test, windows))]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn native_registry_is_deliberately_narrow() {
+        assert_eq!(
+            builtin_get_names().collect::<Vec<_>>(),
+            vec![
+                L!("echo"),
+                L!("exit"),
+                L!("false"),
+                L!("math"),
+                L!("printf"),
+                L!("set"),
+                L!("true")
+            ]
+        );
+        for name in [
+            L!("fg"),
+            L!("bg"),
+            L!("exec"),
+            L!("source"),
+            L!("cd"),
+            L!("test"),
+        ] {
+            assert!(builtin_is_unsupported(name));
+            assert!(!builtin_exists(name));
+        }
+        assert!(!builtin_is_unsupported(L!("C:\\probe.exe")));
+    }
+
+    #[test]
+    fn native_options_never_downgrade_universal_assignment() {
+        for option in [
+            L!("-U"),
+            L!("-gxU"),
+            L!("--universal"),
+            L!("--show"),
+            L!("--help"),
+        ] {
+            assert!(!native_builtin_options_supported(&[
+                L!("set"),
+                option,
+                L!("value")
+            ]));
+        }
+        for option in [
+            L!("-lx"),
+            L!("-gx"),
+            L!("-u"),
+            L!("-q"),
+            L!("-e"),
+            L!("--local"),
+        ] {
+            assert!(native_builtin_options_supported(&[
+                L!("set"),
+                option,
+                L!("value")
+            ]));
+        }
+        assert!(native_builtin_options_supported(&[
+            L!("set"),
+            L!("value"),
+            L!("-U")
+        ]));
+        assert!(native_builtin_options_supported(&[
+            L!("printf"),
+            L!("%s"),
+            L!("-h")
+        ]));
+        assert!(!native_builtin_options_supported(&[
+            L!("math"),
+            L!("--help")
+        ]));
+        assert!(!native_builtin_options_supported(&[
+            L!("true"),
+            L!("--help")
+        ]));
     }
 }

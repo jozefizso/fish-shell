@@ -4,12 +4,15 @@ use crate::{
     common::valid_var_name,
     env::{EnvMode, EnvStackSetResult, EnvVar, Environment, INHERITED_VARS, handle_env_return},
     err_fmt, err_str,
-    event::{self, Event},
     expand::{expand_escape_string, expand_escape_variable},
-    history::{History, history_id},
     parse_execution::varname_error,
     parser::ParserEnvSetMode,
     wutil::wcstoi::{self, wcstoi_partial},
+};
+#[cfg(unix)]
+use crate::{
+    event::{self, Event},
+    history::{History, history_id},
 };
 use fish_common::{EscapeFlags, EscapeStringStyle, escape, escape_string, help_section};
 use fish_widestring::ELLIPSIS_CHAR;
@@ -125,6 +128,17 @@ impl Options {
         let mut w = WGetopter::new(SHORT_OPTS, LONG_OPTS, args);
         while let Some(c) = w.next_opt() {
             match c {
+                #[cfg(windows)]
+                'U' | 'f' | 'h' | 'n' | 'L' | 'S' | 'a' | 'p' | PATH_ARG | UNPATH_ARG
+                | NO_EVENT_ARG => {
+                    err_fmt!(
+                        "unsupported option on native Windows: %s",
+                        args[w.wopt_index - 1]
+                    )
+                    .cmd(cmd)
+                    .finish(streams);
+                    return Err(STATUS_INVALID_ARGS);
+                }
                 'a' => opts.append = true,
                 'e' => {
                     opts.erase = true;
@@ -535,6 +549,7 @@ fn list(opts: &Options, parser: &Parser, streams: &mut IoStreams) -> BuiltinResu
 
         if !names_only {
             let mut val = WString::new();
+            #[cfg(unix)]
             if opts.shorten_ok && key == "history" {
                 let history = History::new(history_id(parser.vars()));
                 for i in 1..history.size() {
@@ -547,6 +562,10 @@ fn list(opts: &Options, parser: &Parser, streams: &mut IoStreams) -> BuiltinResu
                     val += &expand_escape_string(history.item_at_index(i).unwrap().str())[..];
                 }
             } else if let Some(var) = parser.vars().getf_unless_empty(&key, opts.set_mode.mode) {
+                val = expand_escape_variable(&var);
+            }
+            #[cfg(windows)]
+            if let Some(var) = parser.vars().getf_unless_empty(&key, opts.set_mode.mode) {
                 val = expand_escape_variable(&var);
             }
             if !val.is_empty() {
@@ -789,6 +808,7 @@ fn erase(
                 if retval != EnvStackSetResult::NotFound {
                     handle_env_return(retval, cmd, split.varname, streams);
                 }
+                #[cfg(unix)]
                 if retval == EnvStackSetResult::Ok && !opts.no_event {
                     event::fire(parser, Event::variable_erase(split.varname.to_owned()));
                 }

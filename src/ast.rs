@@ -2861,11 +2861,14 @@ mod tests {
     use crate::ast;
     use crate::parse_constants::ParseTreeFlags;
     use crate::prelude::*;
-    use crate::tests::prelude::*;
+    #[cfg(unix)]
+    use crate::tests::prelude::test_init;
+    use serial_test::serial;
 
     #[test]
     #[serial]
     fn test_ast_parse() {
+        #[cfg(unix)]
         test_init();
         let src = L!("echo");
         let ast = ast::parse(src, ParseTreeFlags::default(), None);

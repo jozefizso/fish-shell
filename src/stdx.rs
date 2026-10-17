@@ -1,6 +1,6 @@
 /// This module contains tests that assert the functionality and behavior of the rust standard
 /// library, to ensure we can safely use its abstractions to perform low-level operations.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs::File;
 

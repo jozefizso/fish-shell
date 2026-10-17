@@ -39,7 +39,8 @@ pub fn trace_argv<S: AsRef<wstr>>(parser: &Parser, command: &wstr, args: &[S]) {
         trace_text.push_utfstr(&escape(arg.as_ref()));
     }
     trace_text.push('\n');
-    log_extra_to_flog_file(&trace_text);
+    // Tracing is best-effort, like flog!: a failed sink must not change command status.
+    let _ = log_extra_to_flog_file(&trace_text);
 }
 
 /// Convenience helper to trace a single command if tracing is enabled.

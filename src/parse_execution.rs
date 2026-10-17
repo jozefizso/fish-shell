@@ -20,7 +20,6 @@ use crate::{
         self, ExpandFlags, ExpandResultCode, expand_one, expand_string, expand_to_command_and_args,
     },
     flog::flog,
-    function,
     io::{FdOutputStream, IoChain, IoStreams, OutputStream, StringOutputStream},
     job_group::JobGroup,
     operation_context::OperationContext,
@@ -36,23 +35,29 @@ use crate::{
         Block, BlockData, BlockId, BlockType, LoopStatus, Parser, ParserEnvSetMode, ProfileItem,
     },
     parser_keywords::parser_keywords_is_subcommand,
-    path::{path_as_implicit_cd, path_try_get_path},
+    path::path_try_get_path,
     prelude::*,
-    proc::{
-        ConcreteAssignment, Job, JobControl, JobProperties, Process, ProcessType,
-        get_job_control_mode, job_reap, no_exec,
-    },
-    reader::fish_is_unwinding_for_exit,
+    proc::{ConcreteAssignment, Job, JobProperties, Process, ProcessType, job_reap, no_exec},
     redirection::{RedirectionMode, RedirectionSpec, RedirectionSpecList},
     signal::RawSignal,
-    timer::push_timer,
     tokenizer::{PipeOrRedir, TokenType, variable_assignment_equals_pos},
     trace::{trace_if_enabled, trace_if_enabled_with_args},
     wildcard::wildcard_match,
 };
 use fish_common::{ScopeGuard, escape, help_section, truncate_at_nul};
 use fish_widestring::WExt as _;
-use libc::{EXIT_SUCCESS, STDERR_FILENO, STDOUT_FILENO, c_int};
+use libc::{EXIT_SUCCESS, c_int};
+const STDOUT_FILENO: i32 = 1;
+const STDERR_FILENO: i32 = 2;
+#[cfg(unix)]
+use crate::{
+    function,
+    path::path_as_implicit_cd,
+    proc::{JobControl, get_job_control_mode},
+    reader::fish_is_unwinding_for_exit,
+    timer::push_timer,
+};
+#[cfg(unix)]
 use nix::errno::Errno;
 use std::{io::ErrorKind, rc::Rc, sync::Arc};
 
@@ -200,7 +205,12 @@ impl ExecutionContext {
     fn check_end_execution(&self, ctx: &mut OperationContext<'_>) -> Option<EndExecutionReason> {
         // If one of our jobs ended with SIGINT, we stop execution.
         // Likewise if fish itself got a SIGINT, or if something ran exit, etc.
+        #[cfg(unix)]
         if self.cancel_signal.is_some() || ctx.check_cancel() || fish_is_unwinding_for_exit() {
+            return Some(EndExecutionReason::Cancelled);
+        }
+        #[cfg(windows)]
+        if ctx.check_cancel() {
             return Some(EndExecutionReason::Cancelled);
         }
         let parser = ctx.parser();
@@ -243,6 +253,7 @@ impl ExecutionContext {
     }
 
     /// Command not found support.
+    #[cfg(unix)]
     fn handle_command_not_found(
         &mut self,
         ctx: &mut OperationContext<'_>,
@@ -349,6 +360,30 @@ impl ExecutionContext {
         // Here we want to report an error (so it shows a backtrace).
         // If the handler printed text, that's already shown, so error will be empty.
         report_error_formatted!(self, ctx, STATUS_CMD_UNKNOWN, &statement.command, error)
+    }
+
+    #[cfg(windows)]
+    fn handle_command_not_found(
+        &mut self,
+        ctx: &mut OperationContext<'_>,
+        cmd: &wstr,
+        statement: &ast::DecoratedStatement,
+        err: std::io::Error,
+    ) -> EndExecutionReason {
+        let status = if err.kind() == ErrorKind::NotFound {
+            STATUS_CMD_UNKNOWN
+        } else {
+            STATUS_NOT_EXECUTABLE
+        };
+        report_error!(
+            self,
+            ctx,
+            status,
+            &statement.command,
+            "Cannot execute '%s': %s",
+            cmd,
+            err.to_string()
+        )
     }
 
     // Utilities.
@@ -563,6 +598,7 @@ impl ExecutionContext {
         }
     }
 
+    #[cfg(unix)]
     fn resolve_function(cmd: &wstr, parser: &mut Parser) -> Option<ProcessType> {
         if !valid_func_name(cmd) {
             return None;
@@ -584,9 +620,11 @@ impl ExecutionContext {
             StatementDecoration::Command => ProcessType::External,
             StatementDecoration::Builtin => ProcessType::Builtin,
             StatementDecoration::None => {
+                #[cfg(unix)]
                 if function::exists(cmd, ctx.parser()) {
-                    ProcessType::Function { props: None }
-                } else if builtin_exists(cmd) {
+                    return ProcessType::Function { props: None };
+                }
+                if builtin_exists(cmd) {
                     ProcessType::Builtin
                 } else {
                     ProcessType::External
@@ -734,6 +772,18 @@ impl ExecutionContext {
             return ret;
         }
 
+        #[cfg(windows)]
+        if builtins::builtin_is_unsupported(&cmd) {
+            return report_error!(
+                self,
+                ctx,
+                STATUS_INVALID_ARGS,
+                &statement.command,
+                "Unsupported builtin in native Windows batch mode: %s",
+                cmd
+            );
+        }
+
         // For no-exec, having an empty command is okay. We can't do anything more with it tho.
         if no_exec() {
             return EndExecutionReason::Ok;
@@ -757,6 +807,7 @@ impl ExecutionContext {
                 path = external_cmd.path;
             } else {
                 // If the specified command does not exist, and is undecorated, try using an implicit cd.
+                #[cfg(unix)]
                 if statement.decoration() == StatementDecoration::None {
                     // Implicit cd requires an empty argument and redirection list.
                     if statement.args_or_redirs.is_empty() {
@@ -796,11 +847,14 @@ impl ExecutionContext {
             cmd_args = vec![L!("cd").to_owned(), L!("--").to_owned(), cmd];
 
             // If we have defined a wrapper around cd, use it, otherwise use the cd builtin.
-            process_type = if function::exists(L!("cd"), ctx.parser()) {
-                ProcessType::Function { props: None }
-            } else {
-                ProcessType::Builtin
-            };
+            #[cfg(unix)]
+            {
+                process_type = if function::exists(L!("cd"), ctx.parser()) {
+                    ProcessType::Function { props: None }
+                } else {
+                    ProcessType::Builtin
+                };
+            }
         } else {
             // Not implicit cd.
             let glob_behavior = if [L!("set"), L!("count"), L!("path")].contains(&&cmd[..]) {
@@ -829,6 +883,7 @@ impl ExecutionContext {
         }
 
         // Populate the process.
+        #[cfg(unix)]
         if let ProcessType::Function { props } = &mut process_type {
             let Some(ProcessType::Function {
                 props: resolved_props,
@@ -890,7 +945,16 @@ impl ExecutionContext {
             BlockStatementHeader::While(wh) => {
                 self.run_while_statement(ctx, wh, contents, associated_block)
             }
+            #[cfg(unix)]
             BlockStatementHeader::Function(fh) => self.run_function_statement(ctx, statement, fh),
+            #[cfg(windows)]
+            BlockStatementHeader::Function(_) => report_error!(
+                self,
+                ctx,
+                STATUS_INVALID_ARGS,
+                statement,
+                "Function definitions are unsupported in native Windows batch mode"
+            ),
             BlockStatementHeader::Begin(_bh) => self.run_begin_statement(ctx, contents),
         }
     }
@@ -961,6 +1025,7 @@ impl ExecutionContext {
         trace_if_enabled_with_args(ctx.parser(), L!("for"), &arguments);
 
         // We fire the same event over and over again, just construct it once.
+        #[cfg(unix)]
         let evt = Event::variable_set(for_var_name.clone());
 
         // Now drive the for loop.
@@ -981,6 +1046,7 @@ impl ExecutionContext {
                 EnvStackSetResult::Ok,
                 "for loop variable should have been successfully set"
             );
+            #[cfg(unix)]
             event::fire(ctx.parser(), evt.clone());
 
             ctx.parser().libdata_mut().loop_status = LoopStatus::Normals;
@@ -1289,6 +1355,7 @@ impl ExecutionContext {
     }
 
     // Define a function.
+    #[cfg(unix)]
     fn run_function_statement(
         &mut self,
         ctx: &mut OperationContext<'_>,
@@ -1553,6 +1620,18 @@ impl ExecutionContext {
             return ret;
         }
 
+        #[cfg(windows)]
+        if let Some((node, reason)) = self.unsupported_native_job(job_node) {
+            return report_error!(
+                self,
+                ctx,
+                STATUS_INVALID_ARGS,
+                node,
+                "Unsupported operation in native Windows batch mode: %s",
+                reason
+            );
+        }
+
         // We definitely do not want to execute anything if we're told we're --no-execute!
         if no_exec() {
             return EndExecutionReason::Ok;
@@ -1592,6 +1671,7 @@ impl ExecutionContext {
         };
 
         let job_is_background = job_node.bg.is_some();
+        #[cfg(unix)]
         let _timer = {
             let wants_timing = job_node_wants_timing(job_node);
             // It's an error to have 'time' in a background job.
@@ -1704,6 +1784,7 @@ impl ExecutionContext {
 
                 // Update universal variables on external commands.
                 // We only incorporate external changes if we had an external proc, for hysterical raisins.
+                #[cfg(unix)]
                 parser.sync_uvars_and_fire(job.has_external_proc() /* always */);
             }
 
@@ -1841,6 +1922,7 @@ impl ExecutionContext {
         );
 
         // Construct Processes for job continuations (pipelines).
+        #[cfg(unix)]
         for jc in &job_node.continuation {
             if result != EndExecutionReason::Ok {
                 break;
@@ -1895,6 +1977,7 @@ impl ExecutionContext {
     }
 
     // Assign a job group to the given job.
+    #[cfg(unix)]
     fn setup_group(&self, ctx: &mut OperationContext<'_>, j: &mut Job) {
         // We can use the parent group if it's compatible and we're not backgrounded.
         if ctx
@@ -1924,6 +2007,7 @@ impl ExecutionContext {
     }
 
     // Return whether we should apply job control to our processes.
+    #[cfg(unix)]
     fn use_job_control(&self, ctx: &mut OperationContext<'_>) -> bool {
         if ctx.parser().is_command_substitution() {
             return false;
@@ -1933,6 +2017,87 @@ impl ExecutionContext {
             JobControl::Interactive => ctx.parser().is_interactive(),
             JobControl::None => false,
         }
+    }
+
+    #[cfg(windows)]
+    fn setup_group(&self, _ctx: &mut OperationContext<'_>, job: &mut Job) {
+        job.group = Some(JobGroup::create(job.command().to_owned(), false));
+        job.group().is_foreground.store(true);
+        job.flags_mut().is_group_root = true;
+    }
+
+    /// Validate the entire affected job before assignment or argument expansion. In particular,
+    /// a substitution hidden inside an excluded construct must never acquire side effects.
+    #[cfg(windows)]
+    fn unsupported_native_job<'a>(
+        &self,
+        job: &'a ast::JobPipeline,
+    ) -> Option<(&'a dyn ast::Node, &'static str)> {
+        use fish_common::{UnescapeStringStyle, unescape_string};
+        for node in ast::Traversal::new(job) {
+            match node.kind() {
+                ast::Kind::JobPipeline(pipeline) if pipeline.bg.is_some() => {
+                    return Some((node, "background execution"));
+                }
+                ast::Kind::JobPipeline(pipeline) if !pipeline.continuation.is_empty() => {
+                    return Some((node, "pipelines"));
+                }
+                ast::Kind::Redirection(_) => return Some((node, "redirection")),
+                ast::Kind::TimeDecorator(_) => return Some((node, "time")),
+                ast::Kind::WhileHeader(_) => return Some((node, "while")),
+                ast::Kind::FunctionHeader(_) => return Some((node, "function definitions")),
+                ast::Kind::SwitchStatement(_) => return Some((node, "switch")),
+                ast::Kind::DecoratedStatement(statement) => {
+                    if statement.decoration() == StatementDecoration::Exec {
+                        return Some((node, "exec (process-image replacement)"));
+                    }
+                    let command = unescape_string(
+                        self.node_source(&statement.command),
+                        UnescapeStringStyle::default(),
+                    )?;
+                    if builtins::builtin_is_unsupported(&command) {
+                        return Some((node, "builtin not supported by the native batch runtime"));
+                    }
+                }
+                _ => {}
+            }
+            let text = match node.kind() {
+                ast::Kind::Argument(_) | ast::Kind::VariableAssignment(_) => {
+                    Some(self.node_source(node))
+                }
+                ast::Kind::Token(token) if token.token_type() == ParseTokenType::String => {
+                    Some(self.node_source(node))
+                }
+                _ => None,
+            };
+            if let Some(text) = text {
+                if !matches!(
+                    locate_cmdsubst_range(text, &mut 0, false, None, None),
+                    Ok(None)
+                ) {
+                    return Some((node, "command substitution"));
+                }
+                if let Some(unescaped) = unescape_string(
+                    text,
+                    UnescapeStringStyle::Script(fish_common::UnescapeFlags {
+                        special: true,
+                        ..Default::default()
+                    }),
+                ) {
+                    if unescaped.chars().any(|ch| {
+                        matches!(
+                            ch,
+                            fish_widestring::ANY_CHAR
+                                | fish_widestring::ANY_STRING
+                                | fish_widestring::ANY_STRING_RECURSIVE
+                        )
+                    }) {
+                        return Some((node, "glob traversal"));
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

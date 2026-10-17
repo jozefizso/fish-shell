@@ -3,12 +3,14 @@
 use crate::{
     global_safety::{AtomicRef, RelaxedAtomicBool},
     prelude::*,
-    terminal::Outputter,
-    termsize::Termsize,
     wutil::fish_iswalnum,
 };
+#[cfg(unix)]
+use crate::{terminal::Outputter, termsize::Termsize};
+#[cfg(unix)]
 use fish_fallback::fish_wcwidth;
 use fish_widestring::subslice_position;
+#[cfg(unix)]
 use nix::sys::termios::Termios;
 use std::{
     env,
@@ -21,6 +23,7 @@ pub const BUILD_DIR: &str = env!("FISH_RESOLVED_BUILD_DIR");
 
 pub const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
 
+#[cfg(unix)]
 pub fn shell_modes() -> MutexGuard<'static, Termios> {
     crate::reader::SHELL_MODES.lock().unwrap()
 }
@@ -62,6 +65,7 @@ pub fn has_working_tty_timestamps() -> bool {
 /// todo!("Maybe remove the box? It is only needed for get_bg_context.")
 pub type CancelChecker = Box<dyn Fn() -> bool>;
 
+#[cfg(unix)]
 pub fn init_special_chars_once() {
     if is_windows_subsystem_for_linux(WSL::Any) {
         // neither of \u23CE and \u25CF can be displayed in the default fonts on Windows, though
@@ -92,8 +96,10 @@ pub fn valid_func_name(name: &wstr) -> bool {
 }
 
 // Output writes always succeed; this adapter allows us to use it in a write-like macro.
+#[cfg(unix)]
 struct OutputterWriteAdapter<'a>(&'a mut Outputter);
 
+#[cfg(unix)]
 impl<'a> std::fmt::Write for OutputterWriteAdapter<'a> {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
         self.0.write_bytes(s.as_bytes());
@@ -101,6 +107,7 @@ impl<'a> std::fmt::Write for OutputterWriteAdapter<'a> {
     }
 }
 
+#[cfg(unix)]
 impl<'a> std::io::Write for OutputterWriteAdapter<'a> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.write_bytes(buf);
@@ -111,6 +118,7 @@ impl<'a> std::io::Write for OutputterWriteAdapter<'a> {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn do_write_to_output(writer: &mut Outputter, args: std::fmt::Arguments<'_>) {
     let mut adapter = OutputterWriteAdapter(writer);
     std::fmt::write(&mut adapter, args).unwrap();
@@ -124,6 +132,7 @@ macro_rules! write_to_output {
 }
 
 /// Write the given paragraph of output, redoing linebreaks to fit `termsize`.
+#[cfg(unix)]
 pub fn reformat_for_screen(msg: &wstr, termsize: &Termsize) -> WString {
     let mut buff = WString::new();
 
@@ -317,7 +326,7 @@ macro_rules! env_stack_set_from_env {
 #[cfg(test)]
 pub const ESCAPE_TEST_CHAR: usize = 4000;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         ESCAPE_TEST_CHAR, EscapeFlags, EscapeStringStyle, UnescapeStringStyle, escape_string,
