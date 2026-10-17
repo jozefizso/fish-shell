@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 pub mod config_paths;
 mod environment;
 mod r#impl;
@@ -7,8 +8,9 @@ pub use environment::*;
 pub use r#impl::is_read_only;
 pub use var::*;
 
+#[cfg(not(windows))]
 use fish_widestring::ToCString;
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 use fish_widestring::{WString, charptr2wcstring};
 use std::sync::{Mutex, atomic::AtomicUsize};
 
@@ -20,6 +22,7 @@ pub const DEFAULT_READ_BYTE_LIMIT: usize = 1024 * 1024 * 1024;
 /// with `$fish_read_limit`.
 pub static READ_BYTE_LIMIT: AtomicUsize = AtomicUsize::new(DEFAULT_READ_BYTE_LIMIT);
 
+#[cfg(not(windows))]
 static SETENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Sets an environment variable after obtaining a lock, to try and improve the safety of
@@ -27,6 +30,7 @@ static SETENV_LOCK: Mutex<()> = Mutex::new(());
 ///
 /// As values could contain non-unicode characters, they must first be converted from &wstr to a
 /// `CString` with [`fish_widestring::wcs2zstring()`].
+#[cfg(not(windows))]
 pub fn setenv_lock<S1: ToCString, S2: ToCString>(name: S1, value: S2, overwrite: bool) {
     let name = name.to_cstring();
     let value = value.to_cstring();
@@ -38,6 +42,7 @@ pub fn setenv_lock<S1: ToCString, S2: ToCString>(name: S1, value: S2, overwrite:
 
 /// Unsets an environment variable after obtaining a lock, to try and improve the safety of
 /// environment variables.
+#[cfg(not(windows))]
 pub fn unsetenv_lock<S: ToCString>(name: S) {
     let name = name.to_cstring();
     let _lock = SETENV_LOCK.lock();
@@ -46,7 +51,7 @@ pub fn unsetenv_lock<S: ToCString>(name: S) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 pub fn getenv_lock<S1: ToCString>(name: S1) -> Option<WString> {
     let name = name.to_cstring();
     let _lock = SETENV_LOCK.lock();

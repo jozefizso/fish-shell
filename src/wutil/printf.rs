@@ -31,6 +31,7 @@ macro_rules! fprintf {
     }
 }
 
+#[cfg(not(windows))]
 #[macro_export]
 macro_rules! printf {
     // Allow a `&str` or `&Utf32Str` as a format, and write to stdout.
@@ -39,11 +40,28 @@ macro_rules! printf {
     }
 }
 
+#[cfg(not(windows))]
 #[macro_export]
 macro_rules! eprintf {
     // Allow a `&str` or `&Utf32Str` as a format, and write to stderr.
     ($fmt:expr $(, $arg:expr)* $(,)?) => {
         fprintf!(libc::STDERR_FILENO, $fmt $(, $arg)*)
+    }
+}
+
+#[cfg(windows)]
+#[macro_export]
+macro_rules! printf {
+    ($fmt:expr $(, $arg:expr)* $(,)?) => {
+        $crate::fprintf!(1, $fmt $(, $arg)*)
+    }
+}
+
+#[cfg(windows)]
+#[macro_export]
+macro_rules! eprintf {
+    ($fmt:expr $(, $arg:expr)* $(,)?) => {
+        $crate::fprintf!(2, $fmt $(, $arg)*)
     }
 }
 

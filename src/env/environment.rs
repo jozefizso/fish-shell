@@ -1,49 +1,51 @@
-use super::r#impl::environment::{
-    EnvMutex, EnvMutexGuard, EnvScopedImpl, EnvStackImpl, ModResult, UVAR_SCOPE_IS_GLOBAL,
-    colon_split, uvars,
-};
+use super::r#impl::environment::{EnvMutex, EnvMutexGuard, EnvScopedImpl, EnvStackImpl, ModResult, colon_split};
+#[cfg(not(windows))]
+use super::r#impl::environment::{UVAR_SCOPE_IS_GLOBAL, uvars};
 use crate::{
-    abbrs::{Abbreviation, Position, abbrs_get_set},
     builtins::{BuiltinResult, SUCCESS},
-    env::{
-        EnvMode, EnvSetMode, EnvVar, Statuses,
-        config_paths::{ConfigPaths, PREFIX},
-        r#impl::is_electric_var,
-    },
-    env_dispatch::{VarChangeMilieu, env_dispatch_init, env_dispatch_var_change},
+    env::{EnvMode, EnvSetMode, EnvVar, Statuses, r#impl::is_electric_var},
+    env_dispatch::{VarChangeMilieu, env_dispatch_var_change},
     err_fmt,
-    event::Event,
     flog::flog,
     global_safety::RelaxedAtomicBool,
-    input::{FISH_BIND_MODE_VAR, init_input},
     io::IoStreams,
     localization::wgettext,
-    null_terminated_array::OwningNullTerminatedArray,
-    path::{
-        path_emit_config_directory_messages, path_get_cache, path_get_config, path_get_data,
-        path_make_canonical, paths_are_same_file,
-    },
+    path::path_make_canonical,
     prelude::*,
+    wutil::wgetcwd,
+};
+#[cfg(not(windows))]
+use crate::{
+    abbrs::{Abbreviation, Position, abbrs_get_set},
+    env::config_paths::{ConfigPaths, PREFIX},
+    env_dispatch::env_dispatch_init,
+    event::Event,
+    input::{FISH_BIND_MODE_VAR, init_input},
+    null_terminated_array::OwningNullTerminatedArray,
+    path::{path_emit_config_directory_messages, path_get_cache, path_get_config, path_get_data, paths_are_same_file},
     proc::is_interactive_session,
     termsize,
     universal_notifier::default_notifier,
-    wutil::{fish_wcstol, wgetcwd},
+    wutil::fish_wcstol,
 };
-use fish_common::{UnescapeStringStyle, assert_send, unescape_string};
+use fish_common::assert_send;
+#[cfg(not(windows))]
+use fish_common::{UnescapeStringStyle, unescape_string};
+#[cfg(not(windows))]
 use fish_wcstringutil::join_strings;
-use fish_widestring::{cstr2wcstring, osstr2wcstring, str2wcstring};
+use fish_widestring::{osstr2wcstring, str2wcstring};
+#[cfg(not(windows))]
+use fish_widestring::cstr2wcstring;
 use libc::c_int;
-use nix::{
-    NixPath as _,
-    unistd::{Uid, User, gethostname, getpid},
-};
-use std::{
-    collections::HashMap,
-    ffi::CStr,
-    path::PathBuf,
-    sync::{Arc, LazyLock, OnceLock},
-};
+#[cfg(not(windows))]
+use nix::{NixPath as _, unistd::{Uid, User, gethostname, getpid}};
+use std::{collections::HashMap, sync::{Arc, OnceLock}};
+#[cfg(not(windows))]
+use std::{ffi::CStr, path::PathBuf, sync::LazyLock};
 
+#[cfg(windows)]
+#[path = "native.rs"]
+mod native;
 /// Set when a universal variable has been modified but not yet been written to disk via sync().
 static UVARS_LOCALLY_MODIFIED: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
 
@@ -265,7 +267,7 @@ impl EnvStack {
         // Hacky stuff around PATH and CDPATH: #3914.
         // Not MANPATH; see #4158.
         // Replace empties with dot. Note we ignore pathvar here.
-        if key == "PATH" || key == "CDPATH" {
+        if key == "PATH" || (!cfg!(windows) && key == "CDPATH") {
             // Split on colons.
             let mut munged_vals = colon_split(&vals);
             // Replace empties with dots.
@@ -310,6 +312,7 @@ impl EnvStack {
     }
 
     /// Update the PWD variable based on the result of getcwd.
+    #[cfg(not(windows))]
     pub fn set_pwd_from_getcwd(&self) {
         let cwd = wgetcwd();
         if cwd.is_empty() {
@@ -385,6 +388,7 @@ impl EnvStack {
     }
 
     /// Returns an array containing all exported variables in a format suitable for execv.
+    #[cfg(not(windows))]
     pub fn export_array(&self) -> Arc<OwningNullTerminatedArray> {
         self.lock().base.export_array()
     }
@@ -400,6 +404,7 @@ impl EnvStack {
     /// If `always` is set, perform synchronization even if there's no pending changes from this
     /// instance (that is, look for changes from other fish instances).
     /// Return a list of events for changed variables.
+    #[cfg(not(windows))]
     pub fn universal_sync(&self, always: bool, is_repainting: bool) -> Vec<Event> {
         if UVAR_SCOPE_IS_GLOBAL.load() {
             return Vec::new();
@@ -501,6 +506,7 @@ pub(super) const FISH_USER_DATA_DIR: &wstr = L!("__fish_user_data_dir");
 pub(super) const FISH_CACHE_DIR: &wstr = L!("__fish_cache_dir");
 
 /// Set up the USER and HOME variable.
+#[cfg(not(windows))]
 fn setup_user(global_exported_mode: EnvSetMode, vars: &EnvStack) {
     let uid = Uid::effective();
     let user_var = vars.get_unless_empty(L!("USER"));
@@ -555,6 +561,7 @@ fn setup_user(global_exported_mode: EnvSetMode, vars: &EnvStack) {
     }
 }
 
+#[cfg(not(windows))]
 pub(crate) static FALLBACK_PATH: LazyLock<&[WString]> = LazyLock::new(|| {
     // _CS_PATH: colon-separated paths to find POSIX utilities. Same as USER_CS_PATH.
     // Fix until rust-lang/libc#4956 is merged
@@ -586,6 +593,7 @@ pub(crate) static FALLBACK_PATH: LazyLock<&[WString]> = LazyLock::new(|| {
 });
 
 /// Make sure the PATH variable contains something.
+#[cfg(not(windows))]
 fn setup_path(global_exported_mode: EnvSetMode) {
     let vars = EnvStack::globals();
     let path = vars.get_unless_empty(L!("PATH"));
@@ -598,6 +606,7 @@ fn setup_path(global_exported_mode: EnvSetMode) {
 /// This is a simple key->value map and not e.g. cut into paths.
 pub static INHERITED_VARS: OnceLock<HashMap<WString, WString>> = OnceLock::new();
 
+#[cfg(not(windows))]
 pub fn env_init(paths: Option<&ConfigPaths>, no_config: bool) {
     let vars = EnvStack::globals();
 
@@ -824,7 +833,7 @@ pub fn env_init(paths: Option<&ConfigPaths>, no_config: bool) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::{EnvMode, EnvStack, Environment as _};
     use crate::env::EnvSetMode;

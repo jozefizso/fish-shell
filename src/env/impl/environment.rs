@@ -2,18 +2,25 @@ use super::var::{ELECTRIC_VARIABLES, ElectricVar, is_read_only};
 use crate::env::{
     EnvMode, EnvSetMode, EnvStackSetResult, EnvVar, EnvVarFlags, PATH_ARRAY_SEP, Statuses, VarTable,
 };
+#[cfg(not(windows))]
 use crate::env_universal_common::EnvUniversal;
 use crate::flog::flog;
 use crate::global_safety::RelaxedAtomicBool;
+#[cfg(not(windows))]
 use crate::null_terminated_array::OwningNullTerminatedArray;
 use crate::portable_atomic::AtomicU64;
 use crate::prelude::*;
+#[cfg(not(windows))]
 use crate::threads::is_forked_child;
+#[cfg(not(windows))]
 use crate::wutil::fish_wcstol_radix;
+#[cfg(not(windows))]
 use fish_widestring::wcs2zstring;
+#[cfg(not(windows))]
 use nix::sys::stat::{Mode, umask};
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashSet;
+#[cfg(not(windows))]
 use std::ffi::CString;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -22,6 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard, atomic::Ordering};
 
 /// Getter for universal variables.
 /// This is typically initialized in env_init(), and is considered empty before then.
+#[cfg(not(windows))]
 pub fn uvars() -> MutexGuard<'static, EnvUniversal> {
     use std::sync::LazyLock;
     /// Universal variables instance.
@@ -43,7 +51,7 @@ pub fn colon_split<T: AsRef<wstr>>(val: &[T]) -> Vec<WString> {
 
 /// Return true if a variable should become a path variable by default. See #436.
 fn variable_should_auto_pathvar(name: &wstr) -> bool {
-    name.ends_with("PATH") || name == "LANGUAGE"
+    if cfg!(windows) { name == "PATH" } else { name.ends_with("PATH") || name == "LANGUAGE" }
 }
 
 /// We cache our null-terminated export list. However an exported variable may change for lots of
@@ -56,6 +64,7 @@ fn next_export_generation() -> ExportGeneration {
     1 + GEN.fetch_add(1, Ordering::Relaxed)
 }
 
+#[cfg(not(windows))]
 fn set_umask(list_val: &[WString]) -> EnvStackSetResult {
     if list_val.len() != 1 || list_val[0].is_empty() {
         return EnvStackSetResult::Invalid;
@@ -268,10 +277,12 @@ pub struct EnvScopedImpl {
     pub(super) perproc_data: PerprocData,
 
     // Exported variable array used by execv.
+    #[cfg(not(windows))]
     export_array: Option<Arc<OwningNullTerminatedArray>>,
 
     // Cached list of export generations corresponding to the above export_array.
     // If this differs from the current export generations then we need to regenerate the array.
+    #[cfg(not(windows))]
     export_array_generations: Vec<ExportGeneration>,
 }
 
@@ -282,7 +293,9 @@ impl EnvScopedImpl {
             locals,
             globals,
             perproc_data: PerprocData::default(),
+            #[cfg(not(windows))]
             export_array: None,
+            #[cfg(not(windows))]
             export_array_generations: Vec::new(),
         }
     }
@@ -334,6 +347,7 @@ impl EnvScopedImpl {
         self.globals.find_entry(key)
     }
 
+    #[cfg(not(windows))]
     fn try_get_universal(&self, key: &wstr) -> Option<EnvVar> {
         return uvars().get(key);
     }
@@ -354,6 +368,7 @@ impl EnvScopedImpl {
         if result.is_none() && query.global {
             result = self.try_get_global(key);
         }
+        #[cfg(not(windows))]
         if result.is_none() && query.universal {
             result = self.try_get_universal(key);
         }
@@ -398,6 +413,7 @@ impl EnvScopedImpl {
             }
         }
 
+        #[cfg(not(windows))]
         if query.universal {
             let show_exported = matches!(query.export, None | Some(true));
             let show_unexported = matches!(query.export, None | Some(false));
@@ -425,7 +441,9 @@ impl EnvScopedImpl {
             locals: copy_node_chain(&self.locals),
             globals: self.globals.clone(),
             perproc_data: self.perproc_data.clone(),
+            #[cfg(not(windows))]
             export_array: None,
+            #[cfg(not(windows))]
             export_array_generations: Vec::new(),
         })
     }
@@ -435,6 +453,7 @@ impl EnvScopedImpl {
 impl EnvScopedImpl {
     /// Return the export generations, in order.
     /// Nodes which do not export are skipped.
+    #[cfg(not(windows))]
     fn iter_generations(&self) -> impl Iterator<Item = u64> {
         // Our uvars generation count doesn't come from next_export_generation(), so always supply
         // it even if 0.
@@ -451,6 +470,7 @@ impl EnvScopedImpl {
     }
 
     /// Return whether the current export array is empty or out-of-date.
+    #[cfg(not(windows))]
     fn export_array_needs_regeneration(&self) -> bool {
         // The idea here is to determine if the set of exported variables (our export_array)
         // may have changed since the last time we checked. Every node in the stack contributes.
@@ -490,6 +510,7 @@ impl EnvScopedImpl {
     }
 
     /// Return a newly allocated export array.
+    #[cfg(not(windows))]
     fn create_export_array(&self) -> Arc<OwningNullTerminatedArray> {
         flog!(env_export, "create_export_array() recalc");
         let mut vals = VarTable::new();
@@ -522,6 +543,7 @@ impl EnvScopedImpl {
     }
 
     // Exported variable array used by execv.
+    #[cfg(not(windows))]
     pub fn export_array(&mut self) -> Arc<OwningNullTerminatedArray> {
         assert!(!is_forked_child());
         if self.export_array_needs_regeneration() {
@@ -534,6 +556,19 @@ impl EnvScopedImpl {
             self.export_array_generations = generations;
         }
         self.export_array.as_ref().unwrap().clone()
+    }
+
+    /// The native child view uses the same scope/export precedence as Unix exec.
+    #[cfg(windows)]
+    pub fn exported_native_table(&self) -> VarTable {
+        let mut values = VarTable::new();
+        Self::get_exported(&self.globals, &mut values);
+        Self::get_exported(&self.locals, &mut values);
+        values.insert(
+            L!("PWD").to_owned(),
+            EnvVar::new_from_name(L!("PWD"), self.perproc_data.pwd.clone()),
+        );
+        values
     }
 }
 
@@ -595,6 +630,10 @@ impl EnvStackImpl {
 
     /// Set a variable under the name `key`, using the given `mode`, setting its value to `val`.
     pub fn set(&mut self, key: &wstr, mode: EnvSetMode, mut val: Vec<WString>) -> ModResult {
+        #[cfg(windows)]
+        if mode.mode.universal {
+            return ModResult::new(EnvStackSetResult::Scope);
+        }
         let query = Query::from(mode);
         // Handle electric and read-only variables.
         if let Some(ret) = self.try_set_electric(key, &query, &mut val) {
@@ -623,8 +662,11 @@ impl EnvStackImpl {
             // The user requested a particular scope.
             // If we don't have uvars, fall back to using globals.
             if query.universal && !UVAR_SCOPE_IS_GLOBAL.load() {
-                self.set_universal(key, val, query);
-                result.uvar_modified = true;
+                #[cfg(not(windows))]
+                {
+                    self.set_universal(key, val, query);
+                    result.uvar_modified = true;
+                }
             } else if query.global || (query.universal && UVAR_SCOPE_IS_GLOBAL.load()) {
                 Self::set_in_node(&mut self.base.globals, key, val, flags);
                 result.global_modified = true;
@@ -662,10 +704,12 @@ impl EnvStackImpl {
             // Existing global variable.
             Self::set_in_node(&mut node, key, val, flags);
             result.global_modified = true;
-        } else if !UVAR_SCOPE_IS_GLOBAL.load() && uvars().get(key).is_some() {
-            // Existing universal variable.
-            self.set_universal(key, val, query);
-            result.uvar_modified = true;
+        } else if self.base.getf(key, EnvMode::UNIVERSAL).is_some() && !UVAR_SCOPE_IS_GLOBAL.load() {
+            #[cfg(not(windows))]
+            {
+                self.set_universal(key, val, query);
+                result.uvar_modified = true;
+            }
         } else {
             // Unspecified scope with no existing variables.
             let mut node = self.resolve_unspecified_scope();
@@ -677,6 +721,10 @@ impl EnvStackImpl {
 
     /// Remove a variable under the name `key`.
     pub fn remove(&mut self, key: &wstr, mode: EnvSetMode) -> ModResult {
+        #[cfg(windows)]
+        if mode.mode.universal {
+            return ModResult::new(EnvStackSetResult::Scope);
+        }
         let query = Query::from(mode);
         // Users can't remove read-only keys.
         if query.user && is_read_only(key) {
@@ -696,13 +744,15 @@ impl EnvStackImpl {
         if query.has_scope {
             // The user requested erasing from a particular scope.
             if query.universal {
-                if uvars().remove(key) {
-                    result.status = EnvStackSetResult::Ok;
-                } else {
-                    result.status = EnvStackSetResult::NotFound;
+                #[cfg(not(windows))]
+                {
+                    if uvars().remove(key) {
+                        result.status = EnvStackSetResult::Ok;
+                    } else {
+                        result.status = EnvStackSetResult::NotFound;
+                    }
+                    result.uvar_modified = true;
                 }
-                // Note we have historically set this even if the uvar is not found.
-                result.uvar_modified = true;
             } else if query.global {
                 result.status = remove_from_chain(&mut self.base.globals, key);
                 result.global_modified = true;
@@ -724,9 +774,12 @@ impl EnvStackImpl {
             // pass
         } else if Self::remove_from_chain(&mut self.base.globals, key) {
             result.global_modified = true;
-        } else if uvars().remove(key) {
-            result.uvar_modified = true;
         } else {
+            #[cfg(not(windows))]
+            if uvars().remove(key) {
+                result.uvar_modified = true;
+                return result;
+            }
             result.status = EnvStackSetResult::NotFound;
         }
         result
@@ -832,9 +885,11 @@ impl EnvStackImpl {
         }
 
         // Handle computed mutable electric variables.
+        #[cfg(not(windows))]
         if key == "umask" {
             return Some(set_umask(val));
-        } else if key == "PWD" {
+        }
+        if key == "PWD" {
             assert_eq!(val.len(), 1, "Should have exactly one element in PWD");
             let pwd = val.pop().unwrap();
             if pwd != self.base.perproc_data.pwd {
@@ -857,6 +912,7 @@ impl EnvStackImpl {
     }
 
     /// Set a universal variable, inheriting as applicable from the given old variable.
+    #[cfg(not(windows))]
     fn set_universal(&mut self, key: &wstr, mut val: Vec<WString>, query: Query) {
         let mut locked_uvars = uvars();
         let oldvar = locked_uvars.get(key);
@@ -1013,7 +1069,7 @@ impl<T> EnvMutex<T> {
 // Safety: we use a global lock.
 unsafe impl<T: Send> Sync for EnvMutex<T> {}
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::colon_split;
     use crate::prelude::*;

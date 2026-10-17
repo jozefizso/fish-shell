@@ -80,12 +80,14 @@ pub(super) mod electric_values {
         ElectricValue::{self, *},
         ElectricVar, Getter,
     };
+    use crate::env::{
+        EnvVar, EnvVarFlags, FISH_BIN_DIR, FISH_CACHE_DIR, FISH_CONFIG_DIR,
+        FISH_DATADIR_VAR, FISH_HELPDIR_VAR, FISH_MANDIR_VAR, FISH_SYSCONFDIR_VAR,
+        FISH_TERMINAL_COLOR_THEME_VAR, FISH_USER_DATA_DIR,
+    };
+    #[cfg(not(windows))]
     use crate::{
-        env::{
-            EnvMode, EnvVar, EnvVarFlags, FISH_BIN_DIR, FISH_CACHE_DIR, FISH_CONFIG_DIR,
-            FISH_DATADIR_VAR, FISH_HELPDIR_VAR, FISH_MANDIR_VAR, FISH_SYSCONFDIR_VAR,
-            FISH_TERMINAL_COLOR_THEME_VAR, FISH_USER_DATA_DIR,
-        },
+        env::EnvMode,
         history::{History, history_id_from_var},
         kill::kill_entries,
         reader::{commandline_get_state, reader_status_count},
@@ -93,6 +95,7 @@ pub(super) mod electric_values {
     };
     use fish_common::assert_sorted_by_name;
     use fish_widestring::{L, ToWString as _, wstr};
+    #[cfg(not(windows))]
     use nix::sys::stat::{Mode, umask};
 
     const fn var(name: &'static wstr, value: ElectricValue) -> ElectricVar {
@@ -120,14 +123,18 @@ pub(super) mod electric_values {
         var(FISH_SYSCONFDIR_VAR, Regular),
         var(FISH_USER_DATA_DIR, Regular),
         var(L!("fish_kill_signal"), Computed(GET_FISH_KILL_SIGNAL)),
+        #[cfg(not(windows))]
         var(L!("fish_killring"), Computed(GET_FISH_KILLRING)),
         var(L!("fish_pid"), Regular),
         var(FISH_TERMINAL_COLOR_THEME_VAR, Regular),
+        #[cfg(not(windows))]
         var(L!("history"), Computed(GET_HISTORY)),
         var(L!("hostname"), Regular),
         var(L!("pipestatus"), Computed(GET_PIPESTATUS)),
         var(L!("status"), Computed(GET_STATUS)),
+        #[cfg(not(windows))]
         var(L!("status_generation"), Computed(GET_STATUS_GENERATION)),
+        #[cfg(not(windows))]
         writable_var(L!("umask"), Computed(GET_UMASK)),
         var(L!("version"), Regular),
     ];
@@ -147,8 +154,10 @@ pub(super) mod electric_values {
         let signal = js.kill_signal.map_or(0, |ks| ks.code());
         EnvVar::new_from_name(L!("fish_kill_signal"), signal.to_wstring())
     };
+    #[cfg(not(windows))]
     const GET_FISH_KILLRING: Getter =
         |_env| EnvVar::new_from_name_vec(L!("fish_killring"), kill_entries());
+    #[cfg(not(windows))]
     const GET_HISTORY: Getter = |env| {
         // Big hack. We only allow getting the history on the main thread. Note that history_t
         // may ask for an environment variable, so don't take the lock here (we don't need it).
@@ -174,8 +183,10 @@ pub(super) mod electric_values {
         let js = &env.perproc_data.statuses;
         EnvVar::new_from_name(L!("status"), js.status.to_wstring())
     };
+    #[cfg(not(windows))]
     const GET_STATUS_GENERATION: Getter =
         |_env| EnvVar::new_from_name(L!("status_generation"), reader_status_count().to_wstring());
+    #[cfg(not(windows))]
     const GET_UMASK: Getter = |_env| {
         // note umask() is an absurd API: you call it to set the value and it returns the old
         // value. Thus we have to call it twice, to reset the value. The env_lock protects

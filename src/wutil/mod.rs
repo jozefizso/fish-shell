@@ -1,5 +1,7 @@
+#[cfg(not(windows))]
 pub mod dir_iter;
 mod errors;
+#[cfg(not(windows))]
 mod fileid;
 mod hex_float;
 #[macro_use]
@@ -8,29 +10,31 @@ pub mod wcstod;
 pub mod wcstoi;
 
 pub use errors::*;
+#[cfg(not(windows))]
 pub use fileid::*;
 pub use printf::{eprintf, fprintf, printf, sprintf};
 pub use wcstoi::{
     fish_wcstoi, fish_wcstol, fish_wcstol_radix, fish_wcstoul, wcstoi, wcstoi_opts, wcstoi_partial,
 };
 
+#[cfg(not(windows))]
 use crate::{fds::BorrowedFdFile, flog, signal::SigChecker};
+#[cfg(not(windows))]
 use fish_util::perror;
 use fish_wcstringutil::join_strings;
 use fish_widestring::{
     IntoCharIter, L, WExt as _, WString, bytes2wcstring, fish_reserved_codepoint, osstr2wcstring,
     str2bytes_callback, wcs2osstring, wcs2zstring, wstr,
 };
+#[cfg(not(windows))]
 use nix::unistd::{self, AccessFlags};
-use std::{
-    ffi::OsStr,
-    fs::{self, canonicalize},
-    io,
-    os::unix::prelude::*,
-};
+use std::{ffi::OsStr, fs::{self, canonicalize}, io};
+#[cfg(not(windows))]
+use std::os::unix::prelude::*;
 
 /// Wide character version of opendir(). Note that opendir() is guaranteed to set close-on-exec by
 /// POSIX (hooray).
+#[cfg(not(windows))]
 pub fn wopendir(name: &wstr) -> *mut libc::DIR {
     let tmp = wcs2zstring(name);
     unsafe { libc::opendir(tmp.as_ptr()) }
@@ -38,23 +42,31 @@ pub fn wopendir(name: &wstr) -> *mut libc::DIR {
 
 /// Wide character version of stat().
 pub fn wstat(file_name: &wstr) -> io::Result<fs::Metadata> {
+    #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
+    #[cfg(windows)]
+    let tmp = wcs2osstring(file_name)?;
     fs::metadata(tmp)
 }
 
 /// Wide character version of lstat().
 pub fn lwstat(file_name: &wstr) -> io::Result<fs::Metadata> {
+    #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
+    #[cfg(windows)]
+    let tmp = wcs2osstring(file_name)?;
     fs::symlink_metadata(tmp)
 }
 
 /// Cover over fstat().
+#[cfg(not(windows))]
 pub fn fstat(fd: impl AsRawFd) -> io::Result<fs::Metadata> {
     let file = unsafe { BorrowedFdFile::from_raw_fd(fd.as_raw_fd()) };
     file.metadata()
 }
 
 /// Wide character version of access().
+#[cfg(not(windows))]
 pub fn waccess(file_name: &wstr, amode: AccessFlags) -> nix::Result<()> {
     let tmp = wcs2osstring(file_name);
     nix::unistd::access(tmp.as_os_str(), amode)
@@ -62,10 +74,14 @@ pub fn waccess(file_name: &wstr, amode: AccessFlags) -> nix::Result<()> {
 
 /// Wide character version of unlink().
 pub fn wunlink(file_name: &wstr) -> io::Result<()> {
+    #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
+    #[cfg(windows)]
+    let tmp = wcs2osstring(file_name)?;
     fs::remove_file(tmp)
 }
 
+#[cfg(not(windows))]
 pub fn perror_nix(s: &str, e: nix::errno::Errno) {
     eprintf!("%s: %s\n", s, e.desc());
 }
@@ -75,6 +91,7 @@ pub fn perror_io(s: &str, e: &io::Error) {
 }
 
 /// Wide character version of getcwd().
+#[cfg(not(windows))]
 pub fn wgetcwd() -> WString {
     match std::env::current_dir() {
         Ok(cwd) => osstr2wcstring(cwd),
@@ -85,7 +102,16 @@ pub fn wgetcwd() -> WString {
     }
 }
 
+/// Native identity conversion is fallible: never replace invalid UTF-16 or return a fake cwd.
+#[cfg(windows)]
+pub fn wgetcwd() -> io::Result<WString> {
+    let cwd = osstr2wcstring(std::env::current_dir()?)?;
+    crate::path::native_absolute_path(&cwd)?;
+    Ok(cwd)
+}
+
 /// Wide character version of readlink().
+#[cfg(not(windows))]
 pub fn wreadlink(file_name: &wstr) -> Option<WString> {
     _ = lwstat(file_name).ok()?;
     match fs::read_link(wcs2osstring(file_name)) {
@@ -98,6 +124,7 @@ pub fn wreadlink(file_name: &wstr) -> Option<WString> {
 }
 
 /// Wide character realpath. The last path component does not need to be valid.
+#[cfg(not(windows))]
 pub fn wrealpath(pathname: &wstr) -> io::Result<WString> {
     if pathname.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty path"));
@@ -324,6 +351,7 @@ pub fn wbasename(mut path: &wstr) -> &wstr {
 
 /// Write a wide string to a file descriptor. This avoids doing any additional allocation.
 /// Returns nothing when interrupted by ctrl-c or HUP.
+#[cfg(not(windows))]
 pub fn unescape_bytes_and_write_to_fd(input: impl IntoCharIter, fd: RawFd) -> Option<usize> {
     // Accumulate data in a local buffer.
     let mut accum = [0u8; 512];
@@ -410,6 +438,33 @@ pub fn unescape_bytes_and_write_to_fd(input: impl IntoCharIter, fd: RawFd) -> Op
     if success { Some(total_written) } else { None }
 }
 
+/// Only inherited standard output/error endpoints exist in the native batch graph.
+#[cfg(windows)]
+pub fn unescape_bytes_and_write_to_fd(input: impl IntoCharIter, stream: i32) -> Option<usize> {
+    use std::io::Write;
+    let mut output = match stream {
+        1 => crate::io::NativeOutput::stdout(),
+        2 => crate::io::NativeOutput::stderr(),
+        _ => return None,
+    }.ok()?;
+    let mut written = 0;
+    let mut buffer = [0u8; 512];
+    let mut used = 0;
+    for character in input.chars() {
+        if used + character.len_utf8() > buffer.len() {
+            output.write_all(&buffer[..used]).ok()?;
+            written += used;
+            used = 0;
+        }
+        let length = character.encode_utf8(&mut buffer[used..]).len();
+        used += length;
+    }
+    output.write_all(&buffer[..used]).ok()?;
+    written += used;
+    output.flush().ok()?;
+    Some(written)
+}
+
 const PUA1_START: char = '\u{E000}';
 const PUA1_END: char = '\u{F900}';
 // const PUA2_START: char = '\u{F0000}';
@@ -447,7 +502,7 @@ pub fn wstr_offset_in(cursor: &wstr, base: &wstr) -> usize {
     offset as usize
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::{
         normalize_path, unescape_bytes_and_write_to_fd, wbasename, wdirname, wstr_offset_in,

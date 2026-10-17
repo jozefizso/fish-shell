@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The character used to delimit path and non-path variables in exporting and in string expansion.
+#[cfg(not(windows))]
 pub const PATH_ARRAY_SEP: char = ':';
+#[cfg(windows)]
+pub const PATH_ARRAY_SEP: char = ';';
 pub const NONPATH_ARRAY_SEP: char = ' ';
 
 /// Options passed to environment get and set operations.
@@ -282,7 +285,7 @@ pub type VarTable = HashMap<WString, EnvVar>;
 
 pub const FISH_TERMINAL_COLOR_THEME_VAR: &wstr = L!("fish_terminal_color_theme");
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::{EnvVar, EnvVarFlags};
     use crate::prelude::*;
