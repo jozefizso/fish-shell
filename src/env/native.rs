@@ -1,6 +1,6 @@
 //! Windows OS boundaries around the shared fish environment stack.
 use super::*;
-use fish_widestring::wcs2osstring;
+use fish_widestring::{native_to_shell_text_owned, shell_text_to_osstring};
 use std::{cmp::Ordering, ffi::OsString, io, os::windows::ffi::OsStrExt, path::Path};
 
 #[link(name = "kernel32")]
@@ -37,7 +37,7 @@ impl EnvStack {
         inherited: impl IntoIterator<Item = (OsString, OsString)>,
         cwd: &Path,
     ) -> io::Result<()> {
-        let mut pwd = osstr2wcstring(cwd)?;
+        let mut pwd = native_to_shell_text_owned(osstr2wcstring(cwd)?);
         crate::path::native_absolute_path(&pwd)?;
         if !std::fs::metadata(cwd)?.is_dir() {
             return Err(io::Error::new(io::ErrorKind::NotADirectory, "native cwd is not a directory"));
@@ -47,8 +47,8 @@ impl EnvStack {
         let mut path_value = None;
         let mut uppercase_path = false;
         for (key, value) in inherited {
-            let key = osstr2wcstring(key)?;
-            let value = osstr2wcstring(value)?;
+            let key = native_to_shell_text_owned(osstr2wcstring(key)?);
+            let value = native_to_shell_text_owned(osstr2wcstring(value)?);
             // Windows' hidden per-drive cwd entries are not fish variables. Drive-relative
             // resolution is outside this runtime's path contract.
             if key.starts_with('=') { continue; }
@@ -93,8 +93,8 @@ impl EnvStack {
             if key.is_empty() || key.contains('=') {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid native environment key"));
             }
-            let key = wcs2osstring(&key)?;
-            let value = wcs2osstring(&value.as_string())?;
+            let key = shell_text_to_osstring(&key)?;
+            let value = shell_text_to_osstring(&value.as_string())?;
             let units: Vec<_> = key.encode_wide().collect();
             if units.len() > i32::MAX as usize {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "native environment key is too long"));

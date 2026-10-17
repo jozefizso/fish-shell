@@ -26,6 +26,8 @@ use fish_widestring::{
     IntoCharIter, L, WExt as _, WString, bytes2wcstring, fish_reserved_codepoint, osstr2wcstring,
     str2bytes_callback, wcs2osstring, wcs2zstring, wstr,
 };
+#[cfg(windows)]
+use fish_widestring::{native_to_shell_text_owned, shell_text_to_osstring};
 #[cfg(not(windows))]
 use nix::unistd::{self, AccessFlags};
 use std::{ffi::OsStr, fs::{self, canonicalize}, io};
@@ -45,7 +47,7 @@ pub fn wstat(file_name: &wstr) -> io::Result<fs::Metadata> {
     #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
     #[cfg(windows)]
-    let tmp = wcs2osstring(file_name)?;
+    let tmp = shell_text_to_osstring(file_name)?;
     fs::metadata(tmp)
 }
 
@@ -54,7 +56,7 @@ pub fn lwstat(file_name: &wstr) -> io::Result<fs::Metadata> {
     #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
     #[cfg(windows)]
-    let tmp = wcs2osstring(file_name)?;
+    let tmp = shell_text_to_osstring(file_name)?;
     fs::symlink_metadata(tmp)
 }
 
@@ -77,7 +79,7 @@ pub fn wunlink(file_name: &wstr) -> io::Result<()> {
     #[cfg(not(windows))]
     let tmp = wcs2osstring(file_name);
     #[cfg(windows)]
-    let tmp = wcs2osstring(file_name)?;
+    let tmp = shell_text_to_osstring(file_name)?;
     fs::remove_file(tmp)
 }
 
@@ -105,7 +107,7 @@ pub fn wgetcwd() -> WString {
 /// Native identity conversion is fallible: never replace invalid UTF-16 or return a fake cwd.
 #[cfg(windows)]
 pub fn wgetcwd() -> io::Result<WString> {
-    let cwd = osstr2wcstring(std::env::current_dir()?)?;
+    let cwd = native_to_shell_text_owned(osstr2wcstring(std::env::current_dir()?)?);
     crate::path::native_absolute_path(&cwd)?;
     Ok(cwd)
 }

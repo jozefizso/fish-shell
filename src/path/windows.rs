@@ -1,10 +1,10 @@
 //! Native batch paths: only ordinary local, absolute drive paths are supported.
 use crate::env::Environment;
 use crate::prelude::*;
-use fish_widestring::{osstr2wcstring, wcs2osstring};
+use fish_widestring::{native_to_shell_text_owned, osstr2wcstring, shell_text_to_osstring};
 use std::{io, path::PathBuf};
 
-/// Validate identity before handing a path to a Windows filesystem/process API.
+/// Validate canonical fish text before handing an identity to a Windows API.
 pub fn native_absolute_path(path: &wstr) -> io::Result<PathBuf> {
     let chars = path.as_char_slice();
     if chars.len() < 3 || !chars[0].is_ascii_alphabetic() || chars[1] != ':'
@@ -35,7 +35,7 @@ pub fn native_absolute_path(path: &wstr) -> io::Result<PathBuf> {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "native device paths are unsupported"));
         }
     }
-    Ok(PathBuf::from(wcs2osstring(path)?))
+    Ok(PathBuf::from(shell_text_to_osstring(path)?))
 }
 
 /// No PATH/PATHEXT search, script dispatch, or execute-bit emulation.
@@ -53,7 +53,7 @@ pub fn native_resolve_executable(command: &wstr) -> io::Result<PathBuf> {
 }
 
 pub fn path_get_path(command: &wstr, _vars: &dyn Environment) -> Option<WString> {
-    osstr2wcstring(native_resolve_executable(command).ok()?).ok()
+    osstr2wcstring(native_resolve_executable(command).ok()?).ok().map(native_to_shell_text_owned)
 }
 
 /// Retain evaluator command-resolution shape without translating Win32 errors to Unix errno.
