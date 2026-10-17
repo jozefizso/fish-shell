@@ -1,10 +1,63 @@
 # Filesystem, paths, directories, and wildcards
 
-## Scope and evidence
+## Current N1 integration boundary
 
-This source audit covers `fs.rs`, `path.rs`, every `wutil/` child and the filesystem traversal and matching in `wildcard.rs`. Expansion/completion callers are discussed in [the language analysis](02-expansion-completion-highlighting.md) where applicable; the concrete source links below stand independently of that grouping. Windows APIs are proposed equivalents, not implemented or exercised backends. See also [the source coverage inventory](coverage.md).
+The [current module/option ledger](coverage.md#current-runtime-and-native-module-inventory)
+supersedes the historical audit below. N1 is implemented and verified at source revision
+`c3486d848` for the [recorded development matrix](coverage.md#n1-verified-evidence-record).
 
-## Component-by-component coverage
+Current native owners are [`path/windows.rs`](../../src/path/windows.rs),
+[`wutil/windows.rs`](../../src/wutil/windows.rs),
+[`wutil/dir_iter_windows.rs`](../../src/wutil/dir_iter_windows.rs),
+[`wutil/fileid.rs`](../../src/wutil/fileid.rs), the shared [`wildcard.rs`](../../src/wildcard.rs) /
+[`expand.rs`](../../src/expand.rs) algorithms, environment cwd state and the filesystem builtins.
+`NativeCwd` is retained beside PWD in per-process environment state; updates replace both together,
+snapshots clone the Arc, and physical queries use the owned directory rather than process-global
+cwd. Selected native launch, discovery, traversal and predicate callers must share that policy.
+Unix `path.rs`, `wutil/dir_iter.rs` and `fs.rs` are not evidence of native service availability;
+the complete persistence/locking/replacement protocol remains N4.
+
+The source contract distinguishes drive absolute/relative, current-drive-rooted, UNC and explicit
+extended drive/UNC/volume namespaces. `C:x` uses fish's cwd on C: or C:'s root otherwise, not hidden
+process-global `=C:` state; a rooted path uses the cwd's drive/share root. Ordinary DOS-device,
+ADS and trailing-dot/space aliases are rejected; explicit extended identities preserve literal
+names, require backslashes and reject dot components. Invalid identity-bearing bytes, NUL and lone
+UTF-16 surrogates must fail without replacement aliases; valid supplementary/private-use names
+must retain identity. This is not a reversible arbitrary-surrogate filename codec claim.
+
+Native opens/metadata/reparse resolution, full volume/file identity, case-sensitive-directory
+policy and requested-right access probes are implemented and exercised on local NTFS. Access probes
+are not Unix mode bits, read-only attributes, ACL proofs or guarantees that a later operation
+cannot race. Native executable classification currently enables `.exe` only, searches explicit
+PATH order while ignoring empty entries, and has no discovery cache. Additional script providers
+remain N8; disabled candidates must not hide a later valid executable. Physical resolution must
+separate a truly missing final name from a dangling reparse or missing intermediate directory,
+and preserve link-plus-`..`. Finite ancestor revisits remain legal; cycle rejection applies to
+recursive descent, with complete native identities.
+
+The [complete N1 builtin option table](coverage.md#n1-filesystemdiscovery-options) assigns ordinary
+namespace/metadata/native permissions to N1, Unix-only identity/mode/device categories to N8 and
+help to N9. Active completion/highlighting UX remains N7, not implied by a shared lookup service.
+The [host prerequisites](coverage.md#declared-prerequisites-and-observed-host-matrix) record the
+actual Windows/NTFS/loopback-share observations without widening the supported-host matrix.
+Required UNC, long-path, case-sensitive, reparse and denied-access fixtures **hard-fail if missing**.
+Only the [N1 evidence record](coverage.md#n1-verified-evidence-record), filled after real debug/release
+gates, applicable Unix regressions and native smoke, can establish completion.
+
+The tested loopback SMB share supports metadata/identity/cwd but returns native error `50` for
+directory case information. Actual UNC glob expansion therefore fails explicitly with status `121`
+and no result aliases; local NTFS support is not a blanket SMB/FAT/ReFS support claim.
+An actual volume-GUID path also resolved to the same file and supported navigation/traversal.
+Renaming fixtures release only their helper process's OS cwd lock before mutation, so gates
+exercise the retained fish handle, old-name replacement and real deleted-directory escape.
+Owned file-input bindings (`<` / `<?`, fd 0) restore NUL-input filesystem options without global
+standard-handle changes; the complete descriptor/pipe/capture runtime remains N2.
+
+## Historical scope and evidence
+
+The original source audit covers `fs.rs`, Unix `path.rs`, every then-existing `wutil/` child and filesystem traversal/matching in `wildcard.rs`. Expansion/completion callers are discussed in [the language analysis](02-expansion-completion-highlighting.md). Windows APIs in the historical tables are proposed equivalents, not claims about current backends or newly exercised checks. Use the current overlay and [coverage ledger](coverage.md) for implementation state.
+
+## Historical component-by-component coverage
 
 | Component and concrete symbols | Linux/POSIX dependencies | Native Windows equivalent or gap | Validation focus |
 |---|---|---|---|
@@ -29,7 +82,7 @@ This source audit covers `fs.rs`, `path.rs`, every `wutil/` child and the filesy
 
 ## Path representation and API limits
 
-Current helpers repeatedly use `wcs2zstring`, `OsStr::from_bytes`, `OsString::from_vec`, Unix `MetadataExt` and slash tests. Replacing a few libc calls is insufficient. Use native UTF-16 `W` APIs/Windows `OsStr` boundaries, with a deliberate lossless representation for unpaired UTF-16 surrogate code units as well as supplementary characters. Windows names are not simply guaranteed-valid Unicode scalar strings; the existing Unix private-use byte codec must not reinterpret legitimate Windows private-use characters.
+At the historical baseline, helpers repeatedly used `wcs2zstring`, `OsStr::from_bytes`, `OsString::from_vec`, Unix `MetadataExt` and slash tests. Replacing a few libc calls was insufficient. The N1 contract now requires checked native UTF-16/Windows `OsStr` boundaries: preserve valid supplementary/private-use identities and reject lone surrogates unless a separately approved/tested reversible codec replaces rejection. Do not apply the Unix private-use byte codec to legitimate native filename characters.
 
 The common path policy must distinguish drive-absolute (`C:\x`), drive-relative (`C:x`), rooted-current-drive (`\x`), UNC (`\\server\share\x`) and extended (`\\?\...`) paths. Win32 accepts `/` in many ordinary paths but not uniformly in extended namespaces. Fish's backslash escaping remains language syntax. Device names, alternate data streams, trailing dots/spaces and extended-length paths require explicit native semantics, not global string replacement.
 
@@ -47,9 +100,9 @@ Linux/Android specialize `rewrite_via_temporary_file::update_metadata` with `clo
 
 ## Windows validation scenarios
 
-These are proposed acceptance scenarios; no builds or tests were run for this audit.
+These are historical proposed scenarios, not executed results. The mandatory current gates are in [GOAL_01.md](GOAL_01.md); they supersede any historical expectation that every native UTF-16 spelling can round-trip.
 
-- **F1 — Names and roots:** round-trip BMP, supplementary, private-use and unpaired-surrogate native filenames; spaces/backslashes; drive/UNC/extended roots; reserved names; ADS and trailing-dot/space cases where the API permits them. Compare lexical normalization, display and actual opens, without corrupting roots or converting native names through Unix bytes.
+- **F1 — Names and roots:** preserve valid BMP, supplementary/private-use identities and reject invalid identity bytes/NUL/lone surrogates without aliases; test spaces/backslashes, drive/UNC/extended roots, reserved names, ADS and trailing-dot/space acceptance/rejection according to the declared namespace policy. Compare lexical normalization, display and actual opens without corrupting roots.
 - **F2 — Resolution and matching:** compare explicit command lookup, PATH completion, glob expansion, CDPATH and implicit cd against one agreed native policy. Include case-sensitive directories, `.exe`/script/name collisions, empty path elements and denied candidates. Never let an API's default search order add unintended current-directory execution.
 - **F3 — Traversal and identity:** cover regular files, hardlinks, symlinks, broken links, junctions/mount points and unknown reparse tags; create a recursive junction cycle, delete entries during iteration, deny a branch and cancel a large `**` walk. Identity failure must not silently disable cycle protection. Verify missing-final-component canonicalization and logical vs physical `..` behavior.
 - **F4 — Concurrent state:** run independent writers/readers in the same directory, mixing append and replacement as actual callers require. Exercise no-save updates, equal-size rapid rewrites and newly created targets; inject failures before/after flush and replacement. Check content consistency, metadata/security preservation, stable lock identity, export-generation rereads and temporary cleanup; distinguish documented lockless limitations from guarantees.

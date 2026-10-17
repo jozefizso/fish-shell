@@ -1,8 +1,44 @@
 # Builtins
 
-## Scope, inventory, and platform boundary
+## Current native registry and option ownership
 
-This audits every module declared by [`builtins/mod.rs`](../../src/builtins/mod.rs), all nested `string/` and `shared/` modules, and every registered spelling in [`shared/misc.rs::BUILTIN_DATAS`](../../src/builtins/shared/misc.rs). Source evidence, not execution, underlies the classifications. Verification scenarios below are proposed checks, **not results**.
+The native source registry currently enables `[`, `cd`, `command`, `path`, `pwd`, `realpath`,
+`test`, `type` alongside prototype `echo`, `exit`, `false`, `math`, `printf`, `set`, `true`.
+N1 additions are implemented and exercised for the recorded native development matrix. Source
+inclusion alone does not establish other capabilities: remaining reserved spellings are rejected, and many
+implementation modules remain Unix-only. `return.rs` is compiled for shared exit-value parsing
+without registering native `return`. Functions/autoload/highlight/help are not implied by `type`.
+
+The authoritative [option/subcommand ledger](coverage.md#builtin-option-and-subcommand-ledger)
+enumerates each builtin flag/alias/subcommand, its current supported/rejected/unavailable
+state, required semantics and owner. The [executable CLI ledger](coverage.md#executable-cli-option-ledger)
+also covers every fish, fish_indent and fish_key_reader option, including their builtin tool
+spellings. The native formatter/key-reader executable stubs still reject all use.
+
+Ordinary filesystem namespaces, metadata, timestamps/same-file and native permission options are
+N1; Unix-only identity/mode/device options and quotas are N8; help is N9. Portable batch/string/
+function/event options belong to N3, persistence/startup to N4, jobs/accounting to N5, reader tools
+to N6 and evaluated completion/advanced editing to N7. POSIX `exec`, `fg`, `bg` remain permanently
+unsupported with reserved-name rejection and no external fallback. Faithful POSIX fork is excluded.
+N11 reconciles these owners' completed behavior, not a new destination for missing options.
+
+Prototype option restrictions remain material: math flags are rejected despite the parser code;
+set accepts only its local/global/export/unexport/query/erase subset; true/false reject additional
+operands; help tooling is unavailable. N1 `path/test` ordinary types/access use the shared native
+metadata/classification services, while Unix-only type/ownership/mode predicates explicitly fail
+instead of silently succeeding through compiled-out branches. See the
+[N1 option table](coverage.md#n1-filesystemdiscovery-options) for every operand/flag category.
+
+The [N1 evidence record](coverage.md#n1-verified-evidence-record) records passing debug/release
+gates, minimum-Rust executable verification, native/Unix regressions and actual runtime smokes.
+Required fixture absence hard-fails acceptance, not a skip; unsupported volume case/identity
+queries remain explicit errors. Historical prototype results in GOAL.md remain unchanged.
+`cd -`/directory history is supplied by shipped fish functions and remains N4/N9 integration,
+not a second native builtin history implementation.
+
+## Historical scope, inventory, and platform boundary
+
+The following original audit covers every then-declared module in [`builtins/mod.rs`](../../src/builtins/mod.rs), nested `string/`/`shared/` modules and Unix registered spellings in [`shared/misc.rs::BUILTIN_DATAS`](../../src/builtins/shared/misc.rs). It describes original implementation dependencies and candidate replacements, not the current native registry. Verification scenarios are proposed checks, **not results**.
 
 **Pure** means no builtin-specific Linux syscall, not that the present Unix-based common types already compile on Windows. All commands still depend on `IoStreams`, text conversion, status and localization; help can evaluate `__fish_print_help`. **Delegated** means OS work occurs in parser/process/path/environment/history/terminal services and must be ported there, rather than adding a second Win32 implementation to each builtin. `funcsave` and `trap` are shipped functions, not missing Rust builtin modules. `exec` and `time` are parser-handled decorators, not separate `exec.rs`/`time.rs` builtin modules.
 

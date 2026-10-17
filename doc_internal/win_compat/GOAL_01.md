@@ -1,7 +1,8 @@
 # GOAL_01 — Native filesystem, cwd, discovery and globs
 
-**Phase:** N1. **Status: planned / not started.**
-The tests below are acceptance specifications, not claims of existing, runnable or passing tests.
+**Phase:** N1. **Status: implemented and verified for the recorded development matrix.**
+The three mandatory gates are implemented, discoverable and passed in native debug/release harnesses.
+See [source revision, artifacts, counts, commands and volume limitations](coverage.md#n1-verified-evidence-record).
 The primary target is native `x86_64-pc-windows-msvc`; ARM64 requires a separate architecture track.
 
 ## Objective and completion boundary

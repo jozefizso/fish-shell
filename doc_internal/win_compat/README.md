@@ -4,15 +4,57 @@ This directory maps fish components to their Linux/POSIX dependencies and native
 
 ## Current status and planning entry points
 
-A native `x86_64-pc-windows-msvc` batch proof of concept is implemented. It uses the existing evaluator, selected builtins, real native streams/environment/cwd and sequential native child processes. It is not yet a full interactive Windows shell.
+A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem, cwd, discovery and glob delivery is verified for the recorded host/volume/feature matrix.** It retains the existing evaluator and real native streams/environment/children; it is not yet a full interactive Windows shell. See the explicit SMB glob capability limit below.
 
-- [GOAL.md](GOAL.md) records the completed prototype contract and its native/Unix verification evidence.
-- [ROADMAP.md](ROADMAP.md) defines the next eleven dependency-ordered phases, native semantic decisions and mandatory acceptance gates for full Windows functionality.
-- The standalone phase contracts run from [GOAL_01.md](GOAL_01.md) through [GOAL_11.md](GOAL_11.md); each roadmap phase links to its delivery and mandatory tests.
+- [GOAL.md](GOAL.md) records the completed prototype contract and its historical native/Unix verification evidence; that record is not rewritten by the N1 integration.
+- [ROADMAP.md](ROADMAP.md) defines the eleven dependency-ordered phases, semantic decisions and mandatory acceptance gates.
+- The standalone contracts [N1](GOAL_01.md), [N2](GOAL_02.md), [N3](GOAL_03.md), [N4](GOAL_04.md), [N5](GOAL_05.md), [N6](GOAL_06.md), [N7](GOAL_07.md), [N8](GOAL_08.md), [N9](GOAL_09.md), [N10](GOAL_10.md) and [N11](GOAL_11.md) retain their approved scopes.
+- The [current coverage/ownership ledger](coverage.md#scope-state-vocabulary-and-ownership) enumerates native/runtime modules, all existing workspace crates, asset families and **every executable CLI/builtin subcommand/option** with a source-based state, owning phase and required native semantics. Registry inclusion is not passing evidence; compiled-out Unix code is unavailable, not supported.
+- The [N1 evidence record](coverage.md#n1-verified-evidence-record) is the stable place to add integration revision, exact commands/counts, native debug/release artifacts, applicable Unix results and actual smoke observations after the gates.
 
-The component analyses and coverage counts below describe the original pre-prototype source audit. They explain portability boundaries and candidate APIs, not current implementation status. Use GOAL.md for the implemented baseline and ROADMAP.md for remaining work; proposed future tests are not passing results.
+The component analyses and old file counts describe the original pre-prototype audit. Current-source overlays in [filesystem analysis](07-filesystem-paths-wildcards.md) and [builtin analysis](10-builtins.md) distinguish integrating implementations from historical candidate APIs. Historical counts never establish current support, and proposed future scenarios are not passing tests.
 
 Extend the existing owning Windows backends while retaining shared fish language/editor logic. Do not create a second interpreter or promise faithful POSIX fork, same-PID exec or fg/bg job control.
+
+## Current native boundary and host evidence
+
+The current native registry contains `[`, `cd`, `command`, `path`, `pwd`, `realpath`, `test`,
+`type` plus prototype `echo`, `exit`, `false`, `math`, `printf`, `set`, `true`. The N1 additions
+are implemented with option-specific restrictions; this does not enable deferred Unix options,
+function/autoload/highlight consumers or help. Deferred reserved commands remain rejected rather
+than falling through to unrelated executables. The native executable currently requires
+`fish -N -c <code> [argv...]`; normal config/script/stdin/interactive modes and standalone
+formatter/key-reader behavior are not made available by their Unix parsers.
+
+Ordinary namespace, metadata and native permission options belong to N1. Full portable batch
+language/builtins and formatter flags belong to N3; startup/persistence to N4; jobs/accounting to
+N5; interactive/key-reader flags to N6; advanced editor UX to N7; platform-only identity/device/
+quota options and additional script providers to N8; help/assets/localization to N9; release to
+N10. N11 reconciles completed behavior, not forgotten implementation.
+
+The exercised host is **Windows `10.0.26300` x64**, local **C:/D: NTFS**,
+`LongPathsEnabled=1`, `DeveloperMode=1`, a non-elevated token and a writable
+`\\localhost\D$` share. Native debug/release N1 harnesses each passed all three required gates
+against both artifacts, with no ignored cases. Rust **1.95.0** and minimum **1.85.0** executable
+artifacts were exercised; the explicit SDK verification used **10.0.26100.0** and MSVC
+**14.51.36231**. Only `--no-default-features` development builds are certified here.
+
+UNC metadata/identity/cwd passed. **The tested SMB endpoint rejects directory case queries
+with Win32 error 50, so UNC glob traversal explicitly fails rather than guessing case policy.**
+Local NTFS traversal passed; this is not a certification for FAT/ReFS, remote SMB servers,
+other Windows builds, ARM64 or an interactive terminal GUI.
+
+Owned fd-0 `< file` / `<? file` input, including block input, supports real NUL-delimited
+filesystem builtin input without changing argument precedence. Output/dup/close redirects,
+pipelines, capture and full runtime ownership remain N2. `cd -` belongs to the shipped directory
+history functions, not an added Windows-only builtin convention; loader/helper integration
+remains N4/N9.
+
+The [detailed evidence record](coverage.md#n1-verified-evidence-record) identifies source revision,
+artifact hashes and pre-commit version metadata, exact discovery/execution counts, 76 native
+library tests, preserved prototype regressions, 181 Unix library tests and real native/Unix
+smokes. The actual native workflow gate body also passed locally; no remote CI run is claimed.
+Required fixture absence still **hard-fails**, never skips.
 
 ## Portability classifications
 
@@ -46,7 +88,7 @@ Extend the existing owning Windows backends while retaining shared fish language
 
 ## Original source audit coverage matrix
 
-The original audit assigns top-level runtime modules to owning analyses, including child modules by directory. New native modules and remaining implementation ownership are covered by GOAL.md and ROADMAP.md; N1 refreshes the exact inventory.
+The original audit assigns top-level runtime modules to owning analyses, including child modules by directory. The [current runtime ledger](coverage.md#current-runtime-and-native-module-inventory) now separately records every new native backend, selected/compiled-out service and remaining phase ownership; the table below is historical.
 
 | Source component | Owning analysis |
 |---|---|
@@ -69,7 +111,7 @@ The original audit assigns top-level runtime modules to owning analyses, includi
 
 Some directories appear in two rows because runtime test helpers or localization data belong both to runtime ownership and to their build/test pipeline. Each analysis states that boundary.
 
-The [coverage inventory](coverage.md) records the original 174 runtime Rust files, 21 workspace crates and 2,247-file audit baseline. These are historical ownership counts, not current native-support counts. Fish functions, completion definitions, prompts, themes, catalogs and fixtures are analyzed as behavior families; ROADMAP.md requires complete per-asset and per-option closure before release.
+The [historical coverage inventory](coverage.md#historical-pre-prototype-audit-preserved) retains the original 174 runtime Rust files, 21 workspace crates and 2,247-file audit baseline. Current-source ownership is recorded separately above it; neither set of counts is a native-support proof. Functions, completions, prompts, themes, catalogs and fixtures remain behavior families until their owning phases supply real per-asset execution evidence.
 
 ## Recommended next architecture
 
@@ -90,8 +132,8 @@ The original analysis-only audit completed these documentation checks:
 
 - Rendered all 19 Markdown documents, including 41 tables, with `markdown-it-py` using CommonMark plus tables.
 - Checked local Markdown/source link targets and table column counts; no missing targets or malformed table rows remain.
-- Matched all 174 current runtime Rust files to direct source links in their owning analyses.
-- Matched all 21 current workspace crates and the complete 2,247-file tracked project inventory to analysis ownership, with no missing or extra source paths.
+- Matched all 174 then-current runtime Rust files to direct source links in their owning analyses.
+- Matched all 21 then-current workspace crates and the complete 2,247-file audit inventory to analysis ownership, with no missing or extra source paths at that baseline.
 - Checked the critical Windows inheritance, console-control, file-replacement and directory-notification contracts against Microsoft documentation.
 
-These historical checks establish documentation structure and original component coverage, not runtime compatibility. Subsequent native build/runtime evidence is recorded in GOAL.md. ROADMAP.md's future gates remain prospective until their implementations and native tests land.
+These historical checks establish original documentation structure and ownership. Current N1 native/runtime evidence is recorded in the coverage ledger; later phases remain unverified until their implementations and exact execution evidence land. GOAL.md remains the unchanged prototype history.
