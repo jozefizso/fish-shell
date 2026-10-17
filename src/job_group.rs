@@ -2,6 +2,7 @@ use crate::global_safety::RelaxedAtomicBool;
 use crate::prelude::*;
 use crate::proc::{JobGroupRef, Pid};
 use crate::signal::RawSignal;
+#[cfg(unix)]
 use nix::sys::termios::Termios;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -58,6 +59,7 @@ impl<'a> fish_printf::ToArg<'a> for MaybeJobId {
 #[derive(Debug)]
 pub struct JobGroup {
     /// If set, the saved terminal modes of this job. This needs to be saved so that we can restore
+    #[cfg(unix)]
     /// the terminal to the same state when resuming a stopped job.
     pub tmodes: Mutex<Option<Termios>>,
     /// Whether job control is enabled in this `JobGroup` or not.
@@ -138,6 +140,7 @@ impl JobGroup {
     ///
     /// As such, this method takes `&mut self` rather than `&self` to enforce that this operation is
     /// only available during initial construction/initialization.
+    #[cfg(unix)]
     pub fn set_pgid(&self, pgid: Pid) {
         assert!(
             self.wants_job_control(),
@@ -206,11 +209,18 @@ impl JobGroup {
             assert!(job_control, "Cannot take terminal without job control!");
         }
 
+        #[cfg(windows)]
+        assert!(
+            !job_control && !wants_term,
+            "Native terminal job control is unsupported"
+        );
+
         Self {
             job_id: id,
             job_control,
             wants_term,
             command,
+            #[cfg(unix)]
             tmodes: Mutex::default(),
             signal: 0.into(),
             is_foreground: RelaxedAtomicBool::new(false),
@@ -237,6 +247,7 @@ impl JobGroup {
     /// Return a new `JobGroup` with the provided `command` with job control enabled. A [`JobId`] is
     /// automatically acquired and assigned. If `wants_term` is true then [`JobGroup::wants_term`]
     /// is also set to `true` accordingly.
+    #[cfg(unix)]
     pub fn create_with_job_control(command: WString, wants_term: bool) -> JobGroupRef {
         Arc::new(JobGroup::new(
             command,

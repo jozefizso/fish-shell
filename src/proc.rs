@@ -4,32 +4,43 @@
 
 use crate::{
     ast,
-    common::{WSL, is_windows_subsystem_for_linux},
     env::Statuses,
-    event::{self, Event},
-    flog::{flog, flogf},
     function::FunctionProperties,
     global_safety::RelaxedAtomicBool,
     io::IoChain,
     job_group::{JobGroup, MaybeJobId},
     parse_tree::NodeRef,
-    parser::{Block, Parser},
+    parser::Parser,
     portable_atomic::AtomicU64,
     prelude::*,
-    reader::{fish_is_unwinding_for_exit, reader_schedule_prompt_repaint},
     redirection::RedirectionSpecList,
-    signal::{RawSignal, signal_set_handlers_once},
-    topic_monitor::{self, GenerationsList, Topic},
-    wait_handle::{WaitHandle, WaitHandleRef, WaitHandleStore},
-    wutil::{perror_nix, wbasename},
+    signal::RawSignal,
+    wait_handle::{WaitHandle, WaitHandleRef},
+    wutil::wbasename,
 };
-use fish_common::{Timepoint, escape, timef};
+#[cfg(unix)]
+use crate::{
+    common::{WSL, is_windows_subsystem_for_linux},
+    event::{self, Event},
+    flog::{flog, flogf},
+    parser::Block,
+    reader::{fish_is_unwinding_for_exit, reader_schedule_prompt_repaint},
+    signal::signal_set_handlers_once,
+    topic_monitor::{self, GenerationsList, Topic},
+    wait_handle::WaitHandleStore,
+    wutil::perror_nix,
+};
+use fish_common::Timepoint;
+#[cfg(unix)]
+use fish_common::{escape, timef};
 use fish_widestring::ToWString;
+#[cfg(unix)]
 use libc::{
     _SC_CLK_TCK, EXIT_SUCCESS, SIG_IGN, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGINT, SIGPIPE, SIGQUIT,
     SIGSEGV, SIGSYS, SIGTTOU, STDOUT_FILENO, WCONTINUED, WEXITSTATUS, WIFCONTINUED, WIFEXITED,
     WIFSIGNALED, WIFSTOPPED, WNOHANG, WSTOPSIG, WTERMSIG, WUNTRACED,
 };
+#[cfg(unix)]
 use nix::{
     sys::{
         signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, killpg},
@@ -39,15 +50,19 @@ use nix::{
 };
 use std::{
     cell::{Cell, Ref, RefCell, RefMut},
-    fs,
-    io::Write as _,
     num::NonZeroU32,
-    os::fd::RawFd,
-    rc::Rc,
     sync::{
-        Arc, LazyLock, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicU8, Ordering},
     },
+};
+#[cfg(unix)]
+use std::{
+    fs,
+    io::Write as _,
+    os::fd::RawFd,
+    rc::Rc,
+    sync::{LazyLock, Mutex},
 };
 
 /// Types of processes.
@@ -98,6 +113,7 @@ impl TryFrom<&wstr> for JobControl {
 /// A number of clock ticks.
 pub type ClockTicks = u64;
 
+#[cfg(unix)]
 /// Return clock ticks in seconds, or 0 on failure.
 /// This uses sysconf(_SC_CLK_TCK) to convert to seconds.
 pub fn clock_ticks_to_seconds(ticks: ClockTicks) -> f64 {
@@ -110,11 +126,19 @@ pub fn clock_ticks_to_seconds(ticks: ClockTicks) -> f64 {
 
 pub type JobGroupRef = Arc<JobGroup>;
 
+#[cfg(windows)]
+#[path = "proc_status_windows.rs"]
+mod native_status;
+#[cfg(windows)]
+pub use native_status::ProcStatus;
+
 /// A ProcStatus is a value type that encapsulates logic around exited vs stopped vs signaled,
 /// etc. It contains an i32 status, or None if the status should be ignored (e.g. for builtin set).
+#[cfg(unix)]
 #[derive(Default, Debug, Copy, Clone)]
 pub struct ProcStatus(Option<i32>);
 
+#[cfg(unix)]
 impl ProcStatus {
     fn new(status: Option<i32>) -> Self {
         ProcStatus(status)
@@ -235,6 +259,7 @@ impl ProcStatus {
     }
 }
 
+#[cfg(unix)]
 /// A structure representing a "process" internal to fish. This is backed by a pthread instead of a
 /// separate process.
 pub struct InternalProc {
@@ -248,6 +273,7 @@ pub struct InternalProc {
     status: OnceLock<ProcStatus>,
 }
 
+#[cfg(unix)]
 impl InternalProc {
     pub fn new() -> Self {
         static NEXT_PROC_ID: AtomicU64 = AtomicU64::new(0);
@@ -298,21 +324,36 @@ impl Pid {
                 .expect("PID must be greater than zero"),
         )
     }
+    #[cfg(windows)]
+    pub fn from_native(pid: u32) -> Self {
+        Self(NonZeroU32::new(pid).expect("PID must be greater than zero"))
+    }
+
+    #[cfg(windows)]
+    #[inline(always)]
+    pub fn get(&self) -> u32 {
+        self.0.get()
+    }
+
+    #[cfg(unix)]
     #[inline(always)]
     pub fn get(&self) -> i32 {
         self.0.get() as i32
     }
+    #[cfg(unix)]
     #[inline(always)]
     pub fn as_pid_t(&self) -> libc::pid_t {
         #[allow(clippy::useless_conversion)]
         self.get().into()
     }
 
+    #[cfg(unix)]
     #[inline(always)]
     pub fn as_nullable_pid(&self) -> NullablePid {
         NullablePid::from_raw(self.as_pid_t())
     }
 
+    #[cfg(unix)]
     #[inline(always)]
     // The nix Pid type does not guarantee non-zero values.
     // It is safe to use this on the result of nix's getpid, since getpid does not fail, and the ID
@@ -376,15 +417,18 @@ pub struct Process {
     /// Actual command to pass to exec in case of ProcessType::External or ProcessType::Exec.
     pub actual_cmd: WString,
 
+    #[cfg(unix)]
     /// Generation counts for reaping.
     pub gens: Cell<GenerationsList>,
 
     /// Process ID or `None` where not available.
     pub pid: OnceLock<Pid>,
 
+    #[cfg(unix)]
     /// If we are an "internal process," that process.
     pub internal_proc: RefCell<Option<Arc<InternalProc>>>,
 
+    #[cfg(unix)]
     /// File descriptor that pipe output should bind to.
     pub pipe_write_fd: RawFd,
 
@@ -491,6 +535,7 @@ impl Process {
         self.proc_redirection_specs = specs;
     }
 
+    #[cfg(unix)]
     /// Store the current topic generations. That is, right before the process is launched, record
     /// the generations of all topics; then we can tell which generation values have changed after
     /// launch. This helps us avoid spurious waitpid calls.
@@ -815,6 +860,7 @@ impl Job {
         self.has_external_proc()
     }
 
+    #[cfg(unix)]
     /// Run ourselves. Returning once we complete or stop.
     pub fn continue_job(&self, parser: &mut Parser, block_io: Option<&IoChain>) {
         flogf!(
@@ -836,7 +882,7 @@ impl Job {
 
         // Wait for the status of our own job to change.
         while !fish_is_unwinding_for_exit() && !self.is_stopped() && !self.is_completed() {
-            process_mark_finished_children(parser, /*block_ok=*/ true, block_io);
+            unix::process_mark_finished_children(parser, /*block_ok=*/ true, block_io);
         }
         if self.is_completed() {
             // Set $status only if we are in the foreground and the last process in the job has
@@ -852,6 +898,7 @@ impl Job {
         }
     }
 
+    #[cfg(unix)]
     /// Prepare to resume a stopped job by sending SIGCONT and clearing the stopped flag.
     /// Return true on success, false if we failed to send the signal.
     pub fn resume(&self) -> bool {
@@ -872,6 +919,7 @@ impl Job {
         true
     }
 
+    #[cfg(unix)]
     /// Send the specified signal to all processes in this job.
     /// Return true on success, false on failure.
     pub fn signal(&self, signal: Signal) -> bool {
@@ -961,6 +1009,12 @@ pub fn get_job_control_mode() -> JobControl {
     unsafe { std::mem::transmute(JOB_CONTROL_MODE.load(Ordering::Relaxed)) }
 }
 pub fn set_job_control_mode(mode: JobControl) {
+    #[cfg(windows)]
+    assert!(
+        mode == JobControl::None,
+        "Native terminal job control is unsupported"
+    );
+
     JOB_CONTROL_MODE.store(mode as u8, Ordering::Relaxed);
 
     // HACK: when fish (or any shell) launches a job with job control, it will put the job into its
@@ -969,676 +1023,723 @@ pub fn set_job_control_mode(mode: JobControl) {
     // tcsetpgrp(), but as fish is now a background process it will receive SIGTTOU and stop! Ensure
     // that doesn't happen by ignoring SIGTTOU.
     // Note that if we become interactive, we also ignore SIGTTOU.
+    #[cfg(unix)]
     if mode == JobControl::All {
         unsafe {
             libc::signal(SIGTTOU, SIG_IGN);
         }
     }
 }
+#[cfg(unix)]
 static JOB_CONTROL_MODE: AtomicU8 = AtomicU8::new(JobControl::Interactive as u8);
+#[cfg(windows)]
+static JOB_CONTROL_MODE: AtomicU8 = AtomicU8::new(JobControl::None as u8);
 
-/// Notify the user about stopped or terminated jobs, and delete completed jobs from the job list.
-/// If `interactive` is set, allow removing interactive jobs; otherwise skip them.
-/// Return whether text was printed to stdout.
-pub fn job_reap(parser: &mut Parser, interactive: bool, block_io: Option<&IoChain>) -> bool {
-    // Early out for the common case that there are no jobs.
-    if parser.jobs().is_empty() {
-        return false;
-    }
+#[cfg(unix)]
+pub use unix::*;
 
-    process_mark_finished_children(parser, /*block_ok=*/ false, block_io);
-    process_clean_after_marking(parser, interactive)
-}
+#[cfg(unix)]
+mod unix {
+    use super::*;
 
-/// Return the list of background jobs which we should warn the user about, if the user attempts to
-/// exit. An empty result (common) means no such jobs.
-pub fn jobs_requiring_warning_on_exit(parser: &Parser) -> Vec<Rc<Job>> {
-    let mut result = vec![];
-    for job in parser.jobs() {
-        if !job.is_foreground() && job.is_constructed() && !job.is_completed() {
-            result.push(job.clone());
+    /// Notify the user about stopped or terminated jobs, and delete completed jobs from the job list.
+    /// If `interactive` is set, allow removing interactive jobs; otherwise skip them.
+    /// Return whether text was printed to stdout.
+    pub fn job_reap(parser: &mut Parser, interactive: bool, block_io: Option<&IoChain>) -> bool {
+        // Early out for the common case that there are no jobs.
+        if parser.jobs().is_empty() {
+            return false;
         }
-    }
-    result
-}
 
-/// Print the exit warning for the given jobs, which should have been obtained via
-/// jobs_requiring_warning_on_exit().
-pub fn print_exit_warning_for_jobs(jobs: &[Rc<Job>]) {
-    printf!("%s\n", wgettext!("There are still jobs active:"));
-    printf!("\n   PID  %s\n", wgettext!("Command"));
-    for j in jobs {
-        // Unwrap safety: we can't have a background job that doesn't have an external process and
-        // external processes always have a pid set.
-        printf!(
-            "%6d  %s\n",
-            j.external_procs().next().and_then(|p| p.pid()).unwrap(),
-            j.command()
-        );
-    }
-    printf!(
-        "\n%s\n",
-        wgettext!("A second attempt to exit will terminate them."),
-    );
-    printf!(
-        "%s\n",
-        wgettext!("Use 'disown PID' to remove jobs from the list without terminating them."),
-    );
-    reader_schedule_prompt_repaint();
-}
-
-/// Use the procfs filesystem to look up how many jiffies of cpu time was used by a given pid. This
-/// function is only available on systems with the procfs file entry 'stat', i.e. Linux.
-pub fn proc_get_jiffies(inpid: Pid) -> ClockTicks {
-    if !*HAVE_PROC_STAT {
-        return 0;
+        process_mark_finished_children(parser, /*block_ok=*/ false, block_io);
+        process_clean_after_marking(parser, interactive)
     }
 
-    let filename = format!("/proc/{}/stat", inpid);
-    let Ok(buf) = fs::read(filename) else {
-        return 0;
-    };
-
-    let mut timesstrs = buf.split(|c| *c == b' ').skip(13);
-    let mut sum = 0;
-    for _ in 0..4 {
-        let Some(timestr) = timesstrs.next() else {
-            return 0;
-        };
-        let Ok(timestr) = std::str::from_utf8(timestr) else {
-            return 0;
-        };
-        let Ok(time) = str::parse::<u64>(timestr) else {
-            return 0;
-        };
-        sum += time;
-    }
-    sum
-}
-
-/// Update process time usage for all processes by calling the proc_get_jiffies function for every
-/// process of every job.
-pub fn proc_update_jiffies(parser: &mut Parser) {
-    for job in parser.jobs() {
-        for p in job.external_procs() {
-            p.last_times.replace(ProcTimes {
-                time: timef(),
-                jiffies: proc_get_jiffies(p.pid().unwrap()),
-            });
-        }
-    }
-}
-
-/// Initializations.
-pub fn proc_init() {
-    signal_set_handlers_once(false);
-}
-
-/// Set the status of `proc` to `status`.
-fn handle_child_status(job: &Job, proc: &Process, status: ProcStatus) {
-    proc.status.set(status);
-    if status.stopped() {
-        proc.stopped.store(true);
-    } else if status.continued() {
-        proc.stopped.store(false);
-    } else {
-        proc.completed.store(true);
-    }
-
-    // If the child was killed by SIGINT or SIGQUIT, then cancel the entire group if interactive. If
-    // not interactive, we have historically re-sent the signal to ourselves; however don't do that
-    // if the signal is trapped (#6649).
-    // Note the asymmetry: if the fish process gets SIGINT we will run SIGINT handlers. If a child
-    // process gets SIGINT we do not run SIGINT handlers; we just don't exit. This should be
-    // rationalized.
-    if status.signal_exited() {
-        let sig = status.signal_code();
-        if [SIGINT, SIGQUIT].contains(&sig) {
-            if is_interactive_session() {
-                // Mark the job group as cancelled.
-                job.group().cancel_with_signal(RawSignal::new(sig));
-            } else if !event::is_signal_observed(sig) {
-                // Deliver the SIGINT or SIGQUIT signal to ourself since we're not interactive.
-                let act =
-                    SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty()).into();
-
-                unsafe {
-                    libc::sigaction(sig, &act, std::ptr::null_mut());
-                    libc::kill(libc::getpid(), sig);
-                }
+    /// Return the list of background jobs which we should warn the user about, if the user attempts to
+    /// exit. An empty result (common) means no such jobs.
+    pub fn jobs_requiring_warning_on_exit(parser: &Parser) -> Vec<Rc<Job>> {
+        let mut result = vec![];
+        for job in parser.jobs() {
+            if !job.is_foreground() && job.is_constructed() && !job.is_completed() {
+                result.push(job.clone());
             }
         }
-    }
-}
-
-/// Wait for any process finishing, or receipt of a signal.
-pub fn proc_wait_any(parser: &mut Parser) {
-    process_mark_finished_children(parser, /*block_ok=*/ true, /*block_io=*/ None);
-    let is_interactive = parser.scope().is_interactive;
-    process_clean_after_marking(parser, is_interactive);
-}
-
-/// Send SIGHUP to the list `jobs`, excepting those which are in fish's pgroup.
-pub fn hup_jobs(jobs: &[Rc<Job>]) {
-    let fish_pgrp = getpgrp();
-    let mut kill_list = Vec::new();
-    for j in jobs {
-        let Some(pgid) = j.pgid() else { continue };
-        if pgid.as_nullable_pid() != fish_pgrp && !j.is_completed() {
-            j.signal(Signal::SIGHUP);
-            if j.is_stopped() {
-                j.signal(Signal::SIGCONT);
-            }
-
-            // For most applications, the above alone is sufficient for the suspended process to
-            // exit. But for TUI applications attached to the tty, when we SIGCONT them they might
-            // immediately try to re-attach to the tty and end up immediately back in a stopped
-            // state! In this case, when the shell exits and gives up control of the tty, the kernel
-            // tty driver typically sends SIGHUP + SIGCONT on its own, and with the shell no longer
-            // in control of the tty, the child process won't receive SIGTTOU this time around and
-            // can properly handle the SIGHUP and exit.
-            // Anyway, the fun part of all this is that WSLv1 doesn't do any of this and stopped
-            // backgrounded child processes that want tty access will remain stopped with SIGTTOU
-            // indefinitely.
-            if is_windows_subsystem_for_linux(WSL::V1) {
-                kill_list.push(j);
-            }
-        }
+        result
     }
 
-    if !kill_list.is_empty() {
-        // Sleep once for all child processes to give them a chance to handle SIGHUP if they can
-        // handle SIGHUP+SIGCONT without running into SIGTTOU.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        for j in kill_list.drain(..) {
-            j.signal(Signal::SIGKILL);
-        }
-    }
-}
-
-/// Add a job to the list of PIDs/PGIDs we wait on even though they are not associated with any
-/// jobs. Used to avoid zombie processes after disown.
-pub fn add_disowned_job(j: &Job) {
-    let mut disowned_pids = DISOWNED_PIDS.lock().unwrap();
-    for process in j.external_procs() {
-        disowned_pids.push(process.pid().unwrap());
-    }
-}
-
-// Reap any pids in our disowned list that have exited. This is used to avoid zombies.
-fn reap_disowned_pids() {
-    let mut disowned_pids = DISOWNED_PIDS.lock().unwrap();
-    // Remove the pid/pgid if it has exited or an error occurs (presumably ECHILD because the child does not exist).
-    disowned_pids.retain(
-        |pid| match waitpid(pid.as_nullable_pid(), Some(WaitPidFlag::WNOHANG)) {
-            Ok(wait_status) => match wait_status {
-                WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) => {
-                    flogf!(proc_reap_external, "Reaped disowned PID or PGID %d", pid);
-                    false
-                }
-                _ => true,
-            },
-            Err(_) => false,
-        },
-    );
-}
-
-/// A list of pids that have been disowned. They are kept around until either they exit or
-/// we exit. Poll these from time-to-time to prevent zombie processes from happening (#5342).
-static DISOWNED_PIDS: Mutex<Vec<Pid>> = Mutex::new(Vec::new());
-
-/// See if any reapable processes have exited, and mark them accordingly.
-/// \param block_ok if no reapable processes have exited, block until one is (or until we receive a
-/// signal).
-fn process_mark_finished_children(parser: &mut Parser, block_ok: bool, block_io: Option<&IoChain>) {
-    // Get the exit and signal generations of all reapable processes.
-    // The exit generation tells us if we have an exit; the signal generation allows for detecting
-    // SIGHUP and SIGINT.
-    // Go through each process and figure out if and how it wants to be reaped.
-    let mut reapgens = GenerationsList::invalid();
-    for j in parser.jobs() {
-        for proc in j.processes().iter() {
-            if !j.can_reap(proc) {
-                continue;
-            }
-
-            let procgens = proc.gens.get();
-            if proc.has_pid() {
-                // Reaps with a pid.
-                reapgens.sigchld = reapgens.sigchld.min(procgens.sigchld);
-                reapgens.sighupintterm = reapgens.sighupintterm.min(procgens.sighupintterm);
-            }
-            if proc.internal_proc.borrow().is_some() {
-                // Reaps with an internal process.
-                reapgens.internal_exit = reapgens.internal_exit.min(procgens.internal_exit);
-                reapgens.sighupintterm = reapgens.sighupintterm.min(procgens.sighupintterm);
-            }
-        }
-    }
-
-    // Now check for changes, optionally waiting.
-    if !topic_monitor::principal().check(&mut reapgens, block_ok) {
-        // Nothing changed.
-        return;
-    }
-
-    // We got some changes. Since we last checked we received SIGCHLD, and or HUP/INT.
-    // Update the hup/int generations and reap any reapable processes.
-    // We structure this as two loops for some simplicity.
-    // First reap all pids.
-    for j in parser.jobs() {
-        for proc in j.processes() {
-            // Check if it is an external proc (has a pid) and is reapable.
-            if !proc.has_pid() || !j.can_reap(proc) {
-                continue;
-            }
-            // Always update the signal hup/int gen.
-            // Check for a new sigchild - if we got one then waitpid().
-            let mut procgens = proc.gens.get();
-            procgens.sighupintterm = reapgens.sighupintterm;
-            let got_new_sigchld = procgens.sigchld != reapgens.sigchld;
-            if got_new_sigchld {
-                procgens.sigchld = reapgens.sigchld;
-            }
-            proc.gens.set(procgens);
-
-            // Nothing to do if we did not get a new sigchld.
-            if !got_new_sigchld {
-                continue;
-            }
-
-            // Ok, we are reapable. Run waitpid()!
-            let mut statusv: libc::c_int = -1;
-            let pid = unsafe {
-                libc::waitpid(
-                    proc.pid().unwrap().as_pid_t(),
-                    &mut statusv,
-                    WNOHANG | WUNTRACED | WCONTINUED,
-                )
-            };
-            if pid == 0 {
-                continue;
-            }
-            let pid = Pid::new(pid);
-            assert_eq!(pid, proc.pid().unwrap(), "Unexpected waitpid() return");
-
-            // The process has stopped or exited! Update its status.
-            let status = ProcStatus::from_waitpid(statusv);
-            handle_child_status(j, proc, status);
-            if status.stopped() {
-                j.group().set_is_foreground(false);
-            }
-            if status.continued() {
-                j.flags_mut().notified_of_stop = false;
-            }
-            if status.normal_exited() || status.signal_exited() {
-                flogf!(
-                    proc_reap_external,
-                    "Reaped external process '%s' (pid %d, status %d)",
-                    proc.argv0().unwrap(),
-                    pid,
-                    proc.status().status_value()
-                );
-
-                block_io.map(bufferfill_read_finished_process_output);
-            } else {
-                assert!(status.stopped() || status.continued());
-                flogf!(
-                    proc_reap_external,
-                    "External process '%s' (pid %d, %s)",
-                    proc.argv0().unwrap(),
-                    proc.pid().unwrap(),
-                    if proc.status().stopped() {
-                        "stopped"
-                    } else {
-                        "continued"
-                    }
-                );
-            }
-        }
-    }
-
-    // We are done reaping pids.
-    // Reap internal processes.
-    for j in parser.jobs() {
-        for proc in j.processes() {
-            // Does this proc have an internal process that is reapable?
-            if proc.internal_proc.borrow().is_none() || !j.can_reap(proc) {
-                continue;
-            }
-            // Always update the signal hup/int gen.
-            let mut procgens = proc.gens.get();
-            procgens.sighupintterm = reapgens.sighupintterm;
-            let got_new_internal_exit = procgens.internal_exit != reapgens.internal_exit;
-            if got_new_internal_exit {
-                procgens.internal_exit = reapgens.internal_exit;
-            }
-            proc.gens.set(procgens);
-
-            // Nothing to do if we did not get a new internal exit.
-            if !got_new_internal_exit {
-                continue;
-            }
-
-            // Keep the borrow so we don't keep borrowing again and again and unwrapping again and
-            // again below.
-            let borrow = proc.internal_proc.borrow();
-            let internal_proc = borrow.as_ref().unwrap();
-            // Has the process exited?
-            if !internal_proc.exited() {
-                continue;
-            }
-
-            // The process gets the status from its internal proc.
-            let status = internal_proc.get_status();
-            handle_child_status(j, proc, status);
-            flogf!(
-                proc_reap_internal,
-                "Reaped internal process '%s' (id %u, status %d)",
-                proc.argv0().unwrap(),
-                internal_proc.get_id(),
-                proc.status().status_value(),
+    /// Print the exit warning for the given jobs, which should have been obtained via
+    /// jobs_requiring_warning_on_exit().
+    pub fn print_exit_warning_for_jobs(jobs: &[Rc<Job>]) {
+        printf!("%s\n", wgettext!("There are still jobs active:"));
+        printf!("\n   PID  %s\n", wgettext!("Command"));
+        for j in jobs {
+            // Unwrap safety: we can't have a background job that doesn't have an external process and
+            // external processes always have a pid set.
+            printf!(
+                "%6d  %s\n",
+                j.external_procs().next().and_then(|p| p.pid()).unwrap(),
+                j.command()
             );
         }
+        printf!(
+            "\n%s\n",
+            wgettext!("A second attempt to exit will terminate them."),
+        );
+        printf!(
+            "%s\n",
+            wgettext!("Use 'disown PID' to remove jobs from the list without terminating them."),
+        );
+        reader_schedule_prompt_repaint();
     }
 
-    // Remove any zombies.
-    reap_disowned_pids();
-}
-
-fn bufferfill_read_finished_process_output(block_io: &IoChain) {
-    let Some(stdout) = block_io.io_for_fd(STDOUT_FILENO) else {
-        return;
-    };
-    let Some(stdout) = stdout.as_bufferfill() else {
-        return;
-    };
-    stdout.read_all_available();
-}
-
-/// Generate process_exit events for any completed processes in `j`.
-fn generate_process_exit_events(j: &Job, out_evts: &mut Vec<Event>) {
-    // Historically we have avoided generating events for foreground jobs from event handlers, as an
-    // event handler may itself produce a new event.
-    if !j.from_event_handler() || !j.is_foreground() {
-        for p in j.external_procs() {
-            if p.is_completed() && !p.posted_proc_exit.load() {
-                p.posted_proc_exit.store(true);
-                out_evts.push(Event::process_exit(
-                    p.pid().unwrap(),
-                    p.status().status_value(),
-                ));
-            }
+    /// Use the procfs filesystem to look up how many jiffies of cpu time was used by a given pid. This
+    /// function is only available on systems with the procfs file entry 'stat', i.e. Linux.
+    pub fn proc_get_jiffies(inpid: Pid) -> ClockTicks {
+        if !*HAVE_PROC_STAT {
+            return 0;
         }
-    }
-}
 
-/// Given a job that has completed, generate job_exit and caller_exit events.
-fn generate_job_exit_events(j: &Job, out_evts: &mut Vec<Event>) {
-    // Generate proc and job exit events, except for foreground jobs originating in event handlers.
-    if !j.from_event_handler() || !j.is_foreground() {
-        // job_exit events.
-        if j.posts_job_exit_events() {
-            if let Some(last_pid) = j.last_pid() {
-                out_evts.push(Event::job_exit(last_pid, j.internal_job_id));
-            }
-        }
-    }
-    // Generate caller_exit events.
-    out_evts.push(Event::caller_exit(j.internal_job_id, j.job_id()));
-}
+        let filename = format!("/proc/{}/stat", inpid);
+        let Ok(buf) = fs::read(filename) else {
+            return 0;
+        };
 
-/// Return whether to emit a fish_job_summary call for a process.
-fn proc_wants_summary(j: &Job, p: &Process) -> bool {
-    // Are we completed with a pid?
-    if !p.is_completed() || !p.has_pid() {
-        return false;
-    }
-
-    // Did we die due to a signal other than SIGPIPE?
-    let s = p.status();
-    if !s.signal_exited() || s.signal_code() == SIGPIPE {
-        return false;
-    }
-
-    // Does the job want to suppress notifications?
-    // Note we always report crashes.
-    if j.skip_notification() && !CRASHSIGNALS.contains(&s.signal_code()) {
-        return false;
-    }
-
-    true
-}
-
-/// Return whether to emit a fish_job_summary call for a job as a whole. We may also emit this for
-/// its individual processes.
-fn job_wants_summary(j: &Job) -> bool {
-    // Do we just skip notifications?
-    if j.skip_notification() {
-        return false;
-    }
-
-    // Do we have a single process which will also report? If so then that suffices for us.
-    if j.processes().len() == 1 && proc_wants_summary(j, &j.processes()[0]) {
-        return false;
-    }
-
-    // Are we foreground?
-    // The idea here is to not print status messages for jobs that execute in the foreground (i.e.
-    // without & and without being `bg`).
-    if j.is_foreground() {
-        return false;
-    }
-
-    true
-}
-
-/// Return whether we want to emit a fish_job_summary call for a job or any of its processes.
-fn job_or_proc_wants_summary(j: &Job) -> bool {
-    job_wants_summary(j) || j.processes().iter().any(|p| proc_wants_summary(j, p))
-}
-
-/// Invoke the fish_job_summary function by executing the given command.
-fn call_job_summary(parser: &mut Parser, cmd: &wstr) {
-    let event = Event::generic(L!("fish_job_summary").to_owned());
-    let b = parser.push_block(Block::event_block(event));
-    let saved_status = parser.last_statuses();
-    parser.eval(cmd, &IoChain::new());
-    parser.set_last_statuses(saved_status);
-    parser.pop_block(b);
-}
-
-// Return a command which invokes fish_job_summary.
-// The process pointer may be null, in which case it represents the entire job.
-// Note this implements the arguments which fish_job_summary expects.
-fn summary_command(j: &Job, p: Option<&Process>) -> WString {
-    let mut buffer = L!("fish_job_summary").to_owned();
-
-    // Job id.
-    buffer += &sprintf!(" %s", j.job_id().to_wstring())[..];
-
-    // 1 if foreground, 0 if background.
-    buffer += &sprintf!(" %d", if j.is_foreground() { 1 } else { 0 })[..];
-
-    // Command.
-    buffer.push(' ');
-    buffer += &escape(j.command())[..];
-
-    match p {
-        None => {
-            // No process, we are summarizing the whole job.
-            buffer += if j.is_stopped() {
-                L!(" STOPPED")
-            } else {
-                L!(" ENDED")
+        let mut timesstrs = buf.split(|c| *c == b' ').skip(13);
+        let mut sum = 0;
+        for _ in 0..4 {
+            let Some(timestr) = timesstrs.next() else {
+                return 0;
             };
+            let Ok(timestr) = std::str::from_utf8(timestr) else {
+                return 0;
+            };
+            let Ok(time) = str::parse::<u64>(timestr) else {
+                return 0;
+            };
+            sum += time;
         }
-        Some(p) => {
-            // We are summarizing a process which exited with a signal.
-            // Arguments are the signal name and description.
-            let sig = RawSignal::new(p.status().signal_code());
-            buffer.push(' ');
-            buffer += &escape(sig.name())[..];
+        sum
+    }
 
-            buffer.push(' ');
-            buffer += &escape(sig.desc())[..];
-
-            // If we have multiple processes, we also append the pid and argv.
-            if j.external_procs().count() > 1 {
-                // I don't think it's safe to blindly unwrap here because even though we exited with
-                // a signal, the job could have contained a fish function?
-                let pid = p.pid().map_or("-".to_owned(), |p| p.to_string());
-                buffer += &sprintf!(" %s", pid)[..];
-
-                buffer.push(' ');
-                buffer += &escape(p.argv0().unwrap())[..];
+    /// Update process time usage for all processes by calling the proc_get_jiffies function for every
+    /// process of every job.
+    pub fn proc_update_jiffies(parser: &mut Parser) {
+        for job in parser.jobs() {
+            for p in job.external_procs() {
+                p.last_times.replace(ProcTimes {
+                    time: timef(),
+                    jiffies: proc_get_jiffies(p.pid().unwrap()),
+                });
             }
         }
     }
-    buffer
-}
 
-// Summarize a list of jobs, by emitting calls to fish_job_summary.
-// Note the given list must NOT be the parser's own job list, since the call to fish_job_summary
-// could modify it.
-fn summarize_jobs(parser: &mut Parser, jobs: &[Rc<Job>]) -> bool {
-    if jobs.is_empty() {
-        return false;
+    /// Initializations.
+    pub fn proc_init() {
+        signal_set_handlers_once(false);
     }
 
-    for j in jobs {
-        if j.is_stopped() {
-            call_job_summary(parser, &summary_command(j, None));
+    /// Set the status of `proc` to `status`.
+    fn handle_child_status(job: &Job, proc: &Process, status: ProcStatus) {
+        proc.status.set(status);
+        if status.stopped() {
+            proc.stopped.store(true);
+        } else if status.continued() {
+            proc.stopped.store(false);
         } else {
-            // Completed job.
-            for p in j.processes().iter() {
-                if proc_wants_summary(j, p) {
-                    call_job_summary(parser, &summary_command(j, Some(p)));
+            proc.completed.store(true);
+        }
+
+        // If the child was killed by SIGINT or SIGQUIT, then cancel the entire group if interactive. If
+        // not interactive, we have historically re-sent the signal to ourselves; however don't do that
+        // if the signal is trapped (#6649).
+        // Note the asymmetry: if the fish process gets SIGINT we will run SIGINT handlers. If a child
+        // process gets SIGINT we do not run SIGINT handlers; we just don't exit. This should be
+        // rationalized.
+        if status.signal_exited() {
+            let sig = status.signal_code();
+            if [SIGINT, SIGQUIT].contains(&sig) {
+                if is_interactive_session() {
+                    // Mark the job group as cancelled.
+                    job.group().cancel_with_signal(RawSignal::new(sig));
+                } else if !event::is_signal_observed(sig) {
+                    // Deliver the SIGINT or SIGQUIT signal to ourself since we're not interactive.
+                    let act = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty())
+                        .into();
+
+                    unsafe {
+                        libc::sigaction(sig, &act, std::ptr::null_mut());
+                        libc::kill(libc::getpid(), sig);
+                    }
                 }
             }
+        }
+    }
 
-            // Overall status for the job.
-            if job_wants_summary(j) {
+    /// Wait for any process finishing, or receipt of a signal.
+    pub fn proc_wait_any(parser: &mut Parser) {
+        process_mark_finished_children(parser, /*block_ok=*/ true, /*block_io=*/ None);
+        let is_interactive = parser.scope().is_interactive;
+        process_clean_after_marking(parser, is_interactive);
+    }
+
+    /// Send SIGHUP to the list `jobs`, excepting those which are in fish's pgroup.
+    pub fn hup_jobs(jobs: &[Rc<Job>]) {
+        let fish_pgrp = getpgrp();
+        let mut kill_list = Vec::new();
+        for j in jobs {
+            let Some(pgid) = j.pgid() else { continue };
+            if pgid.as_nullable_pid() != fish_pgrp && !j.is_completed() {
+                j.signal(Signal::SIGHUP);
+                if j.is_stopped() {
+                    j.signal(Signal::SIGCONT);
+                }
+
+                // For most applications, the above alone is sufficient for the suspended process to
+                // exit. But for TUI applications attached to the tty, when we SIGCONT them they might
+                // immediately try to re-attach to the tty and end up immediately back in a stopped
+                // state! In this case, when the shell exits and gives up control of the tty, the kernel
+                // tty driver typically sends SIGHUP + SIGCONT on its own, and with the shell no longer
+                // in control of the tty, the child process won't receive SIGTTOU this time around and
+                // can properly handle the SIGHUP and exit.
+                // Anyway, the fun part of all this is that WSLv1 doesn't do any of this and stopped
+                // backgrounded child processes that want tty access will remain stopped with SIGTTOU
+                // indefinitely.
+                if is_windows_subsystem_for_linux(WSL::V1) {
+                    kill_list.push(j);
+                }
+            }
+        }
+
+        if !kill_list.is_empty() {
+            // Sleep once for all child processes to give them a chance to handle SIGHUP if they can
+            // handle SIGHUP+SIGCONT without running into SIGTTOU.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            for j in kill_list.drain(..) {
+                j.signal(Signal::SIGKILL);
+            }
+        }
+    }
+
+    /// Add a job to the list of PIDs/PGIDs we wait on even though they are not associated with any
+    /// jobs. Used to avoid zombie processes after disown.
+    pub fn add_disowned_job(j: &Job) {
+        let mut disowned_pids = DISOWNED_PIDS.lock().unwrap();
+        for process in j.external_procs() {
+            disowned_pids.push(process.pid().unwrap());
+        }
+    }
+
+    // Reap any pids in our disowned list that have exited. This is used to avoid zombies.
+    fn reap_disowned_pids() {
+        let mut disowned_pids = DISOWNED_PIDS.lock().unwrap();
+        // Remove the pid/pgid if it has exited or an error occurs (presumably ECHILD because the child does not exist).
+        disowned_pids.retain(|pid| {
+            match waitpid(pid.as_nullable_pid(), Some(WaitPidFlag::WNOHANG)) {
+                Ok(wait_status) => match wait_status {
+                    WaitStatus::Exited(_, _) | WaitStatus::Signaled(_, _, _) => {
+                        flogf!(proc_reap_external, "Reaped disowned PID or PGID %d", pid);
+                        false
+                    }
+                    _ => true,
+                },
+                Err(_) => false,
+            }
+        });
+    }
+
+    /// A list of pids that have been disowned. They are kept around until either they exit or
+    /// we exit. Poll these from time-to-time to prevent zombie processes from happening (#5342).
+    static DISOWNED_PIDS: Mutex<Vec<Pid>> = Mutex::new(Vec::new());
+
+    /// See if any reapable processes have exited, and mark them accordingly.
+    /// \param block_ok if no reapable processes have exited, block until one is (or until we receive a
+    /// signal).
+    pub(super) fn process_mark_finished_children(
+        parser: &mut Parser,
+        block_ok: bool,
+        block_io: Option<&IoChain>,
+    ) {
+        // Get the exit and signal generations of all reapable processes.
+        // The exit generation tells us if we have an exit; the signal generation allows for detecting
+        // SIGHUP and SIGINT.
+        // Go through each process and figure out if and how it wants to be reaped.
+        let mut reapgens = GenerationsList::invalid();
+        for j in parser.jobs() {
+            for proc in j.processes().iter() {
+                if !j.can_reap(proc) {
+                    continue;
+                }
+
+                let procgens = proc.gens.get();
+                if proc.has_pid() {
+                    // Reaps with a pid.
+                    reapgens.sigchld = reapgens.sigchld.min(procgens.sigchld);
+                    reapgens.sighupintterm = reapgens.sighupintterm.min(procgens.sighupintterm);
+                }
+                if proc.internal_proc.borrow().is_some() {
+                    // Reaps with an internal process.
+                    reapgens.internal_exit = reapgens.internal_exit.min(procgens.internal_exit);
+                    reapgens.sighupintterm = reapgens.sighupintterm.min(procgens.sighupintterm);
+                }
+            }
+        }
+
+        // Now check for changes, optionally waiting.
+        if !topic_monitor::principal().check(&mut reapgens, block_ok) {
+            // Nothing changed.
+            return;
+        }
+
+        // We got some changes. Since we last checked we received SIGCHLD, and or HUP/INT.
+        // Update the hup/int generations and reap any reapable processes.
+        // We structure this as two loops for some simplicity.
+        // First reap all pids.
+        for j in parser.jobs() {
+            for proc in j.processes() {
+                // Check if it is an external proc (has a pid) and is reapable.
+                if !proc.has_pid() || !j.can_reap(proc) {
+                    continue;
+                }
+                // Always update the signal hup/int gen.
+                // Check for a new sigchild - if we got one then waitpid().
+                let mut procgens = proc.gens.get();
+                procgens.sighupintterm = reapgens.sighupintterm;
+                let got_new_sigchld = procgens.sigchld != reapgens.sigchld;
+                if got_new_sigchld {
+                    procgens.sigchld = reapgens.sigchld;
+                }
+                proc.gens.set(procgens);
+
+                // Nothing to do if we did not get a new sigchld.
+                if !got_new_sigchld {
+                    continue;
+                }
+
+                // Ok, we are reapable. Run waitpid()!
+                let mut statusv: libc::c_int = -1;
+                let pid = unsafe {
+                    libc::waitpid(
+                        proc.pid().unwrap().as_pid_t(),
+                        &mut statusv,
+                        WNOHANG | WUNTRACED | WCONTINUED,
+                    )
+                };
+                if pid == 0 {
+                    continue;
+                }
+                let pid = Pid::new(pid);
+                assert_eq!(pid, proc.pid().unwrap(), "Unexpected waitpid() return");
+
+                // The process has stopped or exited! Update its status.
+                let status = ProcStatus::from_waitpid(statusv);
+                handle_child_status(j, proc, status);
+                if status.stopped() {
+                    j.group().set_is_foreground(false);
+                }
+                if status.continued() {
+                    j.flags_mut().notified_of_stop = false;
+                }
+                if status.normal_exited() || status.signal_exited() {
+                    flogf!(
+                        proc_reap_external,
+                        "Reaped external process '%s' (pid %d, status %d)",
+                        proc.argv0().unwrap(),
+                        pid,
+                        proc.status().status_value()
+                    );
+
+                    block_io.map(bufferfill_read_finished_process_output);
+                } else {
+                    assert!(status.stopped() || status.continued());
+                    flogf!(
+                        proc_reap_external,
+                        "External process '%s' (pid %d, %s)",
+                        proc.argv0().unwrap(),
+                        proc.pid().unwrap(),
+                        if proc.status().stopped() {
+                            "stopped"
+                        } else {
+                            "continued"
+                        }
+                    );
+                }
+            }
+        }
+
+        // We are done reaping pids.
+        // Reap internal processes.
+        for j in parser.jobs() {
+            for proc in j.processes() {
+                // Does this proc have an internal process that is reapable?
+                if proc.internal_proc.borrow().is_none() || !j.can_reap(proc) {
+                    continue;
+                }
+                // Always update the signal hup/int gen.
+                let mut procgens = proc.gens.get();
+                procgens.sighupintterm = reapgens.sighupintterm;
+                let got_new_internal_exit = procgens.internal_exit != reapgens.internal_exit;
+                if got_new_internal_exit {
+                    procgens.internal_exit = reapgens.internal_exit;
+                }
+                proc.gens.set(procgens);
+
+                // Nothing to do if we did not get a new internal exit.
+                if !got_new_internal_exit {
+                    continue;
+                }
+
+                // Keep the borrow so we don't keep borrowing again and again and unwrapping again and
+                // again below.
+                let borrow = proc.internal_proc.borrow();
+                let internal_proc = borrow.as_ref().unwrap();
+                // Has the process exited?
+                if !internal_proc.exited() {
+                    continue;
+                }
+
+                // The process gets the status from its internal proc.
+                let status = internal_proc.get_status();
+                handle_child_status(j, proc, status);
+                flogf!(
+                    proc_reap_internal,
+                    "Reaped internal process '%s' (id %u, status %d)",
+                    proc.argv0().unwrap(),
+                    internal_proc.get_id(),
+                    proc.status().status_value(),
+                );
+            }
+        }
+
+        // Remove any zombies.
+        reap_disowned_pids();
+    }
+
+    fn bufferfill_read_finished_process_output(block_io: &IoChain) {
+        let Some(stdout) = block_io.io_for_fd(STDOUT_FILENO) else {
+            return;
+        };
+        let Some(stdout) = stdout.as_bufferfill() else {
+            return;
+        };
+        stdout.read_all_available();
+    }
+
+    /// Generate process_exit events for any completed processes in `j`.
+    fn generate_process_exit_events(j: &Job, out_evts: &mut Vec<Event>) {
+        // Historically we have avoided generating events for foreground jobs from event handlers, as an
+        // event handler may itself produce a new event.
+        if !j.from_event_handler() || !j.is_foreground() {
+            for p in j.external_procs() {
+                if p.is_completed() && !p.posted_proc_exit.load() {
+                    p.posted_proc_exit.store(true);
+                    out_evts.push(Event::process_exit(
+                        p.pid().unwrap(),
+                        p.status().status_value(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Given a job that has completed, generate job_exit and caller_exit events.
+    fn generate_job_exit_events(j: &Job, out_evts: &mut Vec<Event>) {
+        // Generate proc and job exit events, except for foreground jobs originating in event handlers.
+        if !j.from_event_handler() || !j.is_foreground() {
+            // job_exit events.
+            if j.posts_job_exit_events() {
+                if let Some(last_pid) = j.last_pid() {
+                    out_evts.push(Event::job_exit(last_pid, j.internal_job_id));
+                }
+            }
+        }
+        // Generate caller_exit events.
+        out_evts.push(Event::caller_exit(j.internal_job_id, j.job_id()));
+    }
+
+    /// Return whether to emit a fish_job_summary call for a process.
+    fn proc_wants_summary(j: &Job, p: &Process) -> bool {
+        // Are we completed with a pid?
+        if !p.is_completed() || !p.has_pid() {
+            return false;
+        }
+
+        // Did we die due to a signal other than SIGPIPE?
+        let s = p.status();
+        if !s.signal_exited() || s.signal_code() == SIGPIPE {
+            return false;
+        }
+
+        // Does the job want to suppress notifications?
+        // Note we always report crashes.
+        if j.skip_notification() && !CRASHSIGNALS.contains(&s.signal_code()) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Return whether to emit a fish_job_summary call for a job as a whole. We may also emit this for
+    /// its individual processes.
+    fn job_wants_summary(j: &Job) -> bool {
+        // Do we just skip notifications?
+        if j.skip_notification() {
+            return false;
+        }
+
+        // Do we have a single process which will also report? If so then that suffices for us.
+        if j.processes().len() == 1 && proc_wants_summary(j, &j.processes()[0]) {
+            return false;
+        }
+
+        // Are we foreground?
+        // The idea here is to not print status messages for jobs that execute in the foreground (i.e.
+        // without & and without being `bg`).
+        if j.is_foreground() {
+            return false;
+        }
+
+        true
+    }
+
+    /// Return whether we want to emit a fish_job_summary call for a job or any of its processes.
+    fn job_or_proc_wants_summary(j: &Job) -> bool {
+        job_wants_summary(j) || j.processes().iter().any(|p| proc_wants_summary(j, p))
+    }
+
+    /// Invoke the fish_job_summary function by executing the given command.
+    fn call_job_summary(parser: &mut Parser, cmd: &wstr) {
+        let event = Event::generic(L!("fish_job_summary").to_owned());
+        let b = parser.push_block(Block::event_block(event));
+        let saved_status = parser.last_statuses();
+        parser.eval(cmd, &IoChain::new());
+        parser.set_last_statuses(saved_status);
+        parser.pop_block(b);
+    }
+
+    // Return a command which invokes fish_job_summary.
+    // The process pointer may be null, in which case it represents the entire job.
+    // Note this implements the arguments which fish_job_summary expects.
+    fn summary_command(j: &Job, p: Option<&Process>) -> WString {
+        let mut buffer = L!("fish_job_summary").to_owned();
+
+        // Job id.
+        buffer += &sprintf!(" %s", j.job_id().to_wstring())[..];
+
+        // 1 if foreground, 0 if background.
+        buffer += &sprintf!(" %d", if j.is_foreground() { 1 } else { 0 })[..];
+
+        // Command.
+        buffer.push(' ');
+        buffer += &escape(j.command())[..];
+
+        match p {
+            None => {
+                // No process, we are summarizing the whole job.
+                buffer += if j.is_stopped() {
+                    L!(" STOPPED")
+                } else {
+                    L!(" ENDED")
+                };
+            }
+            Some(p) => {
+                // We are summarizing a process which exited with a signal.
+                // Arguments are the signal name and description.
+                let sig = RawSignal::new(p.status().signal_code());
+                buffer.push(' ');
+                buffer += &escape(sig.name())[..];
+
+                buffer.push(' ');
+                buffer += &escape(sig.desc())[..];
+
+                // If we have multiple processes, we also append the pid and argv.
+                if j.external_procs().count() > 1 {
+                    // I don't think it's safe to blindly unwrap here because even though we exited with
+                    // a signal, the job could have contained a fish function?
+                    let pid = p.pid().map_or("-".to_owned(), |p| p.to_string());
+                    buffer += &sprintf!(" %s", pid)[..];
+
+                    buffer.push(' ');
+                    buffer += &escape(p.argv0().unwrap())[..];
+                }
+            }
+        }
+        buffer
+    }
+
+    // Summarize a list of jobs, by emitting calls to fish_job_summary.
+    // Note the given list must NOT be the parser's own job list, since the call to fish_job_summary
+    // could modify it.
+    fn summarize_jobs(parser: &mut Parser, jobs: &[Rc<Job>]) -> bool {
+        if jobs.is_empty() {
+            return false;
+        }
+
+        for j in jobs {
+            if j.is_stopped() {
                 call_job_summary(parser, &summary_command(j, None));
+            } else {
+                // Completed job.
+                for p in j.processes().iter() {
+                    if proc_wants_summary(j, p) {
+                        call_job_summary(parser, &summary_command(j, Some(p)));
+                    }
+                }
+
+                // Overall status for the job.
+                if job_wants_summary(j) {
+                    call_job_summary(parser, &summary_command(j, None));
+                }
             }
         }
+        true
     }
-    true
-}
 
-/// Remove all disowned jobs whose job chain is fully constructed (that is, do not erase disowned
-/// jobs that still have an in-flight parent job). Note we never print statuses for such jobs.
-fn remove_disowned_jobs(jobs: &mut Vec<Rc<Job>>) {
-    jobs.retain(|j| !j.flags().disown_requested || !j.is_constructed());
-}
+    /// Remove all disowned jobs whose job chain is fully constructed (that is, do not erase disowned
+    /// jobs that still have an in-flight parent job). Note we never print statuses for such jobs.
+    fn remove_disowned_jobs(jobs: &mut Vec<Rc<Job>>) {
+        jobs.retain(|j| !j.flags().disown_requested || !j.is_constructed());
+    }
 
-/// Given that a job has completed, check if it may be wait'ed on; if so add it to the wait handle
-/// store. Then mark all wait handles as complete.
-fn save_wait_handle_for_completed_job(job: &Job, store: &mut WaitHandleStore) {
-    assert!(job.is_completed(), "Job not completed");
-    // Are we a background job?
-    if !job.is_foreground() {
+    /// Given that a job has completed, check if it may be wait'ed on; if so add it to the wait handle
+    /// store. Then mark all wait handles as complete.
+    fn save_wait_handle_for_completed_job(job: &Job, store: &mut WaitHandleStore) {
+        assert!(job.is_completed(), "Job not completed");
+        // Are we a background job?
+        if !job.is_foreground() {
+            for proc in job.processes().iter() {
+                if let Some(wh) = proc.make_wait_handle(job.internal_job_id) {
+                    store.add(wh);
+                }
+            }
+        }
+
+        // Mark all wait handles as complete (but don't create just for this).
         for proc in job.processes().iter() {
-            if let Some(wh) = proc.make_wait_handle(job.internal_job_id) {
-                store.add(wh);
+            if let Some(wh) = proc.wait_handle() {
+                wh.set_status_and_complete(proc.status().status_value());
             }
         }
     }
 
-    // Mark all wait handles as complete (but don't create just for this).
-    for proc in job.processes().iter() {
-        if let Some(wh) = proc.wait_handle() {
-            wh.set_status_and_complete(proc.status().status_value());
+    /// Remove completed jobs from the job list, printing status messages as appropriate.
+    /// Return whether something was printed.
+    fn process_clean_after_marking(parser: &mut Parser, interactive: bool) -> bool {
+        // This function may fire an event handler, we do not want to call ourselves recursively (to
+        // avoid infinite recursion).
+        if parser.scope().is_cleaning_procs {
+            return false;
         }
+
+        let _cleaning = parser.push_scope(|s| s.is_cleaning_procs = true);
+
+        // Remove all disowned jobs.
+        remove_disowned_jobs(parser.jobs_mut());
+
+        // Accumulate exit events into a new list, which we fire after the list manipulation is
+        // complete.
+        let mut exit_events = vec![];
+
+        // Defer processing under-construction jobs or jobs that want a message when we are not
+        // interactive.
+        let should_process_job = |j: &Job| {
+            // Do not attempt to process jobs which are not yet constructed.
+            // Do not attempt to process jobs that need to print a status message,
+            // unless we are interactive, in which case printing is OK.
+            j.is_constructed() && (interactive || !job_or_proc_wants_summary(j))
+        };
+
+        // The list of jobs to summarize. Some of these jobs are completed and are removed from the
+        // parser's job list, others are stopped and remain in the list.
+        let mut jobs_to_summarize = vec![];
+
+        // Handle stopped jobs. These stay in our list.
+        for j in parser.jobs() {
+            if j.is_stopped()
+                && !j.flags().notified_of_stop
+                && should_process_job(j)
+                && job_wants_summary(j)
+            {
+                j.flags_mut().notified_of_stop = true;
+                jobs_to_summarize.push(j.clone());
+            }
+        }
+
+        // Generate process_exit events for finished processes.
+        for j in parser.jobs() {
+            generate_process_exit_events(j, &mut exit_events);
+        }
+
+        // Remove completed, processable jobs from our job list.
+        let mut completed_jobs = vec![];
+        parser.jobs_mut().retain(|j| {
+            if !should_process_job(j) || !j.is_completed() {
+                return true;
+            }
+            // We are committed to removing this job.
+            // Remember it for summary later, generate exit events, maybe save its wait handle if it
+            // finished in the background.
+            if job_or_proc_wants_summary(j) {
+                jobs_to_summarize.push(j.clone());
+            }
+            generate_job_exit_events(j, &mut exit_events);
+            completed_jobs.push(j.clone());
+            false
+        });
+        for j in completed_jobs {
+            save_wait_handle_for_completed_job(&j, parser.mut_wait_handles());
+        }
+
+        // Emit calls to fish_job_summary.
+        let printed = summarize_jobs(parser, &jobs_to_summarize);
+
+        // Post pending exit events.
+        for evt in exit_events {
+            event::fire(parser, evt);
+        }
+
+        if printed {
+            _ = std::io::stdout().flush();
+        }
+
+        printed
     }
+
+    /// Check for /proc/self/stat to see if we are running with Linux-style procfs.
+    pub static HAVE_PROC_STAT: LazyLock<bool> =
+        LazyLock::new(|| fs::metadata("/proc/self/stat").is_ok());
+
+    /// The signals that signify crashes to us.
+    const CRASHSIGNALS: [libc::c_int; 6] = [SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGSYS];
 }
 
-/// Remove completed jobs from the job list, printing status messages as appropriate.
-/// Return whether something was printed.
-fn process_clean_after_marking(parser: &mut Parser, interactive: bool) -> bool {
-    // This function may fire an event handler, we do not want to call ourselves recursively (to
-    // avoid infinite recursion).
-    if parser.scope().is_cleaning_procs {
-        return false;
-    }
-
-    let _cleaning = parser.push_scope(|s| s.is_cleaning_procs = true);
-
-    // Remove all disowned jobs.
-    remove_disowned_jobs(parser.jobs_mut());
-
-    // Accumulate exit events into a new list, which we fire after the list manipulation is
-    // complete.
-    let mut exit_events = vec![];
-
-    // Defer processing under-construction jobs or jobs that want a message when we are not
-    // interactive.
-    let should_process_job = |j: &Job| {
-        // Do not attempt to process jobs which are not yet constructed.
-        // Do not attempt to process jobs that need to print a status message,
-        // unless we are interactive, in which case printing is OK.
-        j.is_constructed() && (interactive || !job_or_proc_wants_summary(j))
-    };
-
-    // The list of jobs to summarize. Some of these jobs are completed and are removed from the
-    // parser's job list, others are stopped and remain in the list.
-    let mut jobs_to_summarize = vec![];
-
-    // Handle stopped jobs. These stay in our list.
-    for j in parser.jobs() {
-        if j.is_stopped()
-            && !j.flags().notified_of_stop
-            && should_process_job(j)
-            && job_wants_summary(j)
-        {
-            j.flags_mut().notified_of_stop = true;
-            jobs_to_summarize.push(j.clone());
-        }
-    }
-
-    // Generate process_exit events for finished processes.
-    for j in parser.jobs() {
-        generate_process_exit_events(j, &mut exit_events);
-    }
-
-    // Remove completed, processable jobs from our job list.
-    let mut completed_jobs = vec![];
-    parser.jobs_mut().retain(|j| {
-        if !should_process_job(j) || !j.is_completed() {
+#[cfg(windows)]
+pub fn job_reap(parser: &mut Parser, _interactive: bool, _block_io: Option<&IoChain>) -> bool {
+    parser.jobs_mut().retain(|job| {
+        if !job.is_constructed() || !job.is_completed() {
             return true;
         }
-        // We are committed to removing this job.
-        // Remember it for summary later, generate exit events, maybe save its wait handle if it
-        // finished in the background.
-        if job_or_proc_wants_summary(j) {
-            jobs_to_summarize.push(j.clone());
+        for process in job.processes() {
+            if let Some(handle) = process.wait_handle() {
+                handle.set_status_and_complete(process.status().status_value());
+            }
         }
-        generate_job_exit_events(j, &mut exit_events);
-        completed_jobs.push(j.clone());
         false
     });
-    for j in completed_jobs {
-        save_wait_handle_for_completed_job(&j, parser.mut_wait_handles());
-    }
-
-    // Emit calls to fish_job_summary.
-    let printed = summarize_jobs(parser, &jobs_to_summarize);
-
-    // Post pending exit events.
-    for evt in exit_events {
-        event::fire(parser, evt);
-    }
-
-    if printed {
-        _ = std::io::stdout().flush();
-    }
-
-    printed
+    false
 }
 
-/// Check for /proc/self/stat to see if we are running with Linux-style procfs.
-pub static HAVE_PROC_STAT: LazyLock<bool> =
-    LazyLock::new(|| fs::metadata("/proc/self/stat").is_ok());
-
-/// The signals that signify crashes to us.
-const CRASHSIGNALS: [libc::c_int; 6] = [SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGSYS];
+#[cfg(windows)]
+impl Job {
+    /// Native foreground execution has already synchronously waited in exec_job.
+    pub fn continue_job(&self, parser: &mut Parser, _block_io: Option<&IoChain>) {
+        assert!(
+            self.is_completed(),
+            "Native jobs must complete synchronously"
+        );
+        if let Some(statuses) = self.statuses() {
+            parser.set_last_statuses(statuses);
+            parser.libdata_mut().status_count += 1;
+        }
+    }
+}
