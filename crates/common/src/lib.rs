@@ -854,6 +854,8 @@ pub fn unescape_one(
     // Here's the character we'll ultimately append, or none. Note that '\0' is a
     // valid thing to append.
     let mut result_char_or_none: Option<char> = None;
+    #[cfg(windows)]
+    let mut unicode_literal = false;
 
     let mut errored = false;
     // in_pos always tracks the next character to read
@@ -937,8 +939,18 @@ pub fn unescape_one(
                             continue;
                         }
                     } else {
-                        result_char_or_none =
-                            Some(char::from_u32(res.try_into().unwrap()).unwrap_or('\u{FFFD}'));
+                        #[cfg(windows)]
+                        {
+                            // A surrogate is not a Unicode scalar. Never let an invalid escape
+                            // alias a literal replacement-character native identity.
+                            result_char_or_none = Some(char::from_u32(res.try_into().unwrap())?);
+                            unicode_literal = matches!(c, 'u' | 'U');
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            result_char_or_none =
+                                Some(char::from_u32(res.try_into().unwrap()).unwrap_or('\u{FFFD}'));
+                        }
                     }
                 } else {
                     errored = true;
@@ -1016,9 +1028,22 @@ pub fn unescape_one(
     }
 
     if let Some(c) = result_char_or_none {
+        #[cfg(not(windows))]
         if fish_reserved_codepoint(c) {
             return None;
         }
+        #[cfg(windows)]
+        if unicode_literal && fish_reserved_codepoint(c) {
+            // Literal Unicode and byte escapes have different provenance. Quote the
+            // former's UTF-8 bytes, just as native source/argument ingress does.
+            let mut utf8 = [0; 4];
+            for byte in c.encode_utf8(&mut utf8).as_bytes() {
+                result.push(fish_widestring::encode_byte_to_char(*byte));
+            }
+        } else {
+            result.push(c);
+        }
+        #[cfg(not(windows))]
         result.push(c);
     }
 

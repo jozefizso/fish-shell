@@ -169,6 +169,7 @@ pub fn wcs2osstring(input: &wstr) -> OsString {
 pub enum NativeStringError {
     EmbeddedNul,
     UnpairedSurrogate(u16),
+    InvalidUtf8(std::str::Utf8Error),
 }
 
 #[cfg(windows)]
@@ -178,6 +179,9 @@ impl std::fmt::Display for NativeStringError {
             Self::EmbeddedNul => formatter.write_str("native text contains an embedded NUL"),
             Self::UnpairedSurrogate(unit) => {
                 write!(formatter, "native text contains an unpaired UTF-16 surrogate 0x{unit:04X}")
+            }
+            Self::InvalidUtf8(error) => {
+                write!(formatter, "shell text is not valid Unicode for a native name: {error}")
             }
         }
     }
@@ -247,6 +251,65 @@ pub fn wcs2osstring(input: &wstr) -> Result<OsString, NativeStringError> {
 #[cfg(windows)]
 pub fn osstr2wcstring<O: AsRef<OsStr>>(input: O) -> Result<WString, NativeStringError> {
     decode_native_utf16(input.as_ref().encode_wide())
+}
+
+/// Convert literal native Unicode into fish's canonical interpreter text.
+///
+/// The representation matches UTF-8 followed by [`bytes2wcstring`], so reserved
+/// private-use characters cannot be confused with arbitrary-byte markers by
+/// builtins. Keep [`osstr2wcstring`] as the checked, literal OS boundary and call
+/// this exactly once when its result enters the interpreter.
+#[cfg(windows)]
+pub fn native_to_shell_text(input: &wstr) -> WString {
+    let Some(first_reserved) = input.chars().position(fish_reserved_codepoint) else {
+        return input.to_owned();
+    };
+    let suffix = &input[first_reserved..];
+    let extra = suffix
+        .chars()
+        .filter(|character| fish_reserved_codepoint(*character))
+        .map(|character| character.len_utf8() - 1)
+        .sum::<usize>();
+    let mut result = WString::with_capacity(input.len() + extra);
+    result.push_utfstr(&input[..first_reserved]);
+    for character in suffix.chars() {
+        if fish_reserved_codepoint(character) {
+            let mut bytes = [0; 4];
+            for byte in character.encode_utf8(&mut bytes).as_bytes() {
+                result.push(encode_byte_to_char(*byte));
+            }
+        } else {
+            result.push(character);
+        }
+    }
+    result
+}
+
+/// Move native Unicode into canonical interpreter text without copying ordinary
+/// text. Reserved codepoints use the same escaping as [`native_to_shell_text`].
+#[cfg(windows)]
+pub fn native_to_shell_text_owned(input: WString) -> WString {
+    if input.chars().any(fish_reserved_codepoint) {
+        native_to_shell_text(&input)
+    } else {
+        input
+    }
+}
+
+/// Convert canonical interpreter text into a native OS identity.
+///
+/// Decode byte markers before validating Unicode. Invalid byte sequences and
+/// NUL are errors, never replacement characters or truncated native names.
+/// [`wcs2osstring`] instead accepts literal Unicode outside the interpreter.
+#[cfg(windows)]
+pub fn shell_text_to_osstring(input: &wstr) -> Result<OsString, NativeStringError> {
+    let bytes = wcs2bytes(input);
+    if bytes.contains(&0) {
+        return Err(NativeStringError::EmbeddedNul);
+    }
+    let unicode = String::from_utf8(bytes)
+        .map_err(|error| NativeStringError::InvalidUtf8(error.utf8_error()))?;
+    Ok(OsString::from(unicode))
 }
 
 /// Same as [`wcs2bytes`]. Meant to be used when we need a zero-terminated string to feed legacy APIs.
@@ -1085,6 +1148,108 @@ mod tests {
         );
         // Unlike native names, redirected byte streams escape this reserved range.
         assert_ne!(private_use, bytes2wcstring("\u{f680}".as_bytes()));
+    }
+
+    /// W2-TEXT: interpreter byte markers preserve literal native Unicode.
+    #[cfg(windows)]
+    #[test]
+    fn w2_text_native_shell_roundtrip() {
+        for text in [
+            "",
+            "C:\\fish shell\\plain.exe",
+            "Grüße 日本語 🦀𐐀",
+            "\u{e000}\u{f500}\u{f600}\u{f680}\u{f6ff}\u{f8ff}",
+            "\u{fdd0}\u{fdef}\u{f0000}\u{10fffd}\u{fffd}",
+        ] {
+            let native = OsString::from(text);
+            let literal = osstr2wcstring(&native).unwrap();
+            let shell = native_to_shell_text(&literal);
+            assert_eq!(shell, bytes2wcstring(text.as_bytes()));
+            assert_eq!(wcs2bytes(&shell), text.as_bytes());
+            assert_eq!(shell_text_to_osstring(&shell).unwrap(), native);
+            assert_eq!(wcs2osstring(&literal).unwrap(), native);
+            assert_eq!(native_to_shell_text_owned(literal), shell);
+        }
+        // Exercise every reserved scalar, including parser noncharacters, using
+        // the existing byte codec as the canonical-representation oracle.
+        for start_end in [
+            (SPECIAL_KEY_ENCODE_BASE, ENCODE_DIRECT_END),
+            (RESERVED_CHAR_BASE, RESERVED_CHAR_END),
+        ] {
+            for scalar in (start_end.0 as u32)..(start_end.1 as u32) {
+                let character = char::from_u32(scalar).unwrap();
+                let text = character.to_string();
+                let shell = native_to_shell_text(&WString::from_str(&text));
+                assert_eq!(shell, bytes2wcstring(text.as_bytes()));
+                assert_eq!(
+                    shell_text_to_osstring(&shell).unwrap(),
+                    OsString::from(text)
+                );
+            }
+        }
+        let supplementary = native_to_shell_text(L!("🦀"));
+        assert_eq!(supplementary.len(), 1);
+        for text in ["", "ordinary ASCII", "日本語 🦀𐐀"] {
+            let literal = WString::from_str(text);
+            let original_storage = literal.as_char_slice().as_ptr();
+            let shell = native_to_shell_text_owned(literal);
+            assert_eq!(shell, text);
+            assert_eq!(shell.as_char_slice().as_ptr(), original_storage);
+        }
+    }
+
+    /// W2-INVALID: arbitrary redirected bytes cannot become lossy native names.
+    #[cfg(windows)]
+    #[test]
+    fn w2_invalid_shell_identity_rejects() {
+        for bytes in [
+            &b"\xff"[..],
+            &b"\x80"[..],
+            &b"\xc0\xaf"[..],
+            &b"\xed\xa0\x80"[..],
+            &b"before\xf0\x9f"[..],
+        ] {
+            let shell = bytes2wcstring(bytes);
+            assert_eq!(wcs2bytes(&shell), bytes);
+            assert!(matches!(
+                shell_text_to_osstring(&shell),
+                Err(NativeStringError::InvalidUtf8(_))
+            ));
+        }
+        for bytes in [&b"\0"[..], &b"before\0after"[..]] {
+            assert_eq!(
+                shell_text_to_osstring(&bytes2wcstring(bytes)),
+                Err(NativeStringError::EmbeddedNul)
+            );
+        }
+        // Literal U+F680 and a raw 0x80 byte are distinct at ingress.
+        let literal = WString::from_str("\u{f680}");
+        assert!(matches!(
+            shell_text_to_osstring(&literal),
+            Err(NativeStringError::InvalidUtf8(_))
+        ));
+        assert_eq!(
+            shell_text_to_osstring(&native_to_shell_text(&literal)).unwrap(),
+            OsString::from("\u{f680}")
+        );
+        assert_eq!(
+            shell_text_to_osstring(&native_to_shell_text(L!("\u{fffd}"))).unwrap(),
+            OsString::from("\u{fffd}")
+        );
+        let all_bytes: Vec<u8> = (0..=255).collect();
+        let shell = bytes2wcstring(&all_bytes);
+        assert_eq!(wcs2bytes(&shell), all_bytes);
+        assert_eq!(
+            shell_text_to_osstring(&shell),
+            Err(NativeStringError::EmbeddedNul)
+        );
+        let all_nonzero_bytes: Vec<u8> = (1..=255).collect();
+        let shell = bytes2wcstring(&all_nonzero_bytes);
+        assert_eq!(wcs2bytes(&shell), all_nonzero_bytes);
+        assert!(matches!(
+            shell_text_to_osstring(&shell),
+            Err(NativeStringError::InvalidUtf8(_))
+        ));
     }
 
     /// W2-INVALID: no unsupported identity is replaced with a different valid name.
