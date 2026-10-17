@@ -8,7 +8,7 @@ The first runnable milestone is builtin-only `fish.exe -N -c ...`. The completed
 
 This goal implements the five workstreams from the reviewed proposal. The fifth workstream is split into two phases so builtin evaluation and external process execution have separate, testable deliveries. It does **not** promise full Windows feature parity. ARM64, interactive use and additional shell capabilities require separately approved scope.
 
-**Status:** implementation not started. Every phase and test below is required future work, not an assertion that native support or passing tests already exist. Test IDs are acceptance specifications, not existing test names.
+**Status:** implementation in progress. Native build-support behavior is verified below; remaining phase gates are not yet complete. Test IDs define acceptance requirements, not a claim that all suites already exist or pass.
 
 ## Explicitly out-of-scope contracts
 
@@ -207,3 +207,16 @@ Native path support initially covers ordinary local absolute drive paths, includ
 - Record phase completion evidence here as work lands: test command, target/toolchain, executed IDs/count, result and CI/artifact reference. Until then, every phase remains not started.
 
 The exploratory analyses in this directory describe possible later-port architecture; they do not expand this goal. Use [the component inventory](coverage.md), [workspace/build analysis](14-workspace-crates.md), [build tooling analysis](15-build-packaging-documentation.md) and [test infrastructure analysis](16-tests-benchmarks-ci.md) as source evidence. None is a substitute for executing the phase tests.
+
+## Implementation evidence
+
+### Build-support slice — verified, Phase 1 closure pending
+
+Native build-host version acquisition no longer executes a POSIX shell. The production helper preserves Git revision prefixes and falls back to the package version without Git; malformed successful Git output is an error.
+
+- Windows MSVC: `cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --nocapture` — 3 passed.
+- Windows MSVC: `cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --exact w1_host --nocapture` — 1 passed. W1-HOST executes the real production version acquisition in a native subprocess, in a space/Unicode source-archive fixture without host tools, and checks its result file.
+- Linux via `ubuntu-dev`: `cargo test --locked -p fish-build-helper` — 3 unit and 1 integration tests passed.
+- Local execution evidence: session command artifacts `bg_2` and `bg_3`; native CI runs the same named cases and rejects missing discovery. These local process IDs are not durable CI URLs.
+
+The native runtime/module closure and full `fish.exe` remain pending. This slice does not mark Phase 1 or the overall goal complete.

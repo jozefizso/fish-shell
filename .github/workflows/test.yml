@@ -189,6 +189,35 @@ jobs:
       run: |
         make -C build VERBOSE=1 fish_run_tests
 
+  windows-native-build-support:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, build_tools/update-dependencies.sh
+    - uses: dtolnay/rust-toolchain@1.85.0
+      with:
+        targets: "x86_64-pc-windows-msvc"
+    - name: Record native toolchain
+      run: |
+        rustc -Vv
+        cargo -V
+    - name: W1-VERSION (three required unit cases)
+      run: |
+        $cases = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --list
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if (@($cases | Select-String '^version::tests::w1_version_.*: test$').Count -ne 3) { throw "W1-VERSION requires exactly three discovered cases" }
+        cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --nocapture
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    - name: W1-HOST (isolated tool-free native archive)
+      run: |
+        $cases = cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --list
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if (@($cases | Select-String '^w1_host: test$').Count -ne 1) { throw "W1-HOST case missing" }
+        cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --exact w1_host --nocapture
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   windows:
     runs-on: windows-latest
     defaults:

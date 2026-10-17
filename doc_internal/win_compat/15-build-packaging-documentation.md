@@ -6,6 +6,45 @@ This page maps all top-level build/package/documentation families, including the
 
 All current-behavior statements are from repository source. No native build, installation, package, signing operation, documentation generation, or external dependency build was executed for this audit.
 
+## Phase 1 Cargo build-support entry point
+
+The source inventory below describes the pre-port audit. Cargo now obtains its
+version through `fish_build_helper::version::acquire_version`, using Cargo's
+package version and invoking Git directly when available. Matching descriptions
+are retained; other revisions receive the package-version plus `-g` prefix.
+Missing Git or unavailable repository metadata selects the package version.
+A successful but empty/non-UTF-8 Git response is an error, not a claimed fallback.
+The Unix `build_tools/git_version_gen.sh` and its release/CMake/Sphinx callers
+remain unchanged; native documentation and packaging are outside this phase.
+
+For a Windows target, root `build.rs` emits build metadata without running the
+Unix C capability probes. Native install paths use host path semantics, with
+the source directory as the default prefix and `etc` beneath it. This is not
+a Windows installer or a full-shell compilation claim.
+
+Run from the workspace root on the native MSVC host:
+
+```powershell
+cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --lib w1_version -- --nocapture
+cargo test --locked -p fish-build-helper --target x86_64-pc-windows-msvc --test host -- --exact w1_host --nocapture
+```
+
+W1-VERSION contains three required cases: `w1_version_matching_git`,
+`w1_version_revision_prefix`, and `w1_version_archive_fallback`. W1-HOST is the
+single integration case `w1_host`: it launches its actual native test executable
+in an isolated space/Unicode source-archive directory, clears the child
+environment and supplies an empty tool PATH, checks that `sh`, `awk`, and Git
+cannot launch, invokes the production version helper, and reads back the
+resulting package version. The parent drains both streams concurrently and
+terminates/reaps its child after a 30-second deadline.
+
+The separate `windows-native-build-support` job in `.github/workflows/test.yml`
+records `rustc -Vv`/`cargo -V`, requires discovery of all three unit cases and the
+one integration case, and runs both suites. Its job log is the evidence location;
+no passing result is asserted by this source change. The existing MSYS lane is
+unchanged and is not native-MSVC evidence. Unix regression command:
+`cargo test --locked -p fish-build-helper`.
+
 ## Cargo and CMake components
 
 | Component and evidence | Linux/POSIX dependency | Native Windows equivalent/gap | Proposed verification |

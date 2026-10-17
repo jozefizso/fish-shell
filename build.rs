@@ -40,6 +40,19 @@ fn main() {
 
     fish_build_helper::rebuild_if_embedded_path_changed("share");
 
+    if target_os() == "windows" {
+        // The native slice has no POSIX capability probes or C compiler requirement.
+        // Still register these names so shared cfg annotations remain checked.
+        for name in [
+            "apple", "bsd", "cygwin", "have_eventfd", "have_localeconv_l",
+            "have_getexecpath", "have_posix_spawn", "small_main_stack", "solarish",
+        ] {
+            rsconf::declare_cfg(name, false);
+        }
+        rsconf::declare_cfg("using_cmake", option_env!("FISH_CMAKE_BINARY_DIR").is_some());
+        return;
+    }
+
     let build = cc::Build::new();
     let mut target = Target::new_from(build).unwrap();
     // Keep verbose mode on until we've ironed out rust build script stuff
@@ -133,9 +146,6 @@ fn has_small_stack(_: &Target) -> bool {
 }
 
 fn setup_paths() {
-    #[cfg(windows)]
-    use unix_path::{Path, PathBuf};
-
     fn overridable_path(
         env_var_name: &str,
         f: impl FnOnce(Option<String>) -> Option<PathBuf>,
@@ -158,14 +168,22 @@ fn setup_paths() {
     }
 
     let prefix = overridable_path("PREFIX", |env_prefix| {
-        Some(PathBuf::from(env_prefix.unwrap_or("/usr/local".to_owned())))
+        Some(PathBuf::from(env_prefix.unwrap_or_else(|| {
+            if target_os() == "windows" {
+                workspace_root().to_str().unwrap().to_owned()
+            } else {
+                "/usr/local".to_owned()
+            }
+        })))
     })
     .unwrap();
 
     overridable_path("SYSCONFDIR", |env_sysconfdir| {
         Some(join_if_relative(
             &prefix,
-            env_sysconfdir.unwrap_or("/etc/".to_owned()),
+            env_sysconfdir.unwrap_or_else(|| {
+                if target_os() == "windows" { "etc".to_owned() } else { "/etc/".to_owned() }
+            }),
         ))
     });
 
@@ -187,14 +205,10 @@ fn setup_paths() {
 }
 
 fn get_version() -> String {
-    use std::process::Command;
-    String::from_utf8(
-        Command::new("build_tools/git_version_gen.sh")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim_ascii_end()
-    .to_owned()
+    for path in [".git", ".git/HEAD", ".git/index", ".git/packed-refs", ".git/refs"] {
+        fish_build_helper::rebuild_if_path_changed(path);
+    }
+    fish_build_helper::version::acquire_version(workspace_root(), env!("CARGO_PKG_VERSION"))
+        .expect("Unable to determine fish build version")
+        .value
 }
