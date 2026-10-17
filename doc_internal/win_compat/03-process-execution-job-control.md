@@ -1,5 +1,28 @@
 # Process execution and job control
 
+## Current N2 implementation overlay
+
+`exec_windows.rs` and `exec/windows_launch.rs` now implement prepared native pipeline launch.
+The following original audit/candidate scenarios are not the current support ledger; consult
+[N2 evidence](coverage.md#n2-verified-evidence-record).
+
+All native plans and ordered file opens are prepared before stage launch. `CreateProcessW`
+receives explicit application/argv/environment/cwd and `STARTUPINFOEX` handle allowlists;
+no global environment, cwd or standard-handle swapping is used. Children are created suspended,
+assigned to the operation-owned Job Object, registered with retained process ownership and resumed.
+Partial failure terminates/reaps only owned descendants and drains completion ownership.
+Normal completion releases kill-on-close policy, allowing normally surviving descendants.
+
+The executable is pinned using execution/read-attributes access and read-only sharing through
+launch. Same-image numbered-fd bridging compares full native file identity, not basename or copied
+contents. The initial loader-to-startup path-resolution interval is not a handle-based image-launch
+guarantee. Child physical cwd may use an extended namespace spelling; identity, not prefix spelling,
+is the filesystem contract.
+
+Native/builtin pipelines and raw DWORD completion retention are delivered. Function/block mixed
+pipelines remain N3; user-visible background jobs, control cancellation/events and accounting remain N5.
+Faithful fork, same-PID exec and POSIX fg/bg remain permanently excluded.
+
 ## Scope
 
 [`exec.rs`](../../src/exec.rs), [`proc.rs`](../../src/proc.rs), [`job_group.rs`](../../src/job_group.rs), [`tty_handoff.rs`](../../src/tty_handoff.rs), [`fork_exec/`](../../src/fork_exec/), and [`wait_handle.rs`](../../src/wait_handle.rs) launch commands, build pipelines, track jobs, transfer terminal ownership, collect status, implement foreground/background behavior, and support `exec`, `jobs`, `fg`, `bg`, and `disown`. This is a source audit and proposed native-Windows contract, not an executed port or compile report.

@@ -1,7 +1,8 @@
 # GOAL_02 — Streaming I/O, handle graphs and runtime ownership
 
-**Phase:** N2. **Status: planned / not started.**
-The tests below are acceptance specifications, not existing test names or claims of passing behavior.
+**Phase:** N2. **Status: implemented and verified on the recorded native host.**
+The automated gates exist in `tests/windows_n2.rs`; the evidence and platform limits are
+recorded in [coverage](coverage.md#n2-verified-evidence-record).
 The primary target is native `x86_64-pc-windows-msvc`; ARM64 is a separate architecture extension.
 
 ## Objective and completion boundary
@@ -139,3 +140,31 @@ Hand [N3](GOAL_03.md) capture/input/deferred-producer contracts with defined lim
 Hand [N4](GOAL_04.md) real worker/debounce/wakeup services and [N5](GOAL_05.md) retained process/completion ownership.
 N5 owns user-visible jobs, richer cancellation/events/accounting, not missing N2 runtime foundations;
 [N6](GOAL_06.md) owns interactive input lifecycle and [N7](GOAL_07.md) reuses the same background completion services.
+
+## Delivered interfaces and exercised verification
+
+- `src/io/windows_descriptors.rs` owns typed logical bindings and ordered per-job overlays;
+  `src/io/windows_pipe.rs` owns cancellable overlapped endpoints and capture;
+  `src/io/windows_deferred.rs` owns bounded internal-to-native deferred pumps.
+  Shared separated-buffer storage is in `src/io_buffer.rs`, without replacing Unix I/O ownership.
+- `src/exec/windows_launch.rs` prepares every child plan before launch, pins executable identity,
+  supplies an explicit inheritance allowlist and retains native processes/registrations.
+  `src/native_fd_bridge.rs` carries extra logical descriptors only to the identical running fish image.
+- `src/threads/windows.rs` and `windows_workers.rs` deliver scalable native waits, main-thread
+  completion queues, cancellation/drain, workers and debounce. N5 still owns user-visible job/control events.
+- Finite capture/internal-buffer policies bound data and element metadata. Capture finish cancels/drains
+  pending reads, snapshots available pipe bytes once, and does not wait for descendant EOF.
+  N3 must reuse this boundary when enabling substitution and mixed function/block pipelines.
+- Required Rust test names are `N2_STREAM`, `N2_REDIRECT`, `N2_LIFETIME`, emitting the three
+  hyphenated gate IDs for both executable profiles. Discovery must find exactly these three nonignored tests.
+- Native execution: `cargo +stable test --locked --target x86_64-pc-windows-msvc
+  --no-default-features --test windows_n1 --test windows_n2 -- --nocapture`, with explicit
+  `FISH_NATIVE_TEST_BIN`, `FISH_NATIVE_TEST_RELEASE_BIN` and provisioned `FISH_NATIVE_N1_UNC_ROOT`.
+  The final minimum-Rust executable plus stable release run passed 3 N1 and 3 N2 tests,
+  zero ignored/filtered; each gate exercised both artifacts.
+- Shared-code regression: WSL Ubuntu `cargo test --locked --no-default-features --lib`
+  passed all 181 tests, zero ignored/filtered, after the final shared cleanup.
+- Actual native smoke reproduced and fixed an internal→native relay→internal deadlock,
+  imported-fd alias overread, empty-status panic and inherited-unavailable output silently succeeding.
+  Explicit builtin output close remains the shared discard policy; unavailable inherited output fails on write.
+  See component overlays for ownership limits and the evidence record for complete commands/artifacts.

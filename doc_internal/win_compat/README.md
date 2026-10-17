@@ -4,13 +4,14 @@ This directory maps fish components to their Linux/POSIX dependencies and native
 
 ## Current status and planning entry points
 
-A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem, cwd, discovery and glob delivery is verified for the recorded host/volume/feature matrix.** It retains the existing evaluator and real native streams/environment/children; it is not yet a full interactive Windows shell. See the explicit SMB glob capability limit below.
+A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/cwd/discovery/globs and N2 streaming I/O/runtime ownership are verified for the recorded host/volume/feature matrix.** It retains the existing evaluator and real native streams/environment/children; it is not yet a full interactive Windows shell. See the explicit SMB glob capability limit below.
 
 - [GOAL.md](GOAL.md) records the completed prototype contract and its historical native/Unix verification evidence; that record is not rewritten by the N1 integration.
 - [ROADMAP.md](ROADMAP.md) defines the eleven dependency-ordered phases, semantic decisions and mandatory acceptance gates.
 - The standalone contracts [N1](GOAL_01.md), [N2](GOAL_02.md), [N3](GOAL_03.md), [N4](GOAL_04.md), [N5](GOAL_05.md), [N6](GOAL_06.md), [N7](GOAL_07.md), [N8](GOAL_08.md), [N9](GOAL_09.md), [N10](GOAL_10.md) and [N11](GOAL_11.md) retain their approved scopes.
 - The [current coverage/ownership ledger](coverage.md#scope-state-vocabulary-and-ownership) enumerates native/runtime modules, all existing workspace crates, asset families and **every executable CLI/builtin subcommand/option** with a source-based state, owning phase and required native semantics. Registry inclusion is not passing evidence; compiled-out Unix code is unavailable, not supported.
 - The [N1 evidence record](coverage.md#n1-verified-evidence-record) is the stable place to add integration revision, exact commands/counts, native debug/release artifacts, applicable Unix results and actual smoke observations after the gates.
+- The [N2 evidence record](coverage.md#n2-verified-evidence-record) records streaming/ordered-redirection/capture/runtime verification and the handoff to batch-language and job consumers.
 
 The component analyses and old file counts describe the original pre-prototype audit. Current-source overlays in [filesystem analysis](07-filesystem-paths-wildcards.md) and [builtin analysis](10-builtins.md) distinguish integrating implementations from historical candidate APIs. Historical counts never establish current support, and proposed future scenarios are not passing tests.
 
@@ -44,11 +45,13 @@ with Win32 error 50, so UNC glob traversal explicitly fails rather than guessing
 Local NTFS traversal passed; this is not a certification for FAT/ReFS, remote SMB servers,
 other Windows builds, ARM64 or an interactive terminal GUI.
 
-Owned fd-0 `< file` / `<? file` input, including block input, supports real NUL-delimited
-filesystem builtin input without changing argument precedence. Output/dup/close redirects,
-pipelines, capture and full runtime ownership remain N2. `cd -` belongs to the shipped directory
-history functions, not an added Windows-only builtin convention; loader/helper integration
-remains N4/N9.
+Ordered input/try-input/output/append/noclobber, dup/close and block redirections now use real
+logical endpoint graphs. Native/builtin pipeline combinations stream or use bounded deferred
+internal scheduling; same-image fish children can receive extra logical descriptors through a
+private bridge. Arbitrary native children cannot inherit fish-numbered extra fds.
+Capture and worker/wakeup/process ownership infrastructure is implemented; command substitution,
+function/block mixed pipelines remain N3 and user-visible job/control events remain N5.
+`cd -` belongs to shipped directory-history functions; loader/helper integration remains N4/N9.
 
 The [detailed evidence record](coverage.md#n1-verified-evidence-record) identifies source revision,
 artifact hashes and pre-commit version metadata, exact discovery/execution counts, 76 native

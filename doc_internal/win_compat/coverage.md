@@ -2,17 +2,17 @@
 
 ## Scope, state vocabulary and ownership
 
-The **current source ledger** below records [N1 delivery 6](GOAL_01.md) on
-`platform/windows/paths-discovery`, source revision `c3486d848`. It inventories native/runtime
-modules, all 21 workspace crate directories, asset families, executable CLI options and builtin
-subcommands/options. The [N1 evidence record](#n1-verified-evidence-record) distinguishes exercised
-native behavior from future owners. Compiling a Unix-only module out does not make its command available.
+The **current source ledger** records N1 filesystem delivery and N2 streaming/runtime delivery
+on their `platform/windows/` phase branches. It inventories native/runtime modules, all 21
+workspace crate directories, assets, executable CLI options and builtin subcommands/options.
+The [N1 evidence](#n1-verified-evidence-record) and [N2 evidence](#n2-verified-evidence-record)
+distinguish exercised behavior from future owners. Compiling Unix code out is not command support.
 
 States used throughout the current ledger:
 
 - **S — supported source path:** enabled in the native registry/parser, subject to the stated
   prototype limitations. This does not assert newly executed debug/release evidence.
-- **I — implemented N1 path:** enabled and exercised for the host/filesystem/feature matrix below.
+- **I — implemented N1/N2 path:** enabled and exercised for the host/filesystem/feature matrix below.
   This does not enable the explicitly deferred consumers or certify other Windows hosts/volumes.
 - **R — rejected:** the native entrypoint/option gate explicitly diagnoses unsupported use.
 - **U — unavailable:** the service is compiled out, absent or not connected to a native entrypoint.
@@ -48,12 +48,13 @@ Wiring evidence is [`lib.rs`](../../src/lib.rs), [`builtins/mod.rs`](../../src/b
 | `env/mod.rs`, `env/environment.rs`, `env/var.rs`, `env/impl/mod.rs`, `env/impl/environment.rs`, `env/impl/var.rs`, `env/native.rs` | S native import/export/scoped subset; I N1 cwd integration; N3 full local/function semantics, N4 persistence | Case-sensitive fish locals, checked native case-collision/export rules and PATH lists. `NativeCwd` Arc and PWD are updated together and cloned into snapshots; physical cwd queries use the owned directory. |
 | `env/config_paths.rs`, `env_universal_common.rs`, `env_dispatch.rs` | U Unix implementations; N4 | Native known-folder roots, locale/TZ/export effects, startup and durable universal state must be implemented, not silently replaced with globals. |
 | `env_dispatch/windows.rs` | S limited native dispatch; N4 full variable effects | Existing read-limit dispatch is not history, locale, terminal, autoload or watcher support. |
-| `exec_windows.rs`, `proc_status_windows.rs`, `proc.rs`, `job_group.rs`, `wait_handle.rs` | S sequential native foreground launch/status; I N1 resolver/cwd consumers; N2 streams, N5 supervision | Explicit application/argv/env/cwd, inherited standard endpoints and raw DWORD status (0–255 unchanged, other ordinary native exits map to 1). No POSIX pgroup/stopped-state claims. |
+| `exec_windows.rs`, `exec/windows_launch.rs`, `proc_status_windows.rs`, `proc.rs`, `job_group.rs`, `wait_handle.rs` | I N1 resolver/cwd and N2 prepared native pipeline launch/retained ownership; N5 user supervision | Explicit pinned application/argv/env/cwd, suspended creation/owned rollback, exact inheritance allowlists and retained raw DWORD completion. No POSIX pgroup/stopped-state claims. |
 | `exec.rs`, `fork_exec/mod.rs`, `fork_exec/flog_safe.rs`, `fork_exec/postfork.rs`, `fork_exec/spawn.rs` | U Unix backend; fork/image replacement X | Native launch extends `exec_windows.rs`; no faithful fork or same-PID exec implementation. |
-| `io_windows.rs`, `fds_windows.rs`, `null_terminated_array.rs`, `redirection.rs` | S inherited streams; I owned fd-0 input/try-input; R output/dup/close/pipeline syntax; N2 full graph | Input bindings retain real files and preserve argument versus explicitly redirected stdin precedence, including block input. N2 owns ordered multi-descriptor graphs, streaming, capture, inheritance allowlists and cancellation. Logical descriptor integers are not HANDLEs. |
-| `io.rs`, `fds.rs`, `fd_monitor.rs`, `fd_readable_set.rs` | U Unix implementations; N2 native counterparts/services | No native readiness/monitor/pipe graph support inferred from the Unix code. |
-| `threads/windows.rs` | S main-thread registration only; U workers/debounce N2 | Real worker, wakeup, cancellation/drain and callback-lifetime services still required. |
-| `threads/mod.rs`, `threads/threads.rs`, `threads/debounce.rs` | U Unix-selected implementation; N2 | Not selected by native `lib.rs`; existing shared scheduling semantics must be retained. |
+| `io_windows.rs`, `fds_windows.rs`, `io/windows_descriptors.rs`, `io/windows_pipe.rs`, `io/windows_deferred.rs`, `native_fd_bridge.rs`, `null_terminated_array.rs`, `redirection.rs` | I N2 typed graph, ordered redirects, real pipelines/capture/input ownership | Logical integers are not HANDLEs. Shared input cursor survives aliases; explicit closed builtin output discards, inherited unavailable output fails when used. Extra-fd bridge is restricted to the actual same executable identity; N3 owns function/block/substitution consumers. |
+| `io_buffer.rs` | I N2 shared separated-buffer storage | Preserve explicit empties and byte provenance; checked size accounting and finite native metadata retention. Unix I/O collection remains Unix-owned. |
+| `io.rs`, `fds.rs`, `fd_monitor.rs`, `fd_readable_set.rs` | U Unix implementations on native; I N2 native counterparts above | Native services do not reinterpret Unix fds, sockets or arbitrary handles as a universal readiness namespace. |
+| `threads/windows.rs`, `threads/windows_workers.rs` | I N2 scalable waits/completion queue, workers/debounce | Main-thread dispatch, monotonic source identity, reset/post synchronization, cancellation/drain, retained child handles and abandoned-result suppression. |
+| `threads/mod.rs`, `threads/threads.rs`, `threads/debounce.rs` | U Unix-selected implementation on native; I N2 native counterpart | Preserve shared scheduling semantics without Unix masks/atfork. |
 | `signal_windows.rs`, `event.rs` | S native status/event data subset; U event delivery N3/N5; native control/cancellation N5 | No fabricated Unix signal delivery; language/variable handlers N3, process/job/shell/control events N5. |
 | `signal.rs`, `topic_monitor.rs`, `timer.rs` | U native services; N2 wakeups, N5 cancellation/events/accounting | Actual native completion/timing/counters; do not report unavailable measurements as zero. |
 | `function.rs` | S shared metadata only; U in-memory definitions/events N3, autoload N4 | Native function execution is unavailable despite shared types compiling. |
@@ -258,7 +259,7 @@ additional script/platform providers. Help stays N9. Source: [`path.rs`](../../s
 | `test`, `[`: `-d`, `-e`, `-f`, `-s`, `-h`, `-L`, `-r`, `-w`, `-x` | I; N1 | Real file/directory/size, recognized link/reparse metadata and requested-right native probes shared with discovery. `-h/-L` are predicates, not help/physical-mode flags. |
 | `test`, `[`: `-ef`, `-nt`, `-ot` | I; N1 | Full volume/file identity (including hardlinks), comparable native timestamps and existing missing-file semantics; no string-only same-file comparison. |
 | `test`, `[`: `-n`, `-z`, `=`, `!=`, `-eq`, `-ne`, `-gt`, `-ge`, `-lt`, `-le`, `!`, `-a`, `-o`, `(`, `)`; required closing `]` for `[` | I enabled with N1 registration; portable language owner N3 | Reuse expression parser/numeric precision/precedence and status 0/1/2; not option parsing through wgetopt. |
-| `test`, `[`: `-t FD` | I native standard-stream console query; N6 full terminal context, N2 descriptor graph | Current native console endpoint/redirection truth, not POSIX isatty on a HANDLE integer. |
+| `test`, `[`: `-t FD` | I native logical-endpoint console query N2; N6 full terminal context | Current descriptor graph/redirection truth, not POSIX isatty on a HANDLE integer. |
 | `test`, `[`: `-b`, `-c`, `-p`, `-S`, `-G`, `-g`, `-k`, `-O`, `-u` | R; N8 | Explicit unsupported special-file/Unix ownership/mode diagnostics; no invented identity, device kind or set-id/sticky bits. |
 
 ### String subcommands and options
@@ -766,3 +767,83 @@ All remaining files from the original tracked baseline were assigned below. Dire
 The original audit checked its repository listing: 174 runtime Rust files, 21 workspace crates (68 tracked crate files), and 2,005 other tracked files, totaling 2,247. Every source path had one owning analysis in that historical inventory; cross-cutting behavior could additionally be discussed elsewhere. Its local Markdown/source link checks were historical documentation checks, not a new N1 verification result.
 
 The component documents contain future port-verification scenarios. Those scenarios are not reported as executed native-Windows tests. Documentation validation checks coverage, readable Markdown and local link targets; it does not establish runtime compatibility.
+
+## N2 verified evidence record
+
+Source revision: **`f6a8e9162`**, branch **`platform/windows/streaming-io`**. Native source
+and acceptance suites are committed as one ownership cutover; documentation records the exercised
+development artifacts separately.
+Host, NTFS/UNC capability limits, stable Rust 1.95.0, minimum Rust 1.85.0, MSVC 14.51.36231
+and explicit SDK 10.0.26100.0 are the same matrix recorded for N1. This is not ARM64,
+default-feature release, other-filesystem or interactive-GUI certification.
+
+### Runnable gates and retained behavior
+
+```powershell
+$env:FISH_NATIVE_TEST_BIN = (Resolve-Path target/x86_64-pc-windows-msvc/debug/fish.exe).Path
+$env:FISH_NATIVE_TEST_RELEASE_BIN = (Resolve-Path target/x86_64-pc-windows-msvc/release/fish.exe).Path
+$env:FISH_NATIVE_N1_UNC_ROOT = '\\localhost\D$\dev\fish-workspace\fish-n1-unc-fixture'
+cargo +stable test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n2 -- --list
+cargo +stable test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n1 --test windows_n2 -- --nocapture
+cargo +stable test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_native native_required_acceptance_cases -- --exact --nocapture
+```
+
+`windows_n2` discovers exactly `N2_STREAM`, `N2_REDIRECT`, `N2_LIFETIME`, zero ignored.
+Each emits its required hyphenated RUN/PASS ID against both executable artifacts.
+The final minimum-executable run selected
+`target/windows-msrv185/x86_64-pc-windows-msvc/debug/fish.exe` instead of the stable debug
+path: N1 **3 passed**, N2 **3 passed**, zero failed/ignored/filtered, all 12 artifact PASS records.
+The stable prototype registry retry passed its one selected harness test and all 30 required
+debug/release case records; obsolete pipeline/output-rejection rows were removed, not re-pinned.
+Permanent and still-deferred rejection coverage remains.
+The actual native workflow gate body in `.github/workflows/test.yml` also passed locally:
+codec/tempfile leaf suites, five library suites, runtime initialization and text provenance in
+both harness profiles, exact 30-record prototype registry, and N1/N2 discovery plus execution
+in debug and release harnesses. Each N1/N2 harness ran three tests, zero ignored/filtered,
+and emitted all six required artifact PASS records. This is local execution, not a remote CI claim.
+
+The minimum artifact built successfully with `cargo +1.85.0 build --locked --target
+x86_64-pc-windows-msvc --no-default-features --bin fish --target-dir target/windows-msrv185`,
+`RUSTFLAGS=-C debuginfo=1`, in the explicit SDK environment. Shared cleanup verification on WSL
+Ubuntu/Rust 1.92.0 used `CARGO_TARGET_DIR=/tmp/fish-windows-goals-unix-target cargo test
+--locked --no-default-features --lib`: **181 passed**, zero failed/ignored/filtered.
+
+### What the N2 gates actually exercise
+
+- Synchronized 32 MiB producer/consumer streaming while the producer remains live, simultaneous
+  2 MiB stderr, binary/NUL byte identity, EOF/status, all four native/builtin directions,
+  2 MiB internal→native relay→internal traffic and a 256 MiB transfer with bounded process memory.
+- Real planner/open/dup/close owners, ordering/merge, append/atomic noclobber contention, null
+  targets, missing/denied/invalid errors, empty versus closed stdin, explicit builtin discard
+  versus unavailable inherited output, extra-fd same-image bridging and shared alias input cursors.
+  Unsupported bridges fail before marker effects. Repeated real failed plans release native handles.
+- More than 64 live waits, reset/post/removal races, actual handle recycling, immutable raw 259
+  completion, real worker/debounce cancellation and mutex-registration rejection.
+  Partial corrupt-image launch rollback, exact child inheritance and executable identity pinning
+  are exercised through production owners, not mocked copies.
+- Capture finishes while a synchronized descendant remains alive with the writer. Pending reads
+  are cancelled/drained; completed partial bytes and explicit empty elements survive; finite
+  element metadata is bounded. The harness releases/reaps its own held descendants.
+
+Actual runtime smokes reproduced then corrected a five-second relay deadlock, imported alias
+overread, empty-status panic and missing inherited stdout incorrectly returning success.
+The corrected 2 MiB relay completed with exact bytes; explicit builtin stdout close discards
+successfully, unused closed streams do not fail, and a real write to unavailable inherited stdout
+returns 1 with no invented output. Missing input returns 1; corrupt native image launch returns 126.
+Native child cwd comparisons use file identity because physical paths may carry `\\?\` spelling.
+
+### Exercised artifact identities
+
+All three report `4.9.3-150-g082685c20-dirty` through `fish -N -c 'printf "%s\n" $version'`.
+They were built before the source commit; this embedded metadata is not rewritten as a later
+commit ID. `--version` remains an N3 CLI delivery, not a supported N2 query.
+
+| Development artifact | SHA-256 |
+|---|---|
+| `target/x86_64-pc-windows-msvc/debug/fish.exe` | `9b0511f0af6f91e82b41c7b6dcff7b2e7f94f4736d59aff4d2ad4a65b85b7014` |
+| `target/x86_64-pc-windows-msvc/release/fish.exe` | `a51a0a3b272da77a24c75048cdf8469ef97f255787bbef99551e42a3479c04af` |
+| `target/windows-msrv185/x86_64-pc-windows-msvc/debug/fish.exe` | `217ded25742c64bf14534c65f66fcef5b546c99835be8a32107563c318d18725` |
+
+N3 inherits capture/input/deferred-output contracts, not already-enabled substitutions or functions.
+N4 inherits actual workers/debounce/wakeups; N5 inherits process/registration lifetimes, not
+already-enabled background jobs/control events. POSIX fork, same-PID exec and fg/bg remain excluded.

@@ -1,5 +1,36 @@
 # I/O, file descriptors, pipes, and redirection
 
+## Current N2 implementation overlay
+
+The sections below this overlay retain the original pre-prototype audit and proposed scenarios.
+Current verified implementation/evidence is recorded in [GOAL_02](GOAL_02.md) and
+[coverage](coverage.md#n2-verified-evidence-record).
+
+- `io_windows.rs` and `io/windows_descriptors.rs` bind logical numbers to typed borrowed/owned
+  file, console, pipe, memory and closed endpoints. Ordered overlays implement input/try-input,
+  overwrite/append/atomic noclobber, dup/self-dup/close and block redirection without global std-handle mutation.
+- Explicitly closed builtin output is a discard stream, matching the shared Unix evaluator.
+  Missing inherited native output is different: unused streams succeed; attempting a write fails.
+  An external child receives an actually closed native standard handle, not an invented writable sink.
+- `fds_windows.rs` shares pending input/cursor state across aliases and imported descriptor aliases.
+  Incremental console decoding and successive pipe readers do not discard overread bytes.
+- External stages are prepared before launch and started before waiting. Internal producers use bounded
+  separated buffers whenever a later main-thread internal consumer exists, including across native relays.
+  `windows_deferred.rs` pumps those buffers with owned cancellable native I/O and closes its writer before EOF is needed.
+- `windows_pipe.rs` owns overlapped state/buffers through completion and cancellation drain.
+  Capture finish stops rearming, cancels/drains the active read and drains one finite available-byte snapshot.
+  It retains completed bytes without waiting for a live descendant-held writer to close.
+  Finite native buffers charge element metadata as well as data; explicit zero limit remains unbounded policy.
+- Redirection-only null syntax is `/dev/null`, case-insensitive `NUL`, `NUL:` and `\\.\NUL`.
+  This does not alias ordinary filesystem identities; noclobber against the null device fails as existing.
+- `native_fd_bridge.rs` transfers extra descriptors only to the same actual running executable identity.
+  The private versioned environment payload validates handles/direction/ownership, preserves aliases and is
+  removed from ordinary import/export. Arbitrary native executables with extra fds fail before child effects.
+  Internal monitoring handles and unrelated launch endpoints are never in the child allowlist.
+
+Function/block mixed pipelines, command substitution and noninteractive `read` language behavior belong
+to N3; sockets are not implicitly supported by these file/pipe/console endpoint mechanisms.
+
 ## Scope
 
 [`io.rs`](../../src/io.rs), [`fds.rs`](../../src/fds.rs), [`fd_monitor.rs`](../../src/fd_monitor.rs), [`fd_readable_set.rs`](../../src/fd_readable_set.rs), [`redirection.rs`](../../src/redirection.rs), and [`null_terminated_array.rs`](../../src/null_terminated_array.rs) own fish's descriptor model, pipe creation, buffered builtin output, redirection planning, readiness monitoring, and `argv`/`envp` construction. This is source-grounded design analysis, not an executed port.

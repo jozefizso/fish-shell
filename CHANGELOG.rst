@@ -23,6 +23,10 @@ Scripting improvements
 ----------------------
 - ``command``, ``builtin``, ``exec`` and ``time`` now accept a ``--`` separator between the keyword and the command name, so for example ``command -- -q`` runs a command literally called ``-q`` (:issue:`9941`).
 - Command substitutions are now allowed in command position, for example ``$(echo echo) hello world`` (:issue:`12829`).`
+- The experimental native Windows backend now supports streaming native/builtin pipelines,
+  ordered redirections, bounded capture infrastructure and retained asynchronous process/I/O ownership.
+  Extra numbered descriptors are supported only between instances of the identical fish executable.
+  This does not yet enable the complete batch language, interactive reader or POSIX job-control contracts.
 
 Regression fixes:
 -----------------

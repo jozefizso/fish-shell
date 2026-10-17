@@ -1,5 +1,28 @@
 # Concurrency, monitoring, diagnostics, and runtime support
 
+## Current N2 implementation overlay
+
+`src/threads/windows.rs` and `windows_workers.rs` now provide the native runtime; the following
+audit's candidate mechanisms are historical, not a claim that Unix thread code runs on Windows.
+See [N2 evidence](coverage.md#n2-verified-evidence-record).
+
+- Main-thread source registration uses monotonic logical identity rather than reusable HANDLE values.
+  Native callbacks enqueue owned completions; parser/evaluator mutation stays on the main thread.
+  Queue/reset synchronization prevents a concurrent post from losing its wakeup.
+- Native threadpool waits scale beyond the fixed Win32 wait-array limit. Safe generic registration
+  validates Event, Process, Thread, Semaphore or Timer objects; mutexes, files, IOCP and unknown types
+  are rejected rather than passed into a native wait mechanism with incompatible requirements.
+- Remove-and-drain prevents further publication, cancels/unregisters pending native work and waits
+  for in-flight callbacks before releasing their context. Operation-specific I/O cancellation owns
+  OVERLAPPED storage through completion, separately from generic wait removal.
+- Retained child process handles and immutable raw DWORD completion records outlive consumers;
+  direct process waits do not steal unrelated queued completions.
+- Real bounded workers and debounce preserve cancellation/generation ownership. An abandoned old
+  token cannot publish merely because a newer request is active; completed-result delivery is main-thread work.
+
+N4 watchers, N5 user-visible control/job events and N7 editor background work must reuse these
+services. N2 does not implement those consumers or Unix signal masks/atfork on Windows.
+
 ## Scope
 
 `threads/`, `common.rs`, `global_safety.rs`, `operation_context.rs`, `portable_atomic.rs`, `stdx.rs`, `trace.rs`, `flog.rs`, `panic.rs`, `nix.rs`, `prelude.rs`, `print_help.rs`, `lib.rs`, and `src/tests/` supply worker pools, cancellation, debounce, global invariants, logging, panic handling, common platform probes, and crate organization. `fd_monitor` and `topic_monitor` are analyzed with I/O and signals but participate in this runtime.
