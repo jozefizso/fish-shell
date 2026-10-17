@@ -60,7 +60,6 @@ use std::{
 use std::{
     fs,
     io::Write as _,
-    os::fd::RawFd,
     rc::Rc,
     sync::{LazyLock, Mutex},
 };
@@ -428,9 +427,8 @@ pub struct Process {
     /// If we are an "internal process," that process.
     pub internal_proc: RefCell<Option<Arc<InternalProc>>>,
 
-    #[cfg(unix)]
     /// File descriptor that pipe output should bind to.
-    pub pipe_write_fd: RawFd,
+    pub pipe_write_fd: i32,
 
     /// True if process has completed.
     pub completed: RelaxedAtomicBool,

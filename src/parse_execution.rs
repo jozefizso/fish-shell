@@ -1924,7 +1924,6 @@ impl ExecutionContext {
         );
 
         // Construct Processes for job continuations (pipelines).
-        #[cfg(unix)]
         for jc in &job_node.continuation {
             if result != EndExecutionReason::Ok {
                 break;
@@ -2042,13 +2041,17 @@ impl ExecutionContext {
                     return Some((node, "background execution"));
                 }
                 ast::Kind::JobPipeline(pipeline) if !pipeline.continuation.is_empty() => {
-                    return Some((node, "pipelines"));
-                }
-                ast::Kind::Redirection(redirection) => {
-                    let input = PipeOrRedir::try_from(self.node_source(&redirection.oper))
-                        .is_ok_and(|oper| oper.is_valid() && oper.fd == 0
-                            && matches!(oper.mode, RedirectionMode::Input | RedirectionMode::TryInput));
-                    if !input { return Some((node, "redirection")); }
+                    let is_block = |mut statement: &ast::Statement| {
+                        while let ast::Statement::Not(not) = statement {
+                            statement = &not.contents;
+                        }
+                        !matches!(statement, ast::Statement::Decorated(_))
+                    };
+                    if is_block(&pipeline.statement)
+                        || pipeline.continuation.iter().any(|next| is_block(&next.statement))
+                    {
+                        return Some((node, "function/block pipelines"));
+                    }
                 }
                 ast::Kind::TimeDecorator(_) => return Some((node, "time")),
                 ast::Kind::WhileHeader(_) => return Some((node, "while")),

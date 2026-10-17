@@ -6,6 +6,9 @@ mod windows_native_runtime;
 #[path = "transport.rs"]
 mod windows_native_transport;
 #[cfg(windows)]
+#[path = "n2.rs"]
+mod windows_native_n2;
+#[cfg(windows)]
 fn main() {
     use std::io::{Read, Write};
     #[link(name = "kernel32")]
@@ -24,6 +27,7 @@ fn main() {
     let mode = args.next().expect("probe mode");
     match mode.to_str().expect("Unicode mode") {
         "runtime-init" => windows_native_runtime::run(),
+        mode if mode.starts_with("n2-") => windows_native_n2::run(mode, args.collect()),
         "transport-console-builtin" => {
             windows_native_transport::run_console_builtin(&args.next().expect("fish script"))
         }

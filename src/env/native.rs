@@ -69,6 +69,9 @@ impl EnvStack {
         let mut path_value = None;
         let mut uppercase_path = false;
         for (key, value) in inherited {
+            if crate::native_fd_bridge::is_private_environment_key(&key) {
+                continue;
+            }
             let key = native_to_shell_text_owned(osstr2wcstring(key)?);
             let value = native_to_shell_text_owned(osstr2wcstring(value)?);
             // Hidden per-drive entries are not fish variables. Drive-relative resolution
@@ -138,6 +141,9 @@ impl EnvStack {
                 ));
             }
             let key = shell_text_to_osstring(&key)?;
+            if crate::native_fd_bridge::is_private_environment_key(&key) {
+                continue;
+            }
             let value = shell_text_to_osstring(&value.as_string())?;
             let units: Vec<_> = key.encode_wide().collect();
             if units.len() > i32::MAX as usize {

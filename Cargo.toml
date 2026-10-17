@@ -201,6 +201,10 @@ path = "tests/windows_native.rs"
 name = "windows_n1"
 path = "tests/windows_n1.rs"
 
+[[test]]
+name = "windows_n2"
+path = "tests/windows_n2.rs"
+
 [[bin]]
 name = "windows_native_probe"
 path = "tests/windows_native/probe.rs"

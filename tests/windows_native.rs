@@ -123,9 +123,6 @@ fn no_config(f: &Fixture) {
 }
 fn reject(f: &Fixture) {
     let jobs = [
-        "echo forbidden | echo discarded",
-        "echo forbidden > ignored",
-        "echo forbidden 2> ignored",
         "echo forbidden &",
         "echo (set -g mutated yes; echo forbidden)",
         "exec echo forbidden",
@@ -338,8 +335,6 @@ fn boundary(f: &Fixture) {
         format!("exec {command}"),
         format!("fg {command}"),
         format!("bg {command}"),
-        format!("{command} | echo forbidden"),
-        format!("{command} > ignored"),
         format!("echo ({command})"),
         format!("{command} &"),
     ] {

@@ -14,6 +14,7 @@ use crate::{
 use fish_common::{Named, assert_sorted_by_name, escape, get_by_sorted_name};
 use fish_fluent::{LocalizedMessage, ToFluentValue};
 use fish_widestring::{L, bytes2wcstring};
+#[cfg(unix)]
 use std::io::{BufRead as _, BufReader, Read as _};
 
 pub type BuiltinCmd = fn(&mut Parser, &mut IoStreams, &mut [&wstr]) -> BuiltinResult;
@@ -895,7 +896,10 @@ enum ArgvSource<'args, 'iter> {
         /// Reused storage for reading.
         buffer: Vec<u8>,
         /// The reader to read from.
+        #[cfg(unix)]
         reader: BufReader<BorrowedFdFile>,
+        #[cfg(windows)]
+        reader: BorrowedFdFile,
     },
 }
 
@@ -915,7 +919,10 @@ impl<'args, 'iter> Arguments<'args, 'iter> {
                 .expect("should have stdin if redirected");
             ArgvSource::Stdin {
                 buffer: Vec::new(),
+                #[cfg(unix)]
                 reader: BufReader::with_capacity(chunk_size, stdin_file),
+                #[cfg(windows)]
+                reader: stdin_file.with_chunk_size(chunk_size),
             }
         };
         Arguments {

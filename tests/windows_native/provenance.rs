@@ -1,6 +1,13 @@
 //! Consuming evaluator/OS-boundary regressions, not conversion-only assertions.
 use super::*;
 
+fn assert_native_report(observed: Captured, cwd: &Path, fields: &str) {
+    assert_eq!(observed.code, 0);
+    assert!(observed.err.is_empty());
+    let remaining = check_report_cwd(std::str::from_utf8(&observed.out).unwrap(), cwd);
+    assert_eq!(remaining, fields);
+}
+
 pub(super) fn exercise(f: &Fixture) {
     // Cover the complete marker and byte-encoding alphabets, not a special-case sentinel.
     let reserved: String = (0xf500..0xf700)
@@ -51,12 +58,11 @@ pub(super) fn exercise(f: &Fixture) {
         f.probe()
     );
     let expected = format!(
-        "cwd={}\narg0={}\nFISH_ACCEPT_PROVENANCE={}\n",
-        hex(f.root.to_str().unwrap()),
+        "arg0={}\nFISH_ACCEPT_PROVENANCE={}\n",
         hex(&reserved),
         hex(&reserved)
     );
-    exact(
+    assert_native_report(
         run(
             &mut f.command(&[
                 OsStr::new("-N"),
@@ -66,20 +72,15 @@ pub(super) fn exercise(f: &Fixture) {
             ]),
             b"",
         ),
-        0,
-        expected.as_bytes(),
-        b"",
+        &f.root,
+        &expected,
     );
     let inherited_key = format!("FISH_ACCEPT_{reserved}");
     let report = format!("{} report", f.probe());
     let mut inherited = f.command(&[OsStr::new("-N"), OsStr::new("-c"), OsStr::new(&report)]);
     inherited.env(&inherited_key, &reserved);
-    let expected = format!(
-        "cwd={}\n{inherited_key}={}\n",
-        hex(f.root.to_str().unwrap()),
-        hex(&reserved)
-    );
-    exact(run(&mut inherited, b""), 0, expected.as_bytes(), b"");
+    let expected = format!("{inherited_key}={}\n", hex(&reserved));
+    assert_native_report(run(&mut inherited, b""), &f.root, &expected);
 
     let markers: String = (0xfdd0..0xfdf0)
         .map(|value| char::from_u32(value).unwrap())

@@ -1,4 +1,4 @@
-//! Synchronous inherited standard streams for the native batch runtime.
+//! Native streams and typed logical descriptors for the shared evaluator.
 use crate::{
     fds::{BorrowedFdFile, is_console, standard_handle},
     prelude::*,
@@ -7,6 +7,22 @@ use crate::{
 use fish_widestring::bytes2wcstring;
 use std::io::{self, Write};
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle, RawHandle};
+use std::sync::Arc;
+
+#[path = "io_buffer.rs"]
+mod buffer;
+pub use buffer::{BufferElement, BufferedOutputStream, IoBuffer, SeparatedBuffer, SeparationType};
+#[path = "io/windows_descriptors.rs"]
+mod descriptors;
+pub(crate) use descriptors::root_descriptors;
+pub use descriptors::{IoChain, NativeChildBinding, NativeEndpoint, NativeIoDirection};
+#[path = "io/windows_pipe.rs"]
+mod pipe;
+pub use pipe::{NativeCapture, NativeCaptureResult};
+pub(crate) use pipe::{native_input_pipe, native_output_pipe, native_synchronous_pipe};
+#[path = "io/windows_deferred.rs"]
+mod deferred;
+pub(crate) use deferred::NativeDeferredWriter;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -29,6 +45,7 @@ unsafe extern "system" {
 enum OutputHandle<'a> {
     Borrowed(BorrowedHandle<'a>),
     Owned(OwnedHandle),
+    Endpoint(Arc<NativeEndpoint>),
 }
 
 /// A native output endpoint. Borrowed endpoints never close the underlying handle;
@@ -55,6 +72,9 @@ impl<'a> NativeOutput<'a> {
         match &self.handle {
             OutputHandle::Borrowed(handle) => *handle,
             OutputHandle::Owned(handle) => handle.as_handle(),
+            OutputHandle::Endpoint(endpoint) => endpoint
+                .native_handle()
+                .expect("handle-backed output endpoint"),
         }
     }
 
@@ -75,6 +95,9 @@ impl NativeOutput<'static> {
 
 impl Write for NativeOutput<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if let OutputHandle::Endpoint(endpoint) = &self.handle {
+            return endpoint.write(buffer);
+        }
         if buffer.is_empty() {
             return Ok(0);
         }
@@ -152,72 +175,12 @@ pub fn flush_standard_streams() -> io::Result<()> {
     out.and(err)
 }
 
-/// Retained input bindings are independent of process-global standard handles.
-/// Other descriptor directions remain rejected by native preflight until N2.
-#[derive(Clone, Default)]
-pub struct IoChain {
-    input: Option<std::sync::Arc<std::fs::File>>,
-}
-impl IoChain {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.input.is_none()
-    }
-    pub fn len(&self) -> usize {
-        usize::from(self.input.is_some())
-    }
-    pub fn clear(&mut self) {
-        self.input = None;
-    }
-    pub fn append(&mut self, chain: &IoChain) -> bool {
-        if let Some(input) = &chain.input {
-            self.input = Some(input.clone());
-        }
-        true
-    }
-    pub fn input_file(&self) -> Option<std::sync::Arc<std::fs::File>> {
-        self.input.clone()
-    }
-
-    pub fn with_input_specs(
-        &self,
-        specs: &crate::redirection::RedirectionSpecList,
-        vars: &dyn crate::env::Environment,
-    ) -> io::Result<Self> {
-        use crate::redirection::RedirectionMode;
-        let mut result = self.clone();
-        for spec in specs {
-            if spec.fd != 0 || !matches!(spec.mode, RedirectionMode::Input | RedirectionMode::TryInput) {
-                return Err(io::Error::new(io::ErrorKind::Unsupported, "native input binding requires fd 0 input redirection"));
-            }
-            let path = crate::path::native_resolve_path_for_environment(&spec.target, vars)?;
-            let input = match std::fs::File::open(path) {
-                Ok(input) => input,
-                Err(_) if spec.mode == RedirectionMode::TryInput => {
-                    // Intentional virtual empty input, not ordinary filesystem name resolution.
-                    std::fs::File::open(r"\\.\NUL")?
-                }
-                Err(error) => return Err(error),
-            };
-            result.input = Some(std::sync::Arc::new(input));
-        }
-        Ok(result)
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum SeparationType {
-    Inferred,
-    Explicitly,
-}
-
 pub enum OutputStream {
     /// Intentional discard sink, used when a caller explicitly does not want output.
     Null,
     Fd(FdOutputStream),
     String(StringOutputStream),
+    Buffered(BufferedOutputStream),
 }
 
 impl OutputStream {
@@ -242,6 +205,7 @@ impl OutputStream {
     pub fn flush_and_check_error(&mut self) -> libc::c_int {
         match self {
             Self::Fd(stream) => stream.flush_and_check_error(),
+            Self::Buffered(stream) => stream.flush_and_check_error(),
             _ => 0,
         }
     }
@@ -250,6 +214,7 @@ impl OutputStream {
             Self::Null => true,
             Self::Fd(stream) => stream.append(s),
             Self::String(stream) => stream.append(s),
+            Self::Buffered(stream) => stream.append(s),
         }
     }
     /// Append explicitly byte-oriented output, without reinterpreting text PUA.
@@ -258,6 +223,7 @@ impl OutputStream {
             Self::Null => true,
             Self::Fd(stream) => stream.append_bytes(bytes),
             Self::String(stream) => stream.append(&bytes2wcstring(bytes)),
+            Self::Buffered(stream) => stream.buffer.append(bytes, SeparationType::Inferred),
         }
     }
     pub fn appendln(&mut self, s: impl IntoCharIter) -> bool {
@@ -269,11 +235,17 @@ impl OutputStream {
         typ: SeparationType,
         want_newline: bool,
     ) -> bool {
+        if let Self::Buffered(stream) = self {
+            return stream.append_with_separation(s, typ, want_newline);
+        }
         if typ == SeparationType::Explicitly && want_newline {
             self.appendln(s)
         } else {
             self.append(s)
         }
+    }
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Fd(stream) if stream.error.is_none() && stream.console)
     }
 }
 
@@ -315,6 +287,27 @@ impl FdOutputStream {
             },
         }
     }
+    fn from_endpoint(endpoint: Arc<NativeEndpoint>) -> Self {
+        let console = endpoint.native_handle().is_some_and(is_console);
+        Self {
+            endpoint: Some(NativeOutput {
+                handle: OutputHandle::Endpoint(endpoint),
+            }),
+            error: None,
+            console,
+            pending_utf8: [0; 4],
+            pending_len: 0,
+        }
+    }
+    fn unavailable() -> Self {
+        Self {
+            endpoint: None,
+            error: None,
+            console: false,
+            pending_utf8: [0; 4],
+            pending_len: 0,
+        }
+    }
     pub fn error(&self) -> Option<&io::Error> {
         self.error.as_ref()
     }
@@ -347,10 +340,13 @@ impl FdOutputStream {
         if self.error.is_some() {
             return false;
         }
-        let endpoint = self
-            .endpoint
-            .as_mut()
-            .expect("successful endpoint construction");
+        if bytes.is_empty() {
+            return true;
+        }
+        let Some(endpoint) = self.endpoint.as_mut() else {
+            self.error = Some(io::Error::from_raw_os_error(6));
+            return false;
+        };
         if !self.console {
             if let Err(error) = endpoint.write_all(bytes) {
                 self.error = Some(error);
@@ -457,26 +453,38 @@ impl<'a> IoStreams<'a> {
         err: &'a mut OutputStream,
         io_chain: &'a IoChain,
     ) -> Self {
-        let input = io_chain.input_file();
-        let directly_redirected = input.is_some();
+        let (out_is_redirected, out_is_piped) = io_chain.flags(1);
+        let (err_is_redirected, err_is_piped) = io_chain.flags(2);
         Self {
             out,
             err,
-            stdin_file: match input {
-                Some(input) => Some(BorrowedFdFile::from_file(input)),
-                None => BorrowedFdFile::stdin().ok(),
-            },
-            stdin_is_directly_redirected: directly_redirected,
-            out_is_piped: false,
-            err_is_piped: false,
-            out_is_redirected: false,
-            err_is_redirected: false,
+            stdin_file: io_chain.input_reader(),
+            stdin_is_directly_redirected: false,
+            out_is_piped,
+            err_is_piped,
+            out_is_redirected,
+            err_is_redirected,
             io_chain,
             job_group: None,
         }
     }
     pub fn out_is_terminal(&self) -> bool {
-        !self.out_is_redirected && NativeOutput::stdout().is_ok_and(|output| output.is_console())
+        self.out.is_terminal()
+    }
+    pub fn is_terminal(&self, fd: i64) -> bool {
+        match fd {
+            0 => self
+                .stdin_file
+                .as_ref()
+                .is_some_and(BorrowedFdFile::is_console),
+            1 => self.out.is_terminal(),
+            2 => self.err.is_terminal(),
+            _ => i32::try_from(fd)
+                .ok()
+                .and_then(|fd| self.io_chain.endpoint(fd).ok().flatten())
+                .and_then(|endpoint| endpoint.native_handle().map(is_console))
+                .unwrap_or(false),
+        }
     }
     pub fn is_stdin_closed(&self) -> bool {
         self.stdin_file.is_none()

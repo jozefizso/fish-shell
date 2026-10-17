@@ -463,6 +463,10 @@ impl ParserEnvSetMode {
 impl Parser {
     /// Create a parser, retaining the native directory identity before evaluation can begin.
     pub fn new(variables: EnvStack, cancel_behavior: CancelBehavior) -> std::io::Result<Parser> {
+        #[cfg(windows)]
+        crate::io::root_descriptors()?;
+        #[cfg(windows)]
+        crate::exec::initialize_native_image_identity()?;
         let mut result = Self {
             interactive_initialized: false,
             current_node: ScopedRefCell::new(None),

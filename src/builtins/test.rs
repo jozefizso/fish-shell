@@ -192,24 +192,7 @@ mod test_expressions {
 
         #[cfg(windows)]
         fn isatty(&self, streams: &mut IoStreams) -> bool {
-            use std::os::windows::io::{AsRawHandle, BorrowedHandle};
-            use crate::fds::{is_console, standard_handle};
-
-            if self.delta != 0.0 {
-                return false;
-            }
-            match self.base {
-                0 => streams.stdin_file.as_ref().is_some_and(|input| {
-                    // Borrow the actual input endpoint, not a CRT descriptor.
-                    is_console(unsafe { BorrowedHandle::borrow_raw(input.as_raw_handle()) })
-                }),
-                1 => !streams.out_is_redirected
-                    && standard_handle(-11i32 as u32).is_ok_and(is_console),
-                2 => !streams.err_is_redirected
-                    && standard_handle(-12i32 as u32).is_ok_and(is_console),
-                // Native batch fish has no user-visible Unix descriptor table.
-                _ => false,
-            }
+            self.delta == 0.0 && streams.is_terminal(self.base)
         }
     }
 

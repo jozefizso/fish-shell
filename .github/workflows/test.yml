@@ -321,16 +321,23 @@ jobs:
         if ($passes.Count -ne 30 -or @(Compare-Object ($expected | Sort-Object) ($passes | Sort-Object)).Count -ne 0) {
           throw "Native acceptance must execute the exact 15-case registry in both profiles"
         }
-        foreach ($profile in @('debug', 'release')) {
-          $profileArgs = @()
-          if ($profile -eq 'release') { $profileArgs += '--release' }
-          Invoke-NativeTests -Name "native-n1-$profile" -CargoArgs ($profileArgs + @('--test', 'windows_n1')) -Required @('N1_PATHS', 'N1_DISCOVERY', 'N1_GLOB')
-          $passes = @(Get-Content "native-windows-results/native-n1-$profile.txt" | Where-Object { $_ -match '^PASS (debug|release) N1-' })
-          $expected = @(foreach ($artifact in @('debug', 'release')) {
-            foreach ($case in @('N1-PATHS', 'N1-DISCOVERY', 'N1-GLOB')) { "PASS $artifact $case" }
-          })
-          if ($passes.Count -ne 6 -or @(Compare-Object ($expected | Sort-Object) ($passes | Sort-Object)).Count -ne 0) {
-            throw "N1 must execute the exact three required IDs against both artifacts in the $profile harness"
+        foreach ($phase in @(
+          @{ Name = 'n1'; Tests = @('N1_PATHS', 'N1_DISCOVERY', 'N1_GLOB'); Gates = @('N1-PATHS', 'N1-DISCOVERY', 'N1-GLOB') },
+          @{ Name = 'n2'; Tests = @('N2_STREAM', 'N2_REDIRECT', 'N2_LIFETIME'); Gates = @('N2-STREAM', 'N2-REDIRECT', 'N2-LIFETIME') }
+        )) {
+          foreach ($profile in @('debug', 'release')) {
+            $profileArgs = @()
+            if ($profile -eq 'release') { $profileArgs += '--release' }
+            $name = "native-$($phase.Name)-$profile"
+            Invoke-NativeTests -Name $name -CargoArgs ($profileArgs + @('--test', "windows_$($phase.Name)")) -Required $phase.Tests -Exact
+            $prefix = $phase.Name.ToUpperInvariant()
+            $passes = @(Get-Content "native-windows-results/$name.txt" | Where-Object { $_ -match "^PASS (debug|release) $prefix-" })
+            $expected = @(foreach ($artifact in @('debug', 'release')) {
+              foreach ($case in $phase.Gates) { "PASS $artifact $case" }
+            })
+            if ($passes.Count -ne 6 -or @(Compare-Object ($expected | Sort-Object) ($passes | Sort-Object)).Count -ne 0) {
+              throw "$prefix must execute the exact three required IDs against both artifacts in the $profile harness"
+            }
           }
         }
     - name: Upload native Windows evidence
