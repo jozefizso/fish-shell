@@ -1,12 +1,17 @@
 # Native Windows compatibility analysis
 
-This directory maps every fish component to the Linux/POSIX facilities it uses and to a plausible native Windows implementation. The target is a native `x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc` build: WSL, Cygwin, and MSYS2 are compatibility environments and are not the target described here.
+This directory maps fish components to their Linux/POSIX dependencies and native Windows implementations or candidate APIs. The implemented prototype and primary roadmap target `x86_64-pc-windows-msvc`; ARM64 is a separate verification track. WSL, Cygwin and MSYS2 are compatibility environments, not the native runtime backend described here.
 
-## Status baseline
+## Current status and planning entry points
 
-The source does not provide a complete native Windows runtime backend. Foundational crates directly import Unix-only APIs: [`build-helper`](../../crates/build-helper/src/lib.rs) imports Unix `OsStrExt`, [`widestring`](../../crates/widestring/src/lib.rs) imports Unix `OsStr` byte conversions, and [`tempfile`](../../crates/tempfile/src/lib.rs) calls `nix::unistd::mkdtemp`. These are source-identified native-build blockers, not a fresh compiler result. The Windows CI configuration uses MSYS2, not a native MSVC runtime backend. Existing Windows-specific branches do not implement Win32 process, console, path, or handle semantics.
+A native `x86_64-pc-windows-msvc` batch proof of concept is implemented. It uses the existing evaluator, selected builtins, real native streams/environment/cwd and sequential native child processes. It is not yet a full interactive Windows shell.
 
-A native port should preserve fish language behavior while introducing explicit platform interfaces. It should not spread `cfg(windows)` through parser and UI code.
+- [GOAL.md](GOAL.md) records the completed prototype contract and its native/Unix verification evidence.
+- [ROADMAP.md](ROADMAP.md) defines the next eleven dependency-ordered phases, native semantic decisions and mandatory acceptance gates for full Windows functionality.
+
+The component analyses and coverage counts below describe the original pre-prototype source audit. They explain portability boundaries and candidate APIs, not current implementation status. Use GOAL.md for the implemented baseline and ROADMAP.md for remaining work; proposed future tests are not passing results.
+
+Extend the existing owning Windows backends while retaining shared fish language/editor logic. Do not create a second interpreter or promise faithful POSIX fork, same-PID exec or fg/bg job control.
 
 ## Portability classifications
 
@@ -38,9 +43,9 @@ A native port should preserve fish language behavior while introducing explicit 
 17. [Windows API reference](windows-api-reference.md)
 18. [Complete component coverage inventory](coverage.md)
 
-## Source coverage matrix
+## Original source audit coverage matrix
 
-Every top-level runtime module is assigned an owning analysis. Child modules are included by directory.
+The original audit assigns top-level runtime modules to owning analyses, including child modules by directory. New native modules and remaining implementation ownership are covered by GOAL.md and ROADMAP.md; N1 refreshes the exact inventory.
 
 | Source component | Owning analysis |
 |---|---|
@@ -63,24 +68,24 @@ Every top-level runtime module is assigned an owning analysis. Child modules are
 
 Some directories appear in two rows because runtime test helpers or localization data belong both to runtime ownership and to their build/test pipeline. Each analysis states that boundary.
 
-The [coverage inventory](coverage.md) enumerates all 174 runtime Rust files, all 21 workspace crates and every tracked repository family. Its ownership counts cover 2,247 tracked project files; generated `target/` output and Git metadata are not project components. Fish functions, completion definitions, prompts, themes, catalogs and fixtures are analyzed as data/behavior families rather than pretending each file is an independent native backend.
+The [coverage inventory](coverage.md) records the original 174 runtime Rust files, 21 workspace crates and 2,247-file audit baseline. These are historical ownership counts, not current native-support counts. Fish functions, completion definitions, prompts, themes, catalogs and fixtures are analyzed as behavior families; ROADMAP.md requires complete per-asset and per-option closure before release.
 
-## Recommended architecture
+## Recommended next architecture
 
-Introduce a small set of platform services before porting call sites:
+Evolve the existing owning services instead of requiring a wholesale new platform framework:
 
-- `platform::process`: spawn, replace-process emulation, process groups, waits, exit status, termination.
-- `platform::io`: owned native handles, pipes, duplication, inheritance, readiness, blocking mode.
-- `platform::terminal`: console/VT mode, input events, size, foreground-job policy.
-- `platform::fs`: path encoding, directory iteration, identity, permissions, links, atomic replacement, locking, notifications.
-- `platform::identity`: user identity, home/profile directories, host name.
-- `platform::locale`: locale discovery and numeric formatting.
+- Process creation/completion: `src/exec_windows.rs`, `src/proc.rs`, `src/proc_status_windows.rs` and job/wait services; preserve the explicit exec/job-control exclusions.
+- I/O: `src/io_windows.rs` and `src/fds_windows.rs`; typed handles, logical descriptor graphs, pipelines, inheritance and cancellation ownership.
+- Terminal: the shared reader/input/screen models with native console/VT transport and explicit foreground input policy.
+- Filesystem: `src/path/windows.rs`, `src/wutil/` and shared filesystem services; native identity, paths, permissions, locking and notifications.
+- Identity/configuration: native environment and known-folder services without fabricated Unix credentials or stale process-global exports.
+- Locale: shared numeric/text semantics and native locale/catalog discovery at the existing owning boundaries.
 
-The parser, evaluator, completion ranking, screen model, history model, and most builtins should consume these interfaces without knowing whether the backend is POSIX or Windows.
+Keep portable algorithms shared and restore consumers phase by phase with real services. Extract common interfaces when demonstrated by callers; a new `platform::*` namespace is not itself a delivery.
 
-## Audit verification
+## Original analysis audit verification
 
-Completed documentation checks:
+The original analysis-only audit completed these documentation checks:
 
 - Rendered all 19 Markdown documents, including 41 tables, with `markdown-it-py` using CommonMark plus tables.
 - Checked local Markdown/source link targets and table column counts; no missing targets or malformed table rows remain.
@@ -88,4 +93,4 @@ Completed documentation checks:
 - Matched all 21 current workspace crates and the complete 2,247-file tracked project inventory to analysis ownership, with no missing or extra source paths.
 - Checked the critical Windows inheritance, console-control, file-replacement and directory-notification contracts against Microsoft documentation.
 
-These checks establish documentation structure and component coverage, not native Windows compatibility. No fish build, shell test suite, third-party CLI, console/ConPTY experiment or Windows backend scenario was executed. Each component's port-verification scenarios remain future acceptance work.
+These historical checks establish documentation structure and original component coverage, not runtime compatibility. Subsequent native build/runtime evidence is recorded in GOAL.md. ROADMAP.md's future gates remain prospective until their implementations and native tests land.

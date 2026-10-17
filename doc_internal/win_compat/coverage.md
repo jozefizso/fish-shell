@@ -4,7 +4,7 @@
 
 This inventory assigns every tracked project file to an owning component analysis. Runtime modules are enumerated individually; workspace crate implementation/build files are listed per crate. Shipped scripts, command completions, prompts, catalogs, fixtures and static assets are grouped by their maintained subsystem. A file count is a coverage check, not proof that every script has the same dependencies: the linked analyses distinguish pure definitions, dynamic helper execution and host-specific services.
 
-Generated `target/` artifacts, `.git/` metadata and this analysis directory are excluded from the 2,247-file source baseline. No runtime backend was changed. Native Windows APIs in the analyses are implementation candidates, not claims of completed support.
+This is the original pre-prototype 2,247-file source baseline, excluding generated `target/` artifacts, Git metadata and the analysis directory. No runtime backend was changed by that inventory audit. Subsequent native implementation/evidence is recorded in [GOAL.md](GOAL.md); [ROADMAP.md](ROADMAP.md) assigns the remaining work and requires N1 to refresh the inventory for new native modules. These historical counts are not a current native-support claim.
 
 ## Owning analyses
 
@@ -29,7 +29,7 @@ Generated `target/` artifacts, `.git/` metadata and this analysis directory are 
 
 ## Runtime source files
 
-Every Rust file under `src/` is included, including module declarations and test-only helpers. Algorithmic modules explicitly need no direct Win32 substitute; their linked analyses identify transitive process, filesystem, terminal or localization dependencies.
+Every Rust file under `src/` in the original audit baseline is included, including module declarations and test-only helpers. Algorithmic modules need no direct Win32 substitute; their linked analyses identify transitive dependencies. Consult ROADMAP.md for new native owning modules and implementation phases.
 
 | Source file | Owning analysis |
 |---|---|
