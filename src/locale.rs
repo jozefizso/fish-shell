@@ -8,6 +8,7 @@ pub(crate) static LOCALE_LOCK: Mutex<()> = Mutex::new(());
 /// # Safety
 /// Call this either before starting any locale-using thread, or while holding a lock on the
 /// above mutex.
+#[cfg(not(windows))]
 pub unsafe fn set_libc_locales(log_ok: bool) -> bool {
     let from_environment = c"";
     let set = |category_name, category, value| {
@@ -46,6 +47,15 @@ pub unsafe fn set_libc_locales(log_ok: bool) -> bool {
     ok
 }
 
+/// Establish the prototype's deterministic noninteractive CRT locale.
+///
+/// # Safety
+/// Call before starting locale-using threads, or while holding `LOCALE_LOCK`.
+#[cfg(windows)]
+pub unsafe fn set_libc_locales(_log_ok: bool) -> bool {
+    setlocale(libc::LC_ALL, Some(c"C")).is_some()
+}
+
 fn setlocale(category: libc::c_int, locale: Option<&CStr>) -> Option<&'static CStr> {
     let loc_ptr = {
         let locale = locale.map_or(std::ptr::null(), |loc| loc.as_ptr());
@@ -60,9 +70,11 @@ fn setlocale(category: libc::c_int, locale: Option<&CStr>) -> Option<&'static CS
 }
 
 /// It's CHAR_MAX.
+#[cfg(not(windows))]
 const CHAR_MAX: libc::c_char = libc::c_char::MAX;
 
 /// Return the first character of a C string, or None if null, empty, has a length more than 1, or negative.
+#[cfg(not(windows))]
 unsafe fn first_char(s: *const libc::c_char) -> Option<char> {
     unsafe {
         #[allow(unused_comparisons, clippy::absurd_extreme_comparisons)]
@@ -76,6 +88,7 @@ unsafe fn first_char(s: *const libc::c_char) -> Option<char> {
 }
 
 /// Convert a libc lconv to a Locale.
+#[cfg(not(windows))]
 unsafe fn lconv_to_locale(lconv: &libc::lconv) -> Locale {
     let decimal_point = unsafe { first_char(lconv.decimal_point).unwrap_or('.') };
     let thousands_sep = unsafe { first_char(lconv.thousands_sep) };
@@ -116,7 +129,7 @@ unsafe fn lconv_to_locale(lconv: &libc::lconv) -> Locale {
 }
 
 /// Read the numeric locale, or None on any failure.
-#[cfg(have_localeconv_l)]
+#[cfg(all(not(windows), have_localeconv_l))]
 unsafe fn read_locale() -> Option<Locale> {
     unsafe extern "C" {
         unsafe fn localeconv_l(loc: libc::locale_t) -> *const libc::lconv;
@@ -141,7 +154,7 @@ unsafe fn read_locale() -> Option<Locale> {
     result
 }
 
-#[cfg(not(have_localeconv_l))]
+#[cfg(all(not(windows), not(have_localeconv_l)))]
 unsafe fn read_locale() -> Option<Locale> {
     // Bleh, we have to go through localeconv, which races with setlocale.
     // TODO: There has to be a better way to do this.
@@ -151,8 +164,10 @@ unsafe fn read_locale() -> Option<Locale> {
 }
 
 // Current numeric locale.
+#[cfg(not(windows))]
 static NUMERIC_LOCALE: Mutex<Option<Locale>> = Mutex::new(None);
 
+#[cfg(not(windows))]
 pub fn get_numeric_locale() -> Locale {
     let mut locale = NUMERIC_LOCALE.lock().unwrap();
     if locale.is_none() {
@@ -162,7 +177,14 @@ pub fn get_numeric_locale() -> Locale {
     locale.unwrap()
 }
 
+/// The native batch runtime intentionally does not import the user's numeric locale.
+#[cfg(windows)]
+pub fn get_numeric_locale() -> Locale {
+    C_LOCALE
+}
+
 /// Invalidate the cached numeric locale.
+#[cfg(not(windows))]
 pub fn invalidate_numeric_locale() {
     *NUMERIC_LOCALE.lock().unwrap() = None;
 }
