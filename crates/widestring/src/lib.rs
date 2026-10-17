@@ -9,9 +9,12 @@ pub mod word_char;
 use std::{
     ffi::{CStr, CString, OsStr, OsString},
     iter,
-    os::unix::ffi::{OsStrExt as _, OsStringExt as _},
     slice,
 };
+#[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt as _;
 pub use widestring::{Utf32Str as wstr, Utf32String as WString, utf32str as L, utfstr::CharsUtf32};
 
 pub mod prelude {
@@ -146,6 +149,7 @@ pub fn wcs2bytes(input: impl IntoCharIter) -> Vec<u8> {
     result
 }
 
+#[cfg(unix)]
 pub fn wcs2osstring(input: &wstr) -> OsString {
     if input.is_empty() {
         return OsString::new();
@@ -154,6 +158,95 @@ pub fn wcs2osstring(input: &wstr) -> OsString {
     let mut result = vec![];
     wcs2bytes_appending(&mut result, input);
     OsString::from_vec(result)
+}
+
+/// Invalid identity-bearing text at a native Windows API boundary.
+///
+/// Byte streams use [`bytes2wcstring`] and [`wcs2bytes`] instead; their reversible
+/// private-use encoding must not be used to decode native UTF-16 names.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeStringError {
+    EmbeddedNul,
+    UnpairedSurrogate(u16),
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for NativeStringError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmbeddedNul => formatter.write_str("native text contains an embedded NUL"),
+            Self::UnpairedSurrogate(unit) => {
+                write!(formatter, "native text contains an unpaired UTF-16 surrogate 0x{unit:04X}")
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for NativeStringError {}
+
+#[cfg(windows)]
+impl From<NativeStringError> for std::io::Error {
+    fn from(error: NativeStringError) -> Self {
+        Self::new(std::io::ErrorKind::InvalidInput, error)
+    }
+}
+
+#[cfg(windows)]
+fn decode_native_utf16(input: impl Iterator<Item = u16>) -> Result<WString, NativeStringError> {
+    let mut result = WString::with_capacity(input.size_hint().0);
+    for decoded in char::decode_utf16(input) {
+        let character = decoded.map_err(|error| {
+            NativeStringError::UnpairedSurrogate(error.unpaired_surrogate())
+        })?;
+        if character == '\0' {
+            return Err(NativeStringError::EmbeddedNul);
+        }
+        result.push(character);
+    }
+    Ok(result)
+}
+
+/// Decode native UTF-16 without replacement characters or Unix byte escapes.
+/// NUL terminators are not part of the input and embedded NUL is rejected.
+#[cfg(windows)]
+pub fn utf16_to_wcstring(input: &[u16]) -> Result<WString, NativeStringError> {
+    decode_native_utf16(input.iter().copied())
+}
+
+/// Encode fish Unicode as native UTF-16, without a terminating NUL.
+///
+/// Private-use characters are literal Unicode here, not Unix byte escapes.
+#[cfg(windows)]
+pub fn wcstring_to_utf16(input: &wstr) -> Result<Vec<u16>, NativeStringError> {
+    let units = input.chars().map(char::len_utf16).sum();
+    let mut result = Vec::with_capacity(units);
+    for character in input.chars() {
+        if character == '\0' {
+            return Err(NativeStringError::EmbeddedNul);
+        }
+        result.extend_from_slice(character.encode_utf16(&mut [0; 2]));
+    }
+    Ok(result)
+}
+
+/// Convert fish Unicode to a Windows OS string, rejecting embedded NUL.
+/// This is deliberately separate from the arbitrary-byte stream codec.
+#[cfg(windows)]
+pub fn wcs2osstring(input: &wstr) -> Result<OsString, NativeStringError> {
+    if input.chars().any(|character| character == '\0') {
+        return Err(NativeStringError::EmbeddedNul);
+    }
+    // OsString takes ownership of valid Unicode storage; a temporary UTF-16
+    // allocation followed by OsString::from_wide would copy it unnecessarily.
+    Ok(OsString::from(input.to_string()))
+}
+
+/// Convert a Windows OS string to fish Unicode, rejecting NUL and unpaired surrogates.
+#[cfg(windows)]
+pub fn osstr2wcstring<O: AsRef<OsStr>>(input: O) -> Result<WString, NativeStringError> {
+    decode_native_utf16(input.as_ref().encode_wide())
 }
 
 /// Same as [`wcs2bytes`]. Meant to be used when we need a zero-terminated string to feed legacy APIs.
@@ -571,6 +664,7 @@ pub fn cstr2wcstring<C: AsRef<CStr>>(input: C) -> WString {
     bytes2wcstring(input.as_ref().to_bytes())
 }
 
+#[cfg(unix)]
 pub fn osstr2wcstring<O: AsRef<OsStr>>(input: O) -> WString {
     bytes2wcstring(input.as_ref().as_bytes())
 }
@@ -954,6 +1048,115 @@ impl WExt for wstr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt as _;
+
+    /// W2-TEXT: the OS boundary is Unicode, not the Unix byte codec.
+    #[cfg(windows)]
+    #[test]
+    fn w2_text_native_os_roundtrip() {
+        for text in [
+            "",
+            "C:\\fish shell\\file.txt",
+            "Grüße 日本語",
+            "🦀𐐀",
+            "\u{e000}\u{f500}\u{f600}\u{f6ff}\u{f8ff}",
+            "\u{f0000}\u{10fffd}",
+            "\u{fffd}",
+        ] {
+            let native = OsString::from(text);
+            let fish = osstr2wcstring(&native).unwrap();
+            assert_eq!(fish, WString::from_str(text));
+            assert_eq!(fish.len(), text.chars().count());
+            assert_eq!(wcs2osstring(&fish).unwrap(), native);
+            let utf16: Vec<u16> = text.encode_utf16().collect();
+            assert_eq!(utf16_to_wcstring(&utf16).unwrap(), fish);
+            assert_eq!(wcstring_to_utf16(&fish).unwrap(), utf16);
+        }
+
+        let supplementary = osstr2wcstring(OsStr::new("🦀")).unwrap();
+        assert_eq!(supplementary.len(), 1);
+        assert_eq!(wcstring_to_utf16(&supplementary).unwrap().len(), 2);
+        let private_use = osstr2wcstring(OsStr::new("\u{f680}")).unwrap();
+        assert_eq!(private_use.as_char_slice(), &['\u{f680}']);
+        assert_eq!(
+            wcs2osstring(&private_use).unwrap(),
+            OsString::from("\u{f680}")
+        );
+        // Unlike native names, redirected byte streams escape this reserved range.
+        assert_ne!(private_use, bytes2wcstring("\u{f680}".as_bytes()));
+    }
+
+    /// W2-INVALID: no unsupported identity is replaced with a different valid name.
+    #[cfg(windows)]
+    #[test]
+    fn w2_invalid_native_os_rejects() {
+        for units in [
+            &[0xd800][..],
+            &[0xdc00][..],
+            &[0xd800, b'x' as u16][..],
+            &[0xdc00, 0xdc01][..],
+            &[0xd800, 0xd801][..],
+            &[b'x' as u16, 0xdbff][..],
+        ] {
+            assert!(matches!(
+                utf16_to_wcstring(units),
+                Err(NativeStringError::UnpairedSurrogate(_))
+            ));
+            let native = OsString::from_wide(units);
+            assert!(matches!(
+                osstr2wcstring(native),
+                Err(NativeStringError::UnpairedSurrogate(_))
+            ));
+        }
+        for text in ["\0", "before\0after", "after\0"] {
+            assert_eq!(
+                osstr2wcstring(OsString::from(text)),
+                Err(NativeStringError::EmbeddedNul)
+            );
+            assert_eq!(
+                utf16_to_wcstring(&text.encode_utf16().collect::<Vec<_>>()),
+                Err(NativeStringError::EmbeddedNul)
+            );
+            let fish = WString::from_str(text);
+            assert_eq!(
+                wcs2osstring(&fish),
+                Err(NativeStringError::EmbeddedNul)
+            );
+            assert_eq!(
+                wcstring_to_utf16(&fish),
+                Err(NativeStringError::EmbeddedNul)
+            );
+        }
+        assert_eq!(
+            osstr2wcstring(OsStr::new("\u{fffd}")).unwrap(),
+            WString::from_str("\u{fffd}")
+        );
+        let io_error = std::io::Error::from(NativeStringError::EmbeddedNul);
+        assert_eq!(io_error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(io_error.raw_os_error(), None);
+        assert_eq!(
+            io_error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<NativeStringError>(),
+            Some(&NativeStringError::EmbeddedNul)
+        );
+    }
+
+    /// W2-INVALID: redirected bytes retain the existing lossless stream codec.
+    #[test]
+    fn w2_invalid_redirected_bytes_roundtrip() {
+        let all_bytes: Vec<u8> = (0..=255).collect();
+        assert_eq!(wcs2bytes(&bytes2wcstring(&all_bytes)), all_bytes);
+        for bytes in [
+            &b"\0\r\n\xff\x80\xc0\xaf"[..],
+            &b"\xed\xa0\x80"[..],
+            "\u{f600}\u{f6ff}🦀".as_bytes(),
+        ] {
+            assert_eq!(wcs2bytes(&bytes2wcstring(bytes)), bytes);
+        }
+    }
 
     #[test]
     fn test_to_wstring() {

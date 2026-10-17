@@ -99,6 +99,54 @@ Native path support initially covers ordinary local absolute drive paths, includ
 
 **Exit gate:** retained foundation crates and W2 tests pass natively. Text, identity and error behavior have real implementations; passing pure string tests alone does not establish runtime initialization.
 
+### Phase 2 implementation and test entry points
+
+The string/leaf-runtime implementation is present; execution evidence is still
+pending integration, so this is not a Phase 2 completion claim.
+
+- `fish-widestring` retains the Unix OS-string signatures and byte-stream codec.
+  Windows `osstr2wcstring` and `wcs2osstring` return `Result<_, NativeStringError>`.
+  Their native Unicode boundary rejects embedded NUL and unpaired UTF-16
+  surrogates without replacement. Private-use characters remain literal native
+  Unicode. `utf16_to_wcstring` and `wcstring_to_utf16` expose the same checked
+  UTF-16 boundary without terminators; redirected bytes continue to use
+  `bytes2wcstring`/`wcs2bytes`, not these identity-bearing conversions.
+- Portable `fish-common` escaping/guards and `fish-util` sorting/time helpers no
+  longer compile Unix descriptor, terminal, signal or errno helpers on Windows.
+  Native callers must use their real native I/O and captured `std::io::Error`;
+  there is no successful Unix-operation substitute.
+- `fish-tempfile` uses exclusive directory creation with collision retry and
+  owned cleanup on both targets, retaining owner-only Unix directory permissions.
+- The native thread module records the actual startup Windows thread ID.
+  Native locale initialization sets the CRT to `C` and numeric formatting uses
+  `C_LOCALE`, independently of inherited user locale categories.
+
+Native MSVC commands (run from the repository root):
+
+```text
+cargo test --target x86_64-pc-windows-msvc -p fish-widestring --lib w2_ -- --nocapture
+cargo test --target x86_64-pc-windows-msvc -p fish-tempfile --test runtime -- --nocapture
+cargo test --target x86_64-pc-windows-msvc -p fish-common -p fish-util --lib
+```
+
+The first command must execute all three tests:
+`tests::w2_text_native_os_roundtrip` (W2-TEXT),
+`tests::w2_invalid_native_os_rejects` and
+`tests::w2_invalid_redirected_bytes_roundtrip` (W2-INVALID).
+The tempfile command must execute both
+`w2_runtime_tempfile_collision_and_cleanup` and
+`creation_errors_are_not_retried_as_collisions`; these exercise real filesystem
+storage, not mocked creation. They cover only the retained-tempfile portion of
+W2-RUNTIME; actual initialization, main/worker identity and native-error-domain
+integration remain separate mandatory acceptance assertions.
+
+Relevant Unix regression command:
+
+```text
+cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile
+```
+
+
 ## Phase 3 — Synchronous standard-stream transport
 
 **Depends on:** Phases 1–2.
@@ -220,3 +268,12 @@ Native build-host version acquisition no longer executes a POSIX shell. The prod
 - Local execution evidence: session command artifacts `bg_2` and `bg_3`; native CI runs the same named cases and rejects missing discovery. These local process IDs are not durable CI URLs.
 
 The native runtime/module closure and full `fish.exe` remain pending. This slice does not mark Phase 1 or the overall goal complete.
+
+### String/shared-foundation slice — verified, Phase 2 runtime gate pending
+
+- MSVC: `cargo test --target x86_64-pc-windows-msvc -p fish-widestring --lib w2_ -- --nocapture` — 3 passed.
+- MSVC: `cargo test --target x86_64-pc-windows-msvc -p fish-tempfile --test runtime -- --nocapture` — 2 passed, exercising real filesystem collision preservation, cleanup and errors.
+- MSVC: `cargo test --target x86_64-pc-windows-msvc -p fish-common -p fish-util --lib` — 6 passed.
+- Linux: `cargo test -p fish-widestring -p fish-common -p fish-util -p fish-tempfile` — 34 unit/integration tests and 7 doctests passed, including private-directory permissions.
+
+Native OS-string conversion and arbitrary-byte codecs are separate. Full CLI/builtin literal-private-use output, real main-thread initialization and native locale initialization remain runtime integration gates; these leaf-suite results do not complete Phase 2.

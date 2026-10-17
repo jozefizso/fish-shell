@@ -6,28 +6,36 @@ use fish_widestring::{
     VARIABLE_EXPAND_SINGLE, WExt as _, WString, bytes2wcstring, decode_byte_from_char,
     fish_reserved_codepoint, wcs2bytes, wstr,
 };
+#[cfg(unix)]
 use libc::{SIG_IGN, SIGTTOU, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
+#[cfg(unix)]
 use nix::unistd;
 use std::{
     cell::{Cell, RefCell},
-    env,
     io::Read,
-    mem,
     ops::{Deref, DerefMut},
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time,
+};
+#[cfg(unix)]
+use std::{
+    env, mem,
     os::{
         fd::{AsRawFd, BorrowedFd, RawFd},
         unix::ffi::OsStrExt as _,
     },
-    rc::Rc,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicI32, AtomicU32, Ordering},
-    },
-    time,
+    sync::{LazyLock, atomic::AtomicI32},
 };
 
+#[cfg(unix)]
 pub const STDIN_FD: BorrowedFd = unsafe { BorrowedFd::borrow_raw(STDIN_FILENO) };
+#[cfg(unix)]
 pub const STDOUT_FD: BorrowedFd = unsafe { BorrowedFd::borrow_raw(STDOUT_FILENO) };
+#[cfg(unix)]
 pub const STDERR_FD: BorrowedFd = unsafe { BorrowedFd::borrow_raw(STDERR_FILENO) };
 
 pub const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
@@ -1023,6 +1031,7 @@ pub fn unescape_one(
 /// most common operating systems do not use them. The value is cached for the duration of the fish
 /// session. We err on the side of assuming it's not a console session. This approach isn't
 /// bullet-proof and that's OK.
+#[cfg(unix)]
 pub fn is_console_session() -> bool {
     // TODO(terminal-workaround)
     static IS_CONSOLE_SESSION: LazyLock<bool> = LazyLock::new(||
@@ -1047,6 +1056,7 @@ pub fn is_console_session() -> bool {
 }
 
 /// Exits without invoking destructors (via _exit), useful for code after fork.
+#[cfg(unix)]
 pub fn exit_without_destructors(code: libc::c_int) -> ! {
     unsafe { libc::_exit(code) };
 }
@@ -1060,6 +1070,7 @@ pub fn get_obfuscation_read_char() -> char {
 
 /// Call read, blocking and repeating on EINTR. Exits on EAGAIN.
 /// Return the number of bytes read, or 0 on EOF, or an error.
+#[cfg(unix)]
 pub fn read_blocked(fd: RawFd, buf: &mut [u8]) -> nix::Result<usize> {
     loop {
         let res = nix::unistd::read(unsafe { BorrowedFd::borrow_raw(fd) }, buf);
@@ -1089,6 +1100,7 @@ impl<T: Read + ?Sized> ReadExt for T {
 
 /// A rusty port of the C++ `write_loop()` function from `common.cpp`. This should be deprecated in
 /// favor of native rust read/write methods at some point.
+#[cfg(unix)]
 pub fn write_loop<Fd: AsRawFd>(fd: &Fd, buf: &[u8]) -> nix::Result<()> {
     let fd = fd.as_raw_fd();
     let mut total = 0;
@@ -1164,14 +1176,18 @@ pub fn timef() -> Timepoint {
 
 /// Be able to restore the term's foreground process group.
 /// This is set during startup and not modified after.
+#[cfg(unix)]
 static INITIAL_FG_PROCESS_GROUP: AtomicI32 = AtomicI32::new(-1); // HACK, should be pid_t
+#[cfg(unix)]
 const _: () = assert!(mem::size_of::<i32>() >= mem::size_of::<libc::pid_t>());
 
 /// Save the value of tcgetpgrp so we can restore it on exit.
+#[cfg(unix)]
 pub fn save_term_foreground_process_group() {
     INITIAL_FG_PROCESS_GROUP.store(unsafe { libc::tcgetpgrp(STDIN_FILENO) }, Ordering::Relaxed);
 }
 
+#[cfg(unix)]
 pub fn restore_term_foreground_process_group_for_exit() {
     // We wish to restore the tty to the initial owner. There's two ways this can go wrong:
     //  1. We may steal the tty from someone else (#7060).

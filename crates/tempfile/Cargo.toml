@@ -7,7 +7,6 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-nix = { workspace = true, features = ["feature", "fs"] }
 rand.workspace = true
 
 [lints]

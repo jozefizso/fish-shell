@@ -103,13 +103,35 @@ pub fn new_file() -> std::io::Result<TempFile> {
     Ok(TempFile { file, path })
 }
 
-/// Tries to create a new temporary directory using `mkdtemp`.
-/// On success, a [`TempDir`] is returned.
-/// When this struct is dropped, the backing directory, including all its contents, will be deleted.
+/// Exclusively create a temporary directory, retrying name collisions.
+///
+/// Existing files and directories are never reused or removed. On Unix the new
+/// directory is private to its owner, matching `mkdtemp` permissions.
+pub fn create_dir_with_retry(generate_path: impl Fn() -> PathBuf) -> std::io::Result<TempDir> {
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt as _;
+        let mut builder = builder;
+        builder.mode(0o700);
+        builder
+    };
+    loop {
+        let path = generate_path();
+        match builder.create(&path) {
+            Ok(()) => return Ok(TempDir { path }),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Create a new temporary directory in the operating system's temporary location.
+/// Dropping the returned owner removes the directory and all of its contents.
 pub fn new_dir() -> std::io::Result<TempDir> {
-    let template = std::env::temp_dir().join("fish_tmp_XXXXXX");
-    let path = nix::unistd::mkdtemp(&template)?;
-    Ok(TempDir { path })
+    create_dir_with_retry(|| {
+        std::env::temp_dir().join(random_filename(OsString::from("fish_tmp_")))
+    })
 }
 
 #[cfg(test)]

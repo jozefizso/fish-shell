@@ -9,6 +9,8 @@ license.workspace = true
 [dependencies]
 fish-feature-flags.workspace = true
 fish-widestring.workspace = true
+
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 nix.workspace = true
 
