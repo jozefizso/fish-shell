@@ -126,16 +126,6 @@ impl Options {
         let mut w = WGetopter::new(SHORT_OPTS, LONG_OPTS, args);
         while let Some(c) = w.next_opt() {
             match c {
-                #[cfg(windows)]
-                'U' => {
-                    err_fmt!(
-                        "universal persistence is unavailable on native Windows (N4): %s",
-                        args[w.wopt_index - 1]
-                    )
-                    .cmd(cmd)
-                    .finish(streams);
-                    return Err(STATUS_INVALID_ARGS);
-                }
                 'a' => opts.append = true,
                 'e' => {
                     opts.erase = true;

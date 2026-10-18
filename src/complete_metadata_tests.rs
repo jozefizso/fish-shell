@@ -116,23 +116,19 @@ fn replay(parser: &mut Parser, source: &wstr) {
     assert!(!result.break_expand);
 }
 
-#[test]
-fn native_declarative_metadata() {
-    // Parser execution is main-thread-only. Run the owning-state assertions in
-    // their own libtest process, rather than changing another test's thread ID
-    // or sharing its global metadata and environment.
-    if std::env::var_os("FISH_NATIVE_METADATA_TEST_CHILD").is_none() {
+fn run_metadata_test_in_child(test_name: &str) -> bool {
+    // Parser execution is main-thread-only. Each owning test gets an isolated
+    // libtest process rather than changing another test's thread ID or globals.
+    if std::env::var_os("FISH_NATIVE_METADATA_TEST_CHILD").as_deref()
+        != Some(std::ffi::OsStr::new(test_name))
+    {
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
         }
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "complete::metadata_tests::native_declarative_metadata",
-                "--nocapture",
-            ])
-            .env("FISH_NATIVE_METADATA_TEST_CHILD", "1")
+            .args(["--exact", test_name, "--nocapture"])
+            .env("FISH_NATIVE_METADATA_TEST_CHILD", test_name)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -145,6 +141,14 @@ fn native_declarative_metadata() {
             panic!("native metadata test exceeded its process bound: {wait}");
         }
         assert!(child.wait().unwrap().success());
+        return false;
+    }
+    true
+}
+
+#[test]
+fn native_declarative_metadata() {
+    if !run_metadata_test_in_child("complete::metadata_tests::native_declarative_metadata") {
         return;
     }
     crate::threads::init();
@@ -715,4 +719,169 @@ fn native_declarative_metadata() {
     }
     replay(&mut parser, L!("complete -e -c replay_options"));
     assert_eq!(completion_state(), before);
+}
+
+#[test]
+fn native_disk_completion_autoload() {
+    if !run_metadata_test_in_child("complete::metadata_tests::native_disk_completion_autoload") {
+        return;
+    }
+    crate::threads::init();
+    crate::common::PROGRAM_NAME.set(L!("fish")).unwrap();
+
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let fixture = Fixture(std::env::temp_dir().join(format!(
+        "fish-native-completions-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )));
+    let first = fixture.0.join("first completions 雪");
+    let second = fixture.0.join("second completions 雪");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let variables = EnvStack::new();
+    // No inherited profile, universal store, config, or history initialization.
+    variables
+        .initialize_native_from(std::iter::empty(), &fixture.0)
+        .unwrap();
+    let mut parser = Parser::new(variables, CancelBehavior::default()).unwrap();
+    replay(&mut parser, L!("set -g fish_function_path"));
+    let select_path = |parser: &mut Parser, path: &std::path::Path| {
+        let path = crate::path::native_path_text(path).unwrap();
+        replay(
+            parser,
+            &(L!("set -g fish_complete_path ").to_owned() + &escape(&path)[..]),
+        );
+    };
+    let rules_for = |command: &wstr| {
+        completion_state()
+            .into_iter()
+            .filter(|rule| rule.command == command)
+            .collect::<Vec<_>>()
+    };
+    let command = L!("n4_native_disk");
+    std::fs::write(
+        first.join("n4_native_disk.fish"),
+        "set -l disk_choices 'alpha beta'\n\
+         complete -c n4_native_disk -s x -l choice -x -k \
+         -n 'test 1 = 1' -a \"$disk_choices\" -d 'disk choice'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        second.join("n4_native_disk.fish"),
+        "complete -c n4_native_disk -o legacy -F -a 'new value' -d 'replacement rule'\n",
+    )
+    .unwrap();
+    select_path(&mut parser, &first);
+    assert!(complete_load(command, &mut parser));
+    let initial = rules_for(command);
+    assert_eq!(initial.len(), 2);
+    for (option, typ) in [
+        (L!("x"), CompleteOptionType::Short),
+        (L!("choice"), CompleteOptionType::DoubleLong),
+    ] {
+        let rule = initial.iter().find(|rule| rule.option == option).unwrap();
+        assert!(!rule.path);
+        assert_eq!(rule.typ, typ);
+        assert_eq!(
+            rule.policy,
+            ArgumentPolicy {
+                files: FileCompletionPolicy::Skip,
+                requires_param: true,
+            }
+        );
+        assert_eq!(rule.conditions, vec![L!("test 1 = 1").to_owned()]);
+        assert_eq!(rule.arguments, L!("alpha beta"));
+        assert_eq!(rule.description, L!("disk choice"));
+        assert!(rule.flags.dont_sort);
+    }
+    assert!(!complete_load(command, &mut parser));
+    assert_eq!(rules_for(command), initial);
+
+    // Cache an actual miss before making a new command available. Changing the
+    // parser-owned search path must discard that miss and the old loaded rules.
+    let missing = L!("n4_native_late");
+    assert!(!complete_load(missing, &mut parser));
+    assert!(rules_for(missing).is_empty());
+    std::fs::write(
+        second.join("n4_native_late.fish"),
+        "complete -c n4_native_late -l recovered -r -a 'late choice' -d 'newly available'\n",
+    )
+    .unwrap();
+    select_path(&mut parser, &second);
+    assert!(rules_for(command).is_empty());
+    assert!(complete_load(command, &mut parser));
+    let replacement = rules_for(command);
+    assert_eq!(replacement.len(), 1);
+    let rule = &replacement[0];
+    assert_eq!(rule.option, L!("legacy"));
+    assert_eq!(rule.typ, CompleteOptionType::SingleLong);
+    assert_eq!(rule.policy.files, FileCompletionPolicy::Force);
+    assert!(!rule.policy.requires_param);
+    assert!(rule.conditions.is_empty());
+    assert_eq!(rule.arguments, L!("new value"));
+    assert_eq!(rule.description, L!("replacement rule"));
+    assert!(complete_load(missing, &mut parser));
+    let recovered = rules_for(missing);
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].option, L!("recovered"));
+    assert_eq!(recovered[0].typ, CompleteOptionType::DoubleLong);
+    assert!(recovered[0].policy.requires_param);
+    assert_eq!(recovered[0].arguments, L!("late choice"));
+    assert_eq!(recovered[0].description, L!("newly available"));
+
+    // A syntax failure cannot leave the command permanently pending or loaded.
+    let broken = L!("n4_native_broken");
+    let broken_file = second.join("n4_native_broken.fish");
+    std::fs::write(&broken_file, "if true\n").unwrap();
+    assert!(!complete_load(broken, &mut parser));
+    assert!(!complete_load(broken, &mut parser));
+    assert!(rules_for(broken).is_empty());
+    std::fs::write(
+        &broken_file,
+        "complete -c n4_native_broken -s b -f -a repaired -d 'repaired syntax'\n",
+    )
+    .unwrap();
+    assert!(complete_load(broken, &mut parser));
+    let repaired = rules_for(broken);
+    assert_eq!(repaired.len(), 1);
+    assert_eq!(repaired[0].option, L!("b"));
+    assert_eq!(repaired[0].typ, CompleteOptionType::Short);
+    assert_eq!(repaired[0].policy.files, FileCompletionPolicy::Skip);
+    assert_eq!(repaired[0].arguments, L!("repaired"));
+    assert_eq!(repaired[0].description, L!("repaired syntax"));
+    assert!(!complete_load(broken, &mut parser));
+    assert_eq!(rules_for(broken), repaired);
+
+    // Retry a failed source without touching its bytes or file identity. This
+    // distinguishes failure recovery from ordinary modified-file reloading.
+    let retry = L!("n4_native_retry");
+    std::fs::write(
+        second.join("n4_native_retry.fish"),
+        "if not set -q n4_allow_completion_load\n\
+             return 1\n\
+         end\n\
+         complete -c n4_native_retry -l ready -a 'ready now' -d 'retried source'\n",
+    )
+    .unwrap();
+    assert!(!complete_load(retry, &mut parser));
+    assert!(rules_for(retry).is_empty());
+    replay(&mut parser, L!("set -g n4_allow_completion_load 1"));
+    assert!(complete_load(retry, &mut parser));
+    let retried = rules_for(retry);
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].option, L!("ready"));
+    assert_eq!(retried[0].typ, CompleteOptionType::DoubleLong);
+    assert_eq!(retried[0].arguments, L!("ready now"));
+    assert_eq!(retried[0].description, L!("retried source"));
+    assert!(!complete_load(retry, &mut parser));
+    assert_eq!(rules_for(retry), retried);
 }

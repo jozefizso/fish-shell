@@ -2,6 +2,11 @@
 pub use fish_printf::locale::{C_LOCALE, Locale};
 use std::{ffi::CStr, sync::Mutex};
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{configure_native_locale, format_history_timestamp};
+
 /// Lock guarding libc `setlocale()` or `localeconv()` calls to avoid races.
 pub(crate) static LOCALE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -47,7 +52,7 @@ pub unsafe fn set_libc_locales(log_ok: bool) -> bool {
     ok
 }
 
-/// Establish the prototype's deterministic noninteractive CRT locale.
+/// Keep the CRT's process-global locale invariant; native output uses explicit locale objects.
 ///
 /// # Safety
 /// Call before starting locale-using threads, or while holding `LOCALE_LOCK`.
@@ -177,10 +182,10 @@ pub fn get_numeric_locale() -> Locale {
     locale.unwrap()
 }
 
-/// The native batch runtime intentionally does not import the user's numeric locale.
+/// The native formatter shares the same numeric model as the Unix formatter.
 #[cfg(windows)]
 pub fn get_numeric_locale() -> Locale {
-    C_LOCALE
+    windows::numeric_locale()
 }
 
 /// Invalidate the cached numeric locale.

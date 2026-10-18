@@ -241,41 +241,6 @@ function _n3_hidden; end
 functions --all --names | string match --entire '_n3_hidden'
 "#), 0, b"local-blocked\nlocal-delivered\nEvent generic\nn3_local_event n3_local\nn3_metadata_event n3_metadata\nEvent variable\nn3_metadata_var n3_metadata\nwrapper-retained\nn3_metadata\n_n3_hidden\n", b"");
 
-    let deferred = f.root.join("n3 deferred function assets");
-    std::fs::create_dir(&deferred).unwrap();
-    std::fs::write(
-        deferred.join("cd.fish"),
-        b"function cd; printf 'disk-wrapper-ran'; end\n",
-    )
-    .unwrap();
-    std::fs::write(
-        deferred.join("n3_deferred.fish"),
-        b"function n3_deferred; printf 'disk-autoload-ran'; end\n",
-    )
-    .unwrap();
-    exact(
-        f.eval(&format!(
-            r#"
-set -g fish_function_path {}
-cd .
-printf 'native-cd\n'
-functions --query n3_deferred; or printf 'disk-deferred\n'
-functions --all --names | string match --quiet --regex '^cd$'; or printf 'wrapper-not-advertised\n'
-set -l _argparse_cmd n3
-set -l _flag_name number
-set -l _flag_value 7
-_validate_int --min 1 --max 9
-printf 'validator:%s\n' $status
-functions --erase _validate_int
-functions --query _validate_int; or printf 'core-tombstoned\n'
-"#,
-            quote(deferred.to_str().unwrap())
-        )),
-        0,
-        b"native-cd\ndisk-deferred\nwrapper-not-advertised\nvalidator:0\ncore-tombstoned\n",
-        b"",
-    );
-
     let header_marker = f.root.join("n3-deferred-event-option-marker");
     for option in [
         "--on-signal",

@@ -31,6 +31,12 @@ pub(super) fn exercise(f: &Fixture) {
         b"stdin",
         b"",
     );
+    exact(
+        run(&mut f.command(&[]), b"printf bare-stdin\n"),
+        0,
+        b"bare-stdin",
+        b"",
+    );
     fs::write(f.root.join("-script.fish"), "printf '%s' $argv\n").unwrap();
     exact(
         run(
@@ -199,16 +205,58 @@ pub(super) fn exercise(f: &Fixture) {
     assert_eq!(categories.code, 0);
     assert!(categories.out.windows(5).any(|word| word == b"debug"));
     assert!(categories.err.is_empty());
+    for (flags, expected) in [
+        (vec!["-N", "-l"], b"0\n1\n0\n".as_slice()),
+        (vec!["-N", "--login"], b"0\n1\n0\n".as_slice()),
+        (vec!["-N", "-P"], b"1\n1\n0\n".as_slice()),
+        (vec!["-N", "--private"], b"1\n1\n0\n".as_slice()),
+    ] {
+        let mut args: Vec<&OsStr> = flags.iter().map(OsStr::new).collect();
+        args.extend([
+            OsStr::new("-c"),
+            OsStr::new("status is-login; echo $status; status is-interactive; echo $status; set -q fish_private_mode; echo $status"),
+        ]);
+        exact(run(&mut f.command(&args), b""), 0, expected, b"");
+    }
+    let startup_profile = f.root.join("startup profile 雪.log");
+    exact(
+        run(
+            &mut f.command(&[
+                OsStr::new("-N"),
+                OsStr::new("--profile-startup"),
+                startup_profile.as_os_str(),
+                OsStr::new("-C"),
+                OsStr::new("set -g startup_order first"),
+                OsStr::new("--init-command"),
+                OsStr::new("set -a startup_order second"),
+                OsStr::new("-c"),
+                OsStr::new("printf '%s\\n' $startup_order; exit 7"),
+            ]),
+            b"",
+        ),
+        7,
+        b"first\nsecond\n",
+        b"",
+    );
+    let startup_profile = fs::read(startup_profile).unwrap();
+    assert!(
+        !startup_profile.is_empty(),
+        "startup profiling produced no records"
+    );
+    exact(
+        run(
+            &mut f.command(&[OsStr::new("-c"), OsStr::new("printf configured-batch")]),
+            b"",
+        ),
+        0,
+        b"configured-batch",
+        b"",
+    );
     for args in [
         vec!["-N", "-D", "5", "-c", &code],
         vec!["-N", "--debug-stack-frames=5", "-c", &code],
         vec!["-N", "--unknown", "-c", &code],
         vec!["-N", "-c"],
-        vec!["-c", &code],
-        vec!["-N", "--init-command", &code],
-        vec!["-N", "--login"],
-        vec!["-N", "--private"],
-        vec!["-N", "--profile-startup", "startup.profile"],
         vec!["-N", "--interactive"],
         vec!["-N", "--print-rusage-self"],
         vec!["-N", "--help"],

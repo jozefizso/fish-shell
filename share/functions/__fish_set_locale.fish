@@ -11,6 +11,11 @@
 # LANG seems more likely to be caused by a missing or misconfigured locale configuration.
 
 function __fish_set_locale
+    # Native locale selection and restoration belong to the CRT-backed environment dispatcher.
+    # Unix distro files are neither Windows defaults nor fallback user-profile roots.
+    if builtin -q __fish_native_fs
+        return 0
+    end
     set -l LOCALE_VARS (__fish_locale_vars)
 
     # We check LC_ALL to figure out if we have a locale but we don't set it later. That is because

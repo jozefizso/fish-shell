@@ -2,7 +2,6 @@ use super::var::{ELECTRIC_VARIABLES, ElectricVar, is_read_only};
 use crate::env::{
     EnvMode, EnvSetMode, EnvStackSetResult, EnvVar, EnvVarFlags, PATH_ARRAY_SEP, Statuses, VarTable,
 };
-#[cfg(not(windows))]
 use crate::env_universal_common::EnvUniversal;
 use crate::flog::flog;
 use crate::global_safety::RelaxedAtomicBool;
@@ -29,7 +28,6 @@ use std::sync::{Arc, Mutex, MutexGuard, atomic::Ordering};
 
 /// Getter for universal variables.
 /// This is typically initialized in env_init(), and is considered empty before then.
-#[cfg(not(windows))]
 pub fn uvars() -> MutexGuard<'static, EnvUniversal> {
     use std::sync::LazyLock;
     /// Universal variables instance.
@@ -353,7 +351,6 @@ impl EnvScopedImpl {
         self.globals.find_entry(key)
     }
 
-    #[cfg(not(windows))]
     fn try_get_universal(&self, key: &wstr) -> Option<EnvVar> {
         return uvars().get(key);
     }
@@ -374,7 +371,6 @@ impl EnvScopedImpl {
         if result.is_none() && query.global {
             result = self.try_get_global(key);
         }
-        #[cfg(not(windows))]
         if result.is_none() && query.universal {
             result = self.try_get_universal(key);
         }
@@ -419,7 +415,6 @@ impl EnvScopedImpl {
             }
         }
 
-        #[cfg(not(windows))]
         if query.universal {
             let show_exported = matches!(query.export, None | Some(true));
             let show_unexported = matches!(query.export, None | Some(false));
@@ -570,6 +565,17 @@ impl EnvScopedImpl {
         let mut values = VarTable::new();
         Self::get_exported(&self.globals, &mut values);
         Self::get_exported(&self.locals, &mut values);
+        let universals = uvars();
+        for (key, value) in universals.get_table() {
+            let shadowed = self
+                .locals
+                .iter()
+                .chain(self.globals.iter())
+                .any(|node| node.borrow().env.contains_key(key));
+            if value.exports() && !shadowed {
+                values.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
         values.insert(
             L!("PWD").to_owned(),
             EnvVar::new_from_name(L!("PWD"), self.perproc_data.pwd.clone()),
@@ -651,7 +657,7 @@ impl EnvStackImpl {
     /// Set a variable under the name `key`, using the given `mode`, setting its value to `val`.
     pub fn set(&mut self, key: &wstr, mode: EnvSetMode, mut val: Vec<WString>) -> ModResult {
         #[cfg(windows)]
-        if mode.mode.universal {
+        if mode.mode.universal && !uvars().initialized() {
             return ModResult::new(EnvStackSetResult::Scope);
         }
         let query = Query::from(mode);
@@ -680,13 +686,10 @@ impl EnvStackImpl {
         let mut result = ModResult::new(EnvStackSetResult::Ok);
         if query.has_scope {
             // The user requested a particular scope.
-            // If we don't have uvars, fall back to using globals.
+            // Unix no-config may select globals; native startup always initializes real uvars.
             if query.universal && !UVAR_SCOPE_IS_GLOBAL.load() {
-                #[cfg(not(windows))]
-                {
-                    self.set_universal(key, val, query);
-                    result.uvar_modified = true;
-                }
+                self.set_universal(key, val, query);
+                result.uvar_modified = true;
             } else if query.global || (query.universal && UVAR_SCOPE_IS_GLOBAL.load()) {
                 Self::set_in_node(&mut self.base.globals, key, val, flags);
                 result.global_modified = true;
@@ -726,11 +729,8 @@ impl EnvStackImpl {
             result.global_modified = true;
         } else if self.base.getf(key, EnvMode::UNIVERSAL).is_some() && !UVAR_SCOPE_IS_GLOBAL.load()
         {
-            #[cfg(not(windows))]
-            {
-                self.set_universal(key, val, query);
-                result.uvar_modified = true;
-            }
+            self.set_universal(key, val, query);
+            result.uvar_modified = true;
         } else {
             // Unspecified scope with no existing variables.
             let mut node = self.resolve_unspecified_scope();
@@ -743,7 +743,7 @@ impl EnvStackImpl {
     /// Remove a variable under the name `key`.
     pub fn remove(&mut self, key: &wstr, mode: EnvSetMode) -> ModResult {
         #[cfg(windows)]
-        if mode.mode.universal {
+        if mode.mode.universal && !uvars().initialized() {
             return ModResult::new(EnvStackSetResult::Scope);
         }
         let query = Query::from(mode);
@@ -765,15 +765,12 @@ impl EnvStackImpl {
         if query.has_scope {
             // The user requested erasing from a particular scope.
             if query.universal {
-                #[cfg(not(windows))]
-                {
-                    if uvars().remove(key) {
-                        result.status = EnvStackSetResult::Ok;
-                    } else {
-                        result.status = EnvStackSetResult::NotFound;
-                    }
-                    result.uvar_modified = true;
+                if uvars().remove(key) {
+                    result.status = EnvStackSetResult::Ok;
+                } else {
+                    result.status = EnvStackSetResult::NotFound;
                 }
+                result.uvar_modified = true;
             } else if query.global {
                 result.status = remove_from_chain(&mut self.base.globals, key);
                 result.global_modified = true;
@@ -796,7 +793,6 @@ impl EnvStackImpl {
         } else if Self::remove_from_chain(&mut self.base.globals, key) {
             result.global_modified = true;
         } else {
-            #[cfg(not(windows))]
             if uvars().remove(key) {
                 result.uvar_modified = true;
                 return result;
@@ -937,7 +933,6 @@ impl EnvStackImpl {
     }
 
     /// Set a universal variable, inheriting as applicable from the given old variable.
-    #[cfg(not(windows))]
     fn set_universal(&mut self, key: &wstr, mut val: Vec<WString>, query: Query) {
         let mut locked_uvars = uvars();
         let oldvar = locked_uvars.get(key);

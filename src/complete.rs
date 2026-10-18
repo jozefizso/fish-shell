@@ -11,11 +11,90 @@ use std::{
     },
 };
 
+use crate::{
+    autoload::{Autoload, AutoloadResult},
+    function,
+    parser::Parser,
+};
+static COMPLETION_AUTOLOADER: LazyLock<Mutex<Autoload>> =
+    LazyLock::new(|| Mutex::new(Autoload::new(L!("fish_complete_path"))));
+/// Load command-specific completions for the specified command.
+/// Returns `true` if something new was loaded, `false` if not.
+pub fn complete_load(cmd: &wstr, parser: &mut Parser) -> bool {
+    if COMPLETION_TOMBSTONES.lock().unwrap().contains(cmd) {
+        return false;
+    }
+
+    let mut loaded_new = false;
+
+    // We have to load this as a function, since it may define a --wraps or signature.
+    // See issue #2466.
+    if function::load(cmd, parser) {
+        // We autoloaded something; check if we have a --wraps.
+        loaded_new |= complete_wrap_map().get(cmd).is_some();
+    }
+
+    // It's important to NOT hold the lock around completion loading.
+    // We need to take the lock to decide what to load, drop it to perform the load, then reacquire
+    // it.
+    // Preserve Unix's global search policy; native stacks own their cwd and paths.
+    #[cfg(unix)]
+    let path_to_load = COMPLETION_AUTOLOADER
+        .lock()
+        .expect("mutex poisoned")
+        .resolve_command(cmd, EnvStack::globals());
+    #[cfg(windows)]
+    let path_to_load = COMPLETION_AUTOLOADER
+        .lock()
+        .expect("mutex poisoned")
+        .resolve_command(cmd, parser.vars());
+    match path_to_load {
+        AutoloadResult::Path(path_to_load) => {
+            let loaded = Autoload::perform_autoload(&path_to_load, parser);
+            let mut autoload = COMPLETION_AUTOLOADER.lock().expect("mutex poisoned");
+            if loaded {
+                autoload.mark_autoload_finished(cmd);
+                loaded_new = true;
+            } else {
+                autoload.mark_autoload_failed(cmd);
+            }
+        }
+        AutoloadResult::None => {
+            #[cfg(unix)]
+            let stripped = strip_executable_suffix(cmd);
+            #[cfg(windows)]
+            let stripped =
+                if fish_wcstringutil::string_suffixes_string_case_insensitive(L!(".exe"), cmd) {
+                    Some(&cmd[..cmd.len() - 4])
+                } else {
+                    None
+                };
+            if let Some(stripped) = stripped {
+                loaded_new = complete_load(stripped, parser);
+            }
+        }
+        AutoloadResult::Loaded | AutoloadResult::Pending => {}
+    }
+    loaded_new
+}
+
+/// Observes that fish_complete_path has changed.
+pub fn complete_invalidate_path() {
+    // TODO: here we unload all completions for commands that are loaded by the autoloader. We also
+    // unload any completions that the user may specified on the command line. We should in
+    // principle track those completions loaded by the autoloader alone.
+
+    let mut autoload = COMPLETION_AUTOLOADER.lock().expect("mutex poisoned");
+    let cmds = autoload.get_autoloaded_commands();
+    for cmd in cmds {
+        complete_remove_all(cmd, /*cmd_is_path=*/ false, /*explicit=*/ false);
+    }
+    autoload.clear();
+}
 #[cfg(unix)]
 use crate::{
     abbrs::with_abbrs,
     ast::unescape_keyword,
-    autoload::{Autoload, AutoloadResult},
     builtins::{builtin_exists, builtin_get_desc, builtin_get_names},
     common::valid_var_name_char,
     env::{EnvMode, EnvStack, EnvStackSetResult, Environment},
@@ -25,13 +104,12 @@ use crate::{
         expand_escape_variable, expand_one, expand_string, expand_to_receiver,
     },
     flog::{flog, flogf},
-    function,
     history::{History, history_id},
     localization::localizable_string,
     operation_context::OperationContext,
     parse_constants::SourceRange,
     parse_util::{get_cmdsubst_extent, get_process_extent, unescape_wildcards},
-    parser::{Block, BlockId, Parser, ParserEnvSetMode},
+    parser::{Block, BlockId, ParserEnvSetMode},
     parser_keywords::parser_keywords_is_subcommand,
     path::{path_get_path, path_try_get_path},
     reader::{get_quote, is_backslashed},
@@ -1030,9 +1108,6 @@ mod unix {
         /// results.
         condition_cache: HashMap<WString, bool>,
     }
-
-    static COMPLETION_AUTOLOADER: LazyLock<Mutex<Autoload>> =
-        LazyLock::new(|| Mutex::new(Autoload::new(L!("fish_complete_path"))));
 
     impl<'ctx, 'parser> Completer<'ctx, 'parser> {
         pub fn new(
@@ -2754,64 +2829,6 @@ mod unix {
         .into_iter()
         .find(|(ext, _)| string_suffixes_string_case_insensitive(ext, cmd))
         .map(|(ext, comp)| (&cmd[0..cmd.len() - ext.len()], comp))
-    }
-
-    /// Load command-specific completions for the specified command.
-    /// Returns `true` if something new was loaded, `false` if not.
-    pub fn complete_load(cmd: &wstr, parser: &mut Parser) -> bool {
-        if COMPLETION_TOMBSTONES.lock().unwrap().contains(cmd) {
-            return false;
-        }
-
-        let mut loaded_new = false;
-
-        // We have to load this as a function, since it may define a --wraps or signature.
-        // See issue #2466.
-        if function::load(cmd, parser) {
-            // We autoloaded something; check if we have a --wraps.
-            loaded_new |= complete_wrap_map().get(cmd).is_some();
-        }
-
-        // It's important to NOT hold the lock around completion loading.
-        // We need to take the lock to decide what to load, drop it to perform the load, then reacquire
-        // it.
-        // Note we only look at the global fish_function_path and fish_complete_path.
-        let path_to_load = COMPLETION_AUTOLOADER
-            .lock()
-            .expect("mutex poisoned")
-            .resolve_command(cmd, EnvStack::globals());
-        match path_to_load {
-            AutoloadResult::Path(path_to_load) => {
-                Autoload::perform_autoload(&path_to_load, parser);
-                COMPLETION_AUTOLOADER
-                    .lock()
-                    .expect("mutex poisoned")
-                    .mark_autoload_finished(cmd);
-                loaded_new = true;
-            }
-            AutoloadResult::None => {
-                // On Cygwin, if we failed to find a completion for "foo.exe", try "foo"
-                if let Some(stripped) = strip_executable_suffix(cmd) {
-                    loaded_new = complete_load(stripped, parser);
-                }
-            }
-            AutoloadResult::Loaded | AutoloadResult::Pending => {}
-        }
-        loaded_new
-    }
-
-    /// Observes that fish_complete_path has changed.
-    pub fn complete_invalidate_path() {
-        // TODO: here we unload all completions for commands that are loaded by the autoloader. We also
-        // unload any completions that the user may specified on the command line. We should in
-        // principle track those completions loaded by the autoloader alone.
-
-        let mut autoload = COMPLETION_AUTOLOADER.lock().expect("mutex poisoned");
-        let cmds = autoload.get_autoloaded_commands();
-        for cmd in cmds {
-            complete_remove_all(cmd, /*cmd_is_path=*/ false, /*explicit=*/ false);
-        }
-        autoload.clear();
     }
 
     #[cfg(test)]

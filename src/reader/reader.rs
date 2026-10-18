@@ -34,7 +34,7 @@ use crate::{
     editable_line::{Edit, EditableLine, line_at_cursor, range_of_line_at_cursor},
     env::{EnvMode, EnvStack, Environment, Statuses},
     env_dispatch::{
-        MIDNIGHT_COMMANDER_SID, handle_emoji_width, handle_fish_cursor_end_mode_change,
+        MIDNIGHT_COMMANDER_SID, common::handle_emoji_width, handle_fish_cursor_end_mode_change,
         handle_fish_cursor_selection_mode_change,
     },
     event,

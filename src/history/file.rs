@@ -5,20 +5,23 @@ use super::yaml_backend::{
     FIRST_ADDED_TIMESTAMP_KEY, LAST_ADDED_TIMESTAMP_KEY, decode_item_fish_2_0,
     escape_yaml_fish_2_0, offset_of_next_item_fish_2_0,
 };
-use crate::{
-    flog::flog,
-    path::{DirRemoteness, path_get_data_remoteness},
-    wutil::FileId,
-};
+#[cfg(unix)]
+use crate::path::{DirRemoteness, path_get_data_remoteness};
+use crate::{flog::flog, wutil::FileId};
 use fish_widestring::wcs2bytes;
+#[cfg(unix)]
 use nix::errno::Errno;
+#[cfg(unix)]
 use nix::sys::mman::{MapFlags, ProtFlags};
+#[cfg(unix)]
 use std::num::NonZeroUsize;
+#[cfg(unix)]
+use std::ops::{Deref, DerefMut};
+#[cfg(unix)]
 use std::ptr::NonNull;
 use std::{
     fs::File,
     io::Read as _,
-    ops::{Deref, DerefMut},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -31,11 +34,13 @@ pub enum HistoryFileType {
 }
 
 /// A type wrapping up the logic around mmap and munmap.
+#[cfg(unix)]
 struct MmapRegion {
     ptr: NonNull<u8>,
     len: NonZeroUsize,
 }
 
+#[cfg(unix)]
 impl MmapRegion {
     /// Map a region `[0, len)` from a locked file.
     pub fn map_file(file: &File, len: NonZeroUsize) -> nix::Result<Self> {
@@ -75,10 +80,13 @@ impl MmapRegion {
 }
 
 // SAFETY: MmapRegion has exclusive mutable access to the region
+#[cfg(unix)]
 unsafe impl Send for MmapRegion {}
 // SAFETY: MmapRegion does not offer interior mutability
+#[cfg(unix)]
 unsafe impl Sync for MmapRegion {}
 
+#[cfg(unix)]
 impl Deref for MmapRegion {
     type Target = [u8];
 
@@ -87,25 +95,35 @@ impl Deref for MmapRegion {
     }
 }
 
+#[cfg(unix)]
 impl DerefMut for MmapRegion {
     fn deref_mut(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len.get()) }
     }
 }
 
+#[cfg(unix)]
 impl Drop for MmapRegion {
     fn drop(&mut self) {
         _ = unsafe { nix::sys::mman::munmap(self.ptr.cast(), self.len.get()) };
     }
 }
 
+#[cfg(unix)]
+type HistoryRegion = MmapRegion;
+// Owned snapshots do not keep a file mapping alive across native atomic replacements.
+// Item decoding and the byte-offset index are shared with the mapped Unix backend.
+#[cfg(windows)]
+type HistoryRegion = Vec<u8>;
+
 /// RawHistoryFile holds the read-only contents of a file, before decoding it.
 pub struct RawHistoryFile {
-    region: MmapRegion,
+    region: HistoryRegion,
 }
 
 impl RawHistoryFile {
     /// Construct a history file contents from a [`File`] reference and its file id.
+    #[cfg(unix)]
     pub fn create(history_file: &File, file_id: FileId) -> std::io::Result<Self> {
         // Check the file size.
         let len: usize = match file_id.size.try_into() {
@@ -146,6 +164,25 @@ impl RawHistoryFile {
             map_anon(history_file, len)?
         };
 
+        region.try_into()
+    }
+
+    #[cfg(windows)]
+    pub fn create(mut history_file: &File, file_id: FileId) -> std::io::Result<Self> {
+        use std::io::{Seek as _, SeekFrom};
+        let len = usize::try_from(file_id.size)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        history_file.seek(SeekFrom::Start(0))?;
+        let mut region = vec![0; len];
+        history_file.read_exact(&mut region)?;
+        // The advertised immutable snapshot must be complete, not a prefix of a changed file.
+        let mut extra = [0];
+        if history_file.read(&mut extra)? != 0 || history_file.metadata()?.len() != file_id.size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "History changed while reading its snapshot",
+            ));
+        }
         region.try_into()
     }
 
@@ -212,6 +249,18 @@ impl HistoryFile {
     pub fn decode_item(&self, offset: usize) -> Option<HistoryItem> {
         self.contents.as_ref()?.decode_item(offset)
     }
+
+    /// Remove a command from the native session's visible baseline without reloading disk.
+    #[cfg(windows)]
+    pub fn remove_command(&mut self, command: &fish_widestring::wstr) {
+        let contents = &self.contents;
+        self.offsets.retain(|&offset| {
+            contents
+                .as_ref()
+                .and_then(|file| file.decode_item(offset))
+                .is_none_or(|item| item.str() != command)
+        });
+    }
 }
 
 /// Iterator over offsets within a history file.
@@ -245,12 +294,11 @@ fn infer_file_type(contents: &[u8]) -> HistoryFileType {
     }
 }
 
-impl TryFrom<MmapRegion> for RawHistoryFile {
+impl TryFrom<HistoryRegion> for RawHistoryFile {
     type Error = std::io::Error;
 
-    fn try_from(region: MmapRegion) -> std::io::Result<Self> {
-        let type_ = infer_file_type(&region);
-        if type_ == HistoryFileType::Fish1_x {
+    fn try_from(region: HistoryRegion) -> std::io::Result<Self> {
+        if !region.is_empty() && infer_file_type(&region) == HistoryFileType::Fish1_x {
             let error_message = "unsupported history file format 1.x";
             flog!(error, error_message);
             return Err(std::io::Error::new(
@@ -306,6 +354,7 @@ impl HistoryItem {
 
 /// Check if we should mmap the file.
 /// Don't try mmap() on non-local filesystems.
+#[cfg(unix)]
 fn should_mmap() -> bool {
     // mmap only if we are known not-remote.
     path_get_data_remoteness() != DirRemoteness::Remote

@@ -119,29 +119,16 @@ static FUNCTION_SET: LazyLock<Mutex<FunctionSet>> = LazyLock::new(|| {
     })
 });
 
-/// Native batch prerequisites supplied by real embedded fish source. General
-/// disk and builtin-wrapper autoload exposure awaits N4 state/bootstrap support.
-#[cfg(windows)]
-pub(crate) const CORE_BUILTIN_FUNCTIONS: &[(&wstr, &str)] =
-    &[(L!("_validate_int"), "functions/_validate_int.fish")];
-
 /// Make sure that if the specified function is a dynamically loaded function, it has been fully
 /// loaded. Note this executes fish script code.
 pub fn load(name: &wstr, parser: &mut Parser) -> bool {
-    #[cfg(windows)]
-    if !CORE_BUILTIN_FUNCTIONS.iter().any(|(core, _)| *core == name) {
-        return false;
-    }
     let mut path_to_autoload: Option<_> = None;
     // Note we can't autoload while holding the funcset lock.
     // Lock around a local region.
     {
         let mut funcset: std::sync::MutexGuard<FunctionSet> = FUNCTION_SET.lock().unwrap();
         if funcset.allow_autoload(name) {
-            #[cfg(unix)]
             let resolved = funcset.autoloader.resolve_command(name, parser.vars());
-            #[cfg(windows)]
-            let resolved = funcset.autoloader.resolve_core_command(name);
             if let AutoloadResult::Path(path) = resolved {
                 path_to_autoload = Some(path);
             }
@@ -151,12 +138,13 @@ pub fn load(name: &wstr, parser: &mut Parser) -> bool {
     // Release the lock and perform any autoload, then reacquire the lock and clean up.
     if let Some(path_to_autoload) = path_to_autoload.as_ref() {
         // Crucially, the lock is acquired after perform_autoload().
-        Autoload::perform_autoload(path_to_autoload, parser);
-        FUNCTION_SET
-            .lock()
-            .unwrap()
-            .autoloader
-            .mark_autoload_finished(name);
+        let success = Autoload::perform_autoload(path_to_autoload, parser);
+        let mut functions = FUNCTION_SET.lock().unwrap();
+        if success && functions.funcs.contains_key(name) {
+            functions.autoloader.mark_autoload_finished(name);
+        } else {
+            functions.autoloader.mark_autoload_failed(name);
+        }
     }
     path_to_autoload.is_some()
 }
@@ -272,19 +260,12 @@ pub fn exists_no_autoload(cmd: &wstr) -> bool {
     if funcset.funcs.contains_key(cmd) {
         return true;
     }
-    #[cfg(unix)]
     if !tombstoned && funcset.autoloader.can_autoload(cmd) {
         return true;
     }
     if tombstoned {
         return false;
     }
-    #[cfg(windows)]
-    return CORE_BUILTIN_FUNCTIONS
-        .iter()
-        .any(|(name, asset)| *name == cmd && crate::autoload::has_asset(asset));
-
-    #[cfg(unix)]
     {
         let narrow = wcs2bytes(cmd);
         if let Ok(cmdstr) = std::str::from_utf8(&narrow) {
@@ -377,7 +358,6 @@ pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
 pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
     let mut names = HashSet::<WString>::new();
     let funcset = FUNCTION_SET.lock().unwrap();
-    #[cfg(unix)]
     autoload_names(&mut names, vars, get_hidden);
     for name in funcset.funcs.keys() {
         // Maybe skip hidden.
@@ -387,7 +367,6 @@ pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
         names.insert(name.clone());
     }
 
-    #[cfg(unix)]
     for name in crate::autoload::Asset::iter() {
         let Some(bname) = name.strip_prefix("functions/") else {
             continue;
@@ -399,15 +378,6 @@ pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
             continue;
         };
         names.insert(fname.into());
-    }
-    #[cfg(windows)]
-    for &(name, asset) in CORE_BUILTIN_FUNCTIONS {
-        if (get_hidden || !name.starts_with('_'))
-            && !funcset.autoload_tombstones.contains(name)
-            && crate::autoload::has_asset(asset)
-        {
-            names.insert(name.to_owned());
-        }
     }
 
     names.into_iter().collect()

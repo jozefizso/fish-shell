@@ -6,7 +6,6 @@
 use std::ops::DerefMut as _;
 
 use crate::exec::exec_subshell_for_expand;
-#[cfg(unix)]
 use crate::history::{History, history_id};
 use crate::{
     builtins::{
@@ -686,29 +685,15 @@ fn expand_variables(
     // Do a dirty hack to make sliced history fast (#4650). We expand from either a variable, or a
     // history_t. Note that "history" is read only in env.rs so it's safe to special-case it in
     // this way (it cannot be shadowed, etc).
-    #[cfg(windows)]
-    if var_name == "history" {
-        append_syntax_error!(
-            errors,
-            varexp_char_idx,
-            "History expansion is not supported on native Windows"
-        );
-        return ExpandResult::make_error(STATUS_EXPAND_ERROR);
-    }
-    #[cfg(unix)]
     let mut history = None;
     let mut var = None;
-    #[cfg(unix)]
     if var_name == "history" {
         history = Some(History::new(history_id(vars)));
     }
     if var_name != "history" && var_name.as_char_slice() != [VARIABLE_EXPAND_EMPTY] {
         var = vars.get(var_name);
     }
-    #[cfg(unix)]
     let has_history = history.is_some();
-    #[cfg(windows)]
-    let has_history = false;
 
     // Parse out any following slice.
     // Record the end of the variable name and any following slice.
@@ -725,7 +710,6 @@ fn expand_variables(
         if let Some(ref var) = var {
             effective_val_count = var.as_list().len();
         }
-        #[cfg(unix)]
         if let Some(history) = &history {
             effective_val_count = history.size();
         }
@@ -782,21 +766,13 @@ fn expand_variables(
     );
     let mut var_item_list = vec![];
     if all_values {
-        #[cfg(unix)]
-        {
-            var_item_list = if let Some(history) = &history {
-                history.get_history()
-            } else {
-                var.as_ref().unwrap().as_list().to_vec()
-            };
-        }
-        #[cfg(windows)]
-        {
-            var_item_list = var.as_ref().unwrap().as_list().to_vec();
-        }
+        var_item_list = if let Some(history) = &history {
+            history.get_history()
+        } else {
+            var.as_ref().unwrap().as_list().to_vec()
+        };
     } else {
         // We have to respect the slice.
-        #[cfg(unix)]
         if let Some(ref history) = history {
             // Ask history to map indexes to item strings.
             // Note this may have missing entries for out-of-bounds.
@@ -824,9 +800,6 @@ fn expand_variables(
     if is_single {
         // Quoted expansion. Here we expect the variable's delimiter.
         // Note history always has a space delimiter.
-        #[cfg(windows)]
-        let delimit = var.as_ref().unwrap().delimiter();
-        #[cfg(unix)]
         let delimit = if history.is_some() {
             ' '
         } else {
@@ -2349,26 +2322,6 @@ mod portable_tests {
                 .collect();
             assert_eq!(actual.as_slice(), expected, "{input}");
         }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn unavailable_native_history_expansion_reports_error() {
-        let mut ctx = OperationContext::empty();
-        let mut output = CompletionList::new();
-        let mut errors = ParseErrorList::new();
-        assert_eq!(
-            expand_string(
-                L!("$history").to_owned(),
-                &mut output,
-                ExpandFlags::FAIL_ON_CMDSUBST,
-                &mut ctx,
-                Some(&mut errors),
-            )
-            .result,
-            ExpandResultCode::Error
-        );
-        assert!(output.is_empty());
     }
 
     #[cfg(windows)]

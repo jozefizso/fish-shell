@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use super::r#impl::environment::uvars;
 use super::r#impl::environment::{
     EnvMutex, EnvMutexGuard, EnvScopedImpl, EnvStackImpl, ModResult, colon_split,
 };
@@ -57,6 +59,9 @@ use std::{ffi::CStr, path::PathBuf, sync::LazyLock};
 #[cfg(windows)]
 #[path = "native.rs"]
 mod native;
+#[cfg(windows)]
+#[path = "native_state.rs"]
+mod native_state;
 /// Set when a universal variable has been modified but not yet been written to disk via sync().
 static UVARS_LOCALLY_MODIFIED: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
 
@@ -69,6 +74,8 @@ pub enum EnvStackSetResult {
     Scope,    // Variable cannot be set in the given scope.
     Invalid,  // The variable's value is invalid (e.g. umask).
     NotFound, // The variable was not found (only possible when removing a variable).
+    #[cfg(windows)]
+    Storage, // A persistent mutation was not acknowledged by its storage transaction.
 }
 
 impl From<EnvStackSetResult> for BuiltinResult {
@@ -79,6 +86,8 @@ impl From<EnvStackSetResult> for BuiltinResult {
             EnvStackSetResult::Scope => Err(2),
             EnvStackSetResult::Invalid => Err(3),
             EnvStackSetResult::NotFound => Err(4),
+            #[cfg(windows)]
+            EnvStackSetResult::Storage => Err(1),
         }
     }
 }
@@ -116,6 +125,15 @@ pub(crate) fn handle_env_return(
             // Only variable deletion can return a `NotFound` error, but that case is explicitly silenced
             unreachable!("variable not found");
         }
+        #[cfg(windows)]
+        EnvStackSetResult::Storage => {
+            let detail = native_state::take_storage_error()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "universal storage did not acknowledge the mutation".to_owned());
+            err_fmt!("Unable to persist universal variable '%s': %s", key, detail)
+                .cmd(cmd)
+                .finish(streams);
+        }
     }
 }
 
@@ -126,7 +144,11 @@ pub(super) fn pwd_with_trailing_separator(mut pwd: WString) -> WString {
     let terminated = pwd.ends_with('/');
     if !terminated {
         #[cfg(windows)]
-        let separator = if pwd.starts_with(L!("\\\\?\\")) { '\\' } else { '/' };
+        let separator = if pwd.starts_with(L!("\\\\?\\")) {
+            '\\'
+        } else {
+            '/'
+        };
         #[cfg(not(windows))]
         let separator = '/';
         pwd.push(separator);
@@ -312,7 +334,10 @@ impl EnvStack {
         let result = self.lock().set_native_cwd(cwd);
         if result.status == EnvStackSetResult::Ok && self.dispatches_var_changes {
             env_dispatch_var_change(
-                VarChangeMilieu { is_repainting: false, global_or_universal: false },
+                VarChangeMilieu {
+                    is_repainting: false,
+                    global_or_universal: false,
+                },
                 L!("PWD"),
                 self,
             );
@@ -343,6 +368,16 @@ impl EnvStack {
         }
 
         let ret: ModResult = self.lock().set(key, mode, vals);
+        if ret.uvar_modified {
+            UVARS_LOCALLY_MODIFIED.store(true);
+            #[cfg(windows)]
+            if ret.status == EnvStackSetResult::Ok {
+                if let Err(error) = self.commit_native_universal_mutation(key) {
+                    native_state::set_storage_error(error);
+                    return EnvStackSetResult::Storage;
+                }
+            }
+        }
         if ret.status == EnvStackSetResult::Ok {
             // Dispatch changes if we modified the global state or have 'dispatches_var_changes' set.
             // Important to not hold the lock here.
@@ -356,10 +391,6 @@ impl EnvStack {
                     self,
                 );
             }
-        }
-        // Mark if we modified a uvar.
-        if ret.uvar_modified {
-            UVARS_LOCALLY_MODIFIED.store(true);
         }
         ret.status
     }
@@ -399,6 +430,16 @@ impl EnvStack {
     /// Return the set result.
     pub fn remove(&self, key: &wstr, mode: EnvSetMode) -> EnvStackSetResult {
         let ret = self.lock().remove(key, mode);
+        if ret.uvar_modified {
+            UVARS_LOCALLY_MODIFIED.store(true);
+            #[cfg(windows)]
+            if ret.status == EnvStackSetResult::Ok {
+                if let Err(error) = self.commit_native_universal_mutation(key) {
+                    native_state::set_storage_error(error);
+                    return EnvStackSetResult::Storage;
+                }
+            }
+        }
         #[allow(clippy::collapsible_if)]
         if ret.status == EnvStackSetResult::Ok {
             if ret.global_modified || self.dispatches_var_changes {
@@ -412,9 +453,6 @@ impl EnvStack {
                     self,
                 );
             }
-        }
-        if ret.uvar_modified {
-            UVARS_LOCALLY_MODIFIED.store(true);
         }
         ret.status
     }

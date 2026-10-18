@@ -114,7 +114,11 @@ impl Fixture {
         cmd.args(args)
             .current_dir(&self.root)
             .env_clear()
-            .env("PATH", "");
+            .env("PATH", "")
+            // Formatting cases declare their locale instead of pinning the
+            // workstation's current numeric defaults. N4 explicitly unsets this
+            // precondition when testing restoration of actual OS defaults.
+            .env("LANG", "C");
         if let Some(value) = std::env::var_os("SystemRoot") {
             cmd.env("SystemRoot", value);
         }

@@ -16,6 +16,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "windows_config.rs"]
+mod windows_config;
+pub use windows_config::*;
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }

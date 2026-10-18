@@ -128,18 +128,10 @@ impl Autoload {
         result
     }
 
-    /// Resolve an embedded core builtin dependency without exposing disk providers.
-    /// The caller owns the core-name policy; loading and recursion/cache tracking
-    /// remain in the same state machine as ordinary autoload.
-    #[cfg(windows)]
-    pub(crate) fn resolve_core_command(&mut self, cmd: &wstr) -> AutoloadResult {
-        self.resolve_command_impl(cmd, &[])
-    }
-
     /// Helper to actually perform an autoload.
     /// This is a static function because it executes fish script, and so must be called without
     /// holding any particular locks.
-    pub fn perform_autoload(path: &AutoloadPath, parser: &mut Parser) {
+    pub fn perform_autoload(path: &AutoloadPath, parser: &mut Parser) -> bool {
         // We do the useful part of what exec_subshell does ourselves
         // - we source the file.
         // We don't create a buffer or check ifs or create a read_limit
@@ -148,7 +140,8 @@ impl Autoload {
         match path {
             AutoloadPath::OnDisk(p) => {
                 let script_source = L!("source ").to_owned() + &escape(p)[..];
-                parser.eval(&script_source, &IoChain::new());
+                let result = parser.eval(&script_source, &IoChain::new());
+                !result.break_expand && result.status.status_value() == 0
             }
             AutoloadPath::Embedded(name) => {
                 use fish_widestring::bytes2wcstring;
@@ -159,8 +152,12 @@ impl Autoload {
                 let mut widename = L!("embedded:").to_owned();
                 widename.push_str(name);
                 let ret = parser.eval_file_wstr(src, Arc::new(widename), &IoChain::new(), None);
-                if let Err(msg) = ret {
-                    eprintf!("%s", msg);
+                match ret {
+                    Ok(result) => !result.break_expand && result.status.status_value() == 0,
+                    Err(msg) => {
+                        eprintf!("%s", msg);
+                        false
+                    }
                 }
             }
         }
@@ -170,6 +167,12 @@ impl Autoload {
     pub fn mark_autoload_finished(&mut self, cmd: &wstr) {
         let removed = self.current_autoloading.remove(cmd);
         assert!(removed, "cmd was not being autoloaded");
+    }
+
+    /// A failed source must be retried even when its file identity is unchanged.
+    pub fn mark_autoload_failed(&mut self, cmd: &wstr) {
+        self.mark_autoload_finished(cmd);
+        self.autoloaded_files.remove(cmd);
     }
 
     /// Return whether a command is currently being autoloaded.
@@ -339,9 +342,10 @@ impl AutoloadFileCache {
         // Check hits.
         if let Some(value) = self.known_files.get(cmd) {
             let embedded = matches!(value.file, AutoloadableFileInfo::Embedded { .. });
-            if allow_stale
-                || embedded
-                || Self::is_fresh(value.last_checked, Self::current_timestamp())
+            if cfg!(unix)
+                && (allow_stale
+                    || embedded
+                    || Self::is_fresh(value.last_checked, Self::current_timestamp()))
             {
                 // Re-use this cached hit.
                 return Some(value.file.clone());
@@ -352,7 +356,7 @@ impl AutoloadFileCache {
 
         // Check misses.
         if let Some(miss) = self.misses_cache.get(cmd) {
-            if allow_stale || Self::is_fresh(*miss, Self::current_timestamp()) {
+            if cfg!(unix) && (allow_stale || Self::is_fresh(*miss, Self::current_timestamp())) {
                 // Re-use this cached miss.
                 return None;
             }
@@ -427,14 +431,16 @@ impl AutoloadFileCache {
         for dir in self.dirs() {
             if asset_dir == Some(AssetDir::Completions) {
                 // HACK: Ignore generated_completions until we tried the embedded assets
-                if dir.ends_with(L!("/generated_completions")) != want_generated_completions {
+                let generated = dir.ends_with(L!("/generated_completions"));
+                #[cfg(windows)]
+                let generated = generated || dir.ends_with(L!("\\generated_completions"));
+                if generated != want_generated_completions {
                     continue;
                 }
             }
             // Construct the path as dir/cmd.fish
             path = dir.to_owned();
-            path.push('/');
-            path.push_utfstr(cmd);
+            crate::path::append_path_component(&mut path, cmd);
             path.push_str(".fish");
 
             if let Ok(file_id) = file_id_for_path(&path) {

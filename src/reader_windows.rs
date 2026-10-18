@@ -9,6 +9,21 @@ use crate::{
 use fish_widestring::{bytes2wcstring, wcs2bytes};
 use std::io::Write;
 
+use crate::history::{History, HistoryId};
+use std::sync::{Arc, LazyLock, Mutex};
+
+static CURRENT_HISTORY: LazyLock<Mutex<Option<Arc<History>>>> = LazyLock::new(|| Mutex::new(None));
+
+/// Active batch history selection; this is not fabricated editor/commandline state.
+pub fn current_history() -> Option<Arc<History>> {
+    CURRENT_HISTORY.lock().unwrap().as_ref().map(Arc::clone)
+}
+
+pub fn reader_change_history(id: HistoryId) {
+    let history = History::new(id);
+    *CURRENT_HISTORY.lock().unwrap() = Some(history);
+}
+
 /// Read the remaining bytes without CRT newline translation, consume one leading UTF-8 BOM,
 /// then parse the complete source before evaluating any of it. CRLF is handled by the grammar.
 pub fn reader_read(

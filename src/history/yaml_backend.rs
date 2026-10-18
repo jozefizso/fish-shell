@@ -130,11 +130,11 @@ pub fn extract_prefix_and_unescape_yaml(line: &[u8]) -> Option<(Cow<'_, [u8]>, C
     Some((key, value))
 }
 
-fn time_from_seconds(offset: i64) -> SystemTime {
+fn time_from_seconds(offset: i64) -> Option<SystemTime> {
     if let Ok(n) = u64::try_from(offset) {
-        UNIX_EPOCH + Duration::from_secs(n)
+        UNIX_EPOCH.checked_add(Duration::from_secs(n))
     } else {
-        UNIX_EPOCH - Duration::from_secs(offset.unsigned_abs())
+        UNIX_EPOCH.checked_sub(Duration::from_secs(offset.unsigned_abs()))
     }
 }
 
@@ -179,7 +179,7 @@ pub fn decode_item_fish_2_0(mut data: &[u8]) -> Option<HistoryItem> {
             std::str::from_utf8(value)
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .map(time_from_seconds)
+                .and_then(time_from_seconds)
         };
 
         if *key == *LAST_ADDED_TIMESTAMP_KEY.as_bytes() {
@@ -227,7 +227,7 @@ fn parse_timestamp_line(key: &str, s: &[u8]) -> Option<SystemTime> {
     let s = trim_start(s);
 
     let t = std::str::from_utf8(s).ok()?.parse().ok()?;
-    Some(time_from_seconds(t))
+    time_from_seconds(t)
 }
 
 fn complete_lines(s: &[u8]) -> impl Iterator<Item = &[u8]> {

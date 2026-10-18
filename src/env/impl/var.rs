@@ -127,7 +127,6 @@ pub(super) mod electric_values {
         var(L!("fish_killring"), Computed(GET_FISH_KILLRING)),
         var(L!("fish_pid"), Regular),
         var(FISH_TERMINAL_COLOR_THEME_VAR, Regular),
-        #[cfg(not(windows))]
         var(L!("history"), Computed(GET_HISTORY)),
         var(L!("hostname"), Regular),
         var(L!("pipestatus"), Computed(GET_PIPESTATUS)),
@@ -170,6 +169,15 @@ pub(super) mod electric_values {
             History::new(history_id)
         });
         EnvVar::new_from_name_vec(L!("history"), history.get_history())
+    };
+    #[cfg(windows)]
+    const GET_HISTORY: Getter = |_env| {
+        let values = if crate::threads::is_main_thread() {
+            crate::reader::current_history().map_or_else(Vec::new, |history| history.get_history())
+        } else {
+            Vec::new()
+        };
+        EnvVar::new_from_name_vec(L!("history"), values)
     };
     const GET_PIPESTATUS: Getter = |env| {
         let js = &env.perproc_data.statuses;

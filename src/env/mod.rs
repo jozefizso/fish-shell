@@ -1,4 +1,3 @@
-#[cfg(not(windows))]
 pub mod config_paths;
 mod environment;
 mod r#impl;

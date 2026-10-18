@@ -409,7 +409,7 @@ struct NativeImageIdentity {
 }
 
 static NATIVE_IMAGE_IDENTITY: LazyLock<io::Result<NativeImageIdentity>> = LazyLock::new(|| {
-    let image = PinnedImage::open(&std::env::current_exe()?)?;
+    let image = PinnedImage::open(crate::wutil::native_current_exe_path()?)?;
     let identity = crate::wutil::native_identity_for_file(&image.file)?;
     Ok(NativeImageIdentity {
         _image: image,

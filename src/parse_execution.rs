@@ -1598,6 +1598,23 @@ impl ExecutionContext {
         job_node: &ast::JobPipeline,
         associated_block: Option<BlockId>,
     ) -> EndExecutionReason {
+        #[cfg(windows)]
+        match ctx.parser().vars().service_native_state() {
+            Ok(events) => {
+                for event in events {
+                    event::fire(ctx.parser(), event);
+                    if ctx.parser().libdata().exit_current_script {
+                        break;
+                    }
+                }
+            }
+            Err(error) => {
+                // Notification/recovery errors do not suppress an unrelated
+                // command or forge its status. Explicit mutations fail at their
+                // own checked acknowledgement boundary.
+                crate::flog::flog!(warning, "Unable to refresh native persistent state:", error);
+            }
+        }
         event::fire_delayed(ctx.parser());
         if let Some(ret) = self.check_end_execution(ctx) {
             return ret;
@@ -2031,16 +2048,21 @@ impl ExecutionContext {
         builtins::function::has_unavailable_event_option(&mut argv)
     }
 
-    /// Validate the entire affected job before assignment or argument expansion. In particular,
-    /// a substitution hidden inside an excluded construct must never acquire side effects.
+    /// Validate this job before assignment or argument expansion. Nested jobs
+    /// validate when executed: an unsupported operation in an untaken branch or
+    /// an uncalled function must not reject its enclosing control flow.
     #[cfg(windows)]
     fn unsupported_native_job<'a>(
         &self,
         job: &'a ast::JobPipeline,
     ) -> Option<(&'a dyn ast::Node, &'static str)> {
         use fish_common::{UnescapeStringStyle, unescape_string};
-        for node in ast::Traversal::new(job) {
+        let mut traversal = ast::Traversal::new(job);
+        while let Some(node) = traversal.next() {
             match node.kind() {
+                ast::Kind::JobPipeline(pipeline) if !std::ptr::eq(pipeline, job) => {
+                    traversal.skip_children(node);
+                }
                 ast::Kind::JobPipeline(pipeline) if pipeline.bg.is_some() => {
                     return Some((node, "background execution"));
                 }

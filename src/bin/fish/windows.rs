@@ -1,4 +1,4 @@
-//! Native batch startup. Configuration policy and terminal editing remain separate owners.
+//! Native batch startup, sharing state and bootstrap policy with the shell evaluator.
 use fish::{
     common::{PROFILING_ACTIVE, PROGRAM_NAME},
     env::{EnvMode, EnvStack},
@@ -59,6 +59,10 @@ fn run() -> i32 {
     let mut debug = Vec::new();
     let mut debug_output = None;
     let mut profile_output = None;
+    let mut init_commands = Vec::new();
+    let mut private = false;
+    let mut login = args.first().is_some_and(|arg| arg.starts_with('-'));
+    let mut startup_profile_output = None;
     while let Some(option) = options.next_opt() {
         match option {
             'N' => no_config = true,
@@ -98,9 +102,10 @@ fn run() -> i32 {
                     "--debug-stack-frames (-D) is retired; use --debug category selection",
                 );
             }
-            'C' | 'l' | 'P' | '\x03' => {
-                return diagnostic("startup/login/private/startup-profile options require N4");
-            }
+            'C' => init_commands.push(options.woptarg.unwrap().to_owned()),
+            'l' => login = true,
+            'P' => private = true,
+            '\x03' => startup_profile_output = Some(options.woptarg.unwrap().to_owned()),
             'i' => return diagnostic("interactive mode requires N6"),
             'h' => return diagnostic("help delivery requires N9"),
             '\x01' => return diagnostic("resource usage reporting requires N5"),
@@ -125,18 +130,29 @@ fn run() -> i32 {
         }
     }
     let operands = &options.argv[options.wopt_index..];
-    if !no_config {
-        return diagnostic("native Windows batch mode requires -N (--no-config)");
-    }
     if !unsafe { fish::locale::set_libc_locales(false) } {
         return diagnostic("unable to initialize the native C locale");
     }
-    let variables = EnvStack::new();
+    let variables = EnvStack::globals().create_child(true /* dispatches_var_changes */);
     if let Err(error) = variables.initialize_native() {
         return diagnostic(&format!(
             "unable to initialize native environment/current directory: {error}"
         ));
     }
+    let state_start = std::time::Instant::now();
+    if !no_execute {
+        if private || no_config {
+            fish::history::start_private_mode(&variables);
+        }
+        if let Err(error) = variables.initialize_native_state() {
+            return diagnostic(&format!("unable to initialize native state: {error}"));
+        }
+    }
+    let _state_cleanup = variables.native_state_guard();
+    if login {
+        fish::proc::mark_login();
+    }
+    let state_elapsed = state_start.elapsed();
     let mut parser = match Parser::new(variables, CancelBehavior::Return) {
         Ok(parser) => parser,
         Err(error) => return diagnostic(&format!("unable to initialize native parser: {error}")),
@@ -169,18 +185,128 @@ fn run() -> i32 {
         },
         None => None,
     };
-    PROFILING_ACTIVE.store(profile.is_some());
+    let mut startup_profile = match startup_profile_output {
+        Some(path) => match fish::path::native_resolve_path_for_environment(&path, parser.vars())
+            .and_then(File::create)
+        {
+            Ok(file) => Some(file),
+            Err(error) => {
+                return diagnostic(&format!(
+                    "unable to open startup profile output '{path}': {error}"
+                ));
+            }
+        },
+        None => None,
+    };
+    PROFILING_ACTIVE.store(profile.is_some() || startup_profile.is_some());
     if no_execute {
         fish::proc::mark_no_exec();
     }
     let io = IoChain::new();
     let mut status = 0;
-    if !commands.is_empty() {
-        parser.set_var(
-            L!("argv"),
-            ParserEnvSetMode::new(EnvMode::GLOBAL),
-            operands.iter().map(|arg| (*arg).to_owned()).collect(),
-        );
+    let mut syntax_status = 0;
+    parser.set_var(
+        L!("argv"),
+        ParserEnvSetMode::new(EnvMode::GLOBAL),
+        if commands.is_empty() {
+            operands
+                .iter()
+                .skip(1)
+                .map(|arg| (*arg).to_owned())
+                .collect()
+        } else {
+            operands.iter().map(|arg| (*arg).to_owned()).collect()
+        },
+    );
+    if !no_execute && !no_config {
+        let started = std::time::Instant::now();
+        if let Some(config) = fish::autoload::Asset::get("config.fish") {
+            if let Err(message) = parser.eval_file_wstr(
+                fish_widestring::bytes2wcstring(&config.data),
+                Arc::new(L!("embedded:config.fish").to_owned()),
+                &io,
+                None,
+            ) {
+                print_error(&message);
+            }
+        } else {
+            return diagnostic("embedded startup configuration is missing");
+        }
+        for root in [L!("__fish_sysconf_dir"), L!("__fish_config_dir")] {
+            use fish::env::Environment;
+            if let Some(root) = parser.vars().get(root) {
+                let mut path = root.as_string();
+                fish::path::append_path_component(&mut path, L!("config.fish"));
+                match fish::path::native_resolve_path_for_environment(&path, parser.vars())
+                    .and_then(std::fs::metadata)
+                {
+                    Ok(metadata) if metadata.is_file() => {
+                        let command = L!("source ").to_owned() + &fish_common::escape(&path)[..];
+                        parser.eval(&command, &io);
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        print_error(&fish_widestring::str2wcstring(format!(
+                            "fish: unable to inspect configuration '{path}': {error}\n"
+                        )));
+                    }
+                }
+            }
+            if parser.libdata().exit_current_script {
+                break;
+            }
+        }
+        if let Some(out) = startup_profile.as_mut() {
+            if let Err(error) =
+                writeln!(out, "# configuration\t{} us", started.elapsed().as_micros())
+            {
+                let _ = diagnostic(&format!("unable to write startup profile: {error}"));
+            }
+        }
+    }
+    if !parser.libdata().exit_current_script {
+        for command in init_commands {
+            if no_execute {
+                status = check_source(&parser, &command);
+                if status != 0 {
+                    syntax_status = status;
+                }
+            } else {
+                status = match parser.eval_wstr(command, &io, None, BlockType::Top) {
+                    Ok(result) => {
+                        if result.status.is_empty() {
+                            parser.last_status()
+                        } else {
+                            result.status.status_value()
+                        }
+                    }
+                    Err(message) => {
+                        print_error(&message);
+                        127
+                    }
+                };
+            }
+            if parser.libdata().exit_current_script {
+                break;
+            }
+        }
+    }
+    if let Some(out) = startup_profile.as_mut() {
+        let result = writeln!(
+            out,
+            "# native state initialization\t{} us",
+            state_elapsed.as_micros()
+        )
+        .and_then(|_| parser.write_profiling(out));
+        if let Err(error) = result {
+            let _ = diagnostic(&format!("unable to write startup profile: {error}"));
+        }
+    }
+    PROFILING_ACTIVE.store(profile.is_some());
+    if parser.libdata().exit_current_script {
+        status = parser.last_status();
+    } else if !commands.is_empty() {
         for command in commands {
             if no_execute {
                 status = check_source(&parser, &command);
@@ -260,7 +386,11 @@ fn run() -> i32 {
         let _ = diagnostic(&format!("unable to write debug output: {error}"));
     }
     // Diagnostic sink failures are reported separately and never replace command status.
-    status
+    if no_execute && syntax_status != 0 {
+        syntax_status
+    } else {
+        status
+    }
 }
 
 fn check_source(parser: &Parser, source: &wstr) -> i32 {

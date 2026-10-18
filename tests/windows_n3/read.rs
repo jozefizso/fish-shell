@@ -158,6 +158,21 @@ pub(super) fn exercise(f: &Fixture) {
         b"crlf\r",
         b"",
     );
+    exact(
+        f.input(
+            "read --universal n3_read_persisted",
+            "persisted 雪\n".as_bytes(),
+        ),
+        0,
+        b"",
+        b"",
+    );
+    exact(
+        f.eval("printf '%s\\n' $n3_read_persisted; set -eU n3_read_persisted"),
+        0,
+        "persisted 雪\n".as_bytes(),
+        b"",
+    );
     for code in [
         "read --unknown value",
         "read --nchars nope value",
@@ -169,7 +184,6 @@ pub(super) fn exercise(f: &Fixture) {
         "read --line --delimiter=, value",
         "read 'invalid-name'",
         "read status",
-        "read --universal value",
         "read --command text value",
         "read --prompt 'printf marker' value",
         "read --prompt-str text value",

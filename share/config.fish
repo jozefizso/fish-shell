@@ -12,19 +12,43 @@ or set -g __fish_added_user_paths
 # unless they already exist
 #
 
+set -l dir_sep /
+set -l basename_pattern '^.*/'
+if builtin -q __fish_native_fs
+    set dir_sep '\\'
+    set basename_pattern '^.*[\\\\/]'
+end
+
 # Grab extra directories (as specified by the build process, usually for
 # third-party packages to ship completions &c.
 set -l __extra_completionsdir
 set -l __extra_functionsdir
 set -l __extra_confdir
-status get-file __fish_build_paths.fish | source
+if builtin -q __fish_native_fs
+    set __extra_completionsdir $__fish_data_dir$dir_sep'vendor_completions.d'
+    set __extra_functionsdir $__fish_data_dir$dir_sep'vendor_functions.d'
+    set __extra_confdir $__fish_data_dir$dir_sep'vendor_conf.d'
+else
+    status get-file __fish_build_paths.fish | source
+end
 
 # Compute the directories for vendor configuration.  We want to include
 # all of XDG_DATA_DIRS, as well as the __extra_* dirs defined above.
 set -l xdg_data_dirs /usr/local/share/fish /usr/share/fish
+if builtin -q __fish_native_fs
+    set xdg_data_dirs $__fish_data_dir
+end
 if test -n "$XDG_DATA_DIRS"
-    set --path xdg_data_dirs $XDG_DATA_DIRS
-    set xdg_data_dirs (string replace -r '([^/])/$' '$1' -- $xdg_data_dirs)/fish
+    if builtin -q __fish_native_fs
+        set xdg_data_dirs (string split ';' -- $XDG_DATA_DIRS)
+    else
+        set --path xdg_data_dirs $XDG_DATA_DIRS
+    end
+    if builtin -q __fish_native_fs
+        set xdg_data_dirs (string replace -r '[\\\\/]$' '' -- $xdg_data_dirs)$dir_sep'fish'
+    else
+        set xdg_data_dirs (string replace -r '([^/])/$' '$1' -- $xdg_data_dirs)/fish
+    end
 end
 
 set -g __fish_vendor_completionsdirs
@@ -32,9 +56,9 @@ set -g __fish_vendor_functionsdirs
 set -g __fish_vendor_confdirs
 # Don't load vendor directories when running unit tests
 if not set -q FISH_UNIT_TESTS_RUNNING
-    set __fish_vendor_completionsdirs $__fish_user_data_dir/vendor_completions.d $xdg_data_dirs/vendor_completions.d
-    set __fish_vendor_functionsdirs $__fish_user_data_dir/vendor_functions.d $xdg_data_dirs/vendor_functions.d
-    set __fish_vendor_confdirs $__fish_user_data_dir/vendor_conf.d $xdg_data_dirs/vendor_conf.d
+    set __fish_vendor_completionsdirs $__fish_user_data_dir$dir_sep'vendor_completions.d' $xdg_data_dirs$dir_sep'vendor_completions.d'
+    set __fish_vendor_functionsdirs $__fish_user_data_dir$dir_sep'vendor_functions.d' $xdg_data_dirs$dir_sep'vendor_functions.d'
+    set __fish_vendor_confdirs $__fish_user_data_dir$dir_sep'vendor_conf.d' $xdg_data_dirs$dir_sep'vendor_conf.d'
 
     # Ensure that extra directories are always included.
     if not contains -- $__extra_completionsdir $__fish_vendor_completionsdirs
@@ -52,12 +76,12 @@ end
 # default functions/completions are included in the respective path.
 
 if not set -q fish_function_path
-    set fish_function_path $__fish_config_dir/functions $__fish_sysconf_dir/functions $__fish_vendor_functionsdirs
+    set fish_function_path $__fish_config_dir$dir_sep'functions' $__fish_sysconf_dir$dir_sep'functions' $__fish_vendor_functionsdirs
 end
 
 if not set -q fish_complete_path
-    set fish_complete_path $__fish_config_dir/completions $__fish_sysconf_dir/completions $__fish_vendor_completionsdirs
-    set -a fish_complete_path $__fish_cache_dir/generated_completions
+    set fish_complete_path $__fish_config_dir$dir_sep'completions' $__fish_sysconf_dir$dir_sep'completions' $__fish_vendor_completionsdirs
+    set -a fish_complete_path $__fish_cache_dir$dir_sep'generated_completions'
 end
 
 # Add a handler for when fish_user_path changes, so we can apply the same changes to PATH
@@ -65,7 +89,11 @@ function __fish_reconstruct_path -d "Update PATH when fish_user_paths changes" -
     # Deduplicate $fish_user_paths
     # This should help with people appending to it in config.fish
     set -l new_user_path
-    for path in (string split : -- $fish_user_paths)
+    set -l user_paths $fish_user_paths
+    if not builtin -q __fish_native_fs
+        set user_paths (string split : -- $user_paths)
+    end
+    for path in $user_paths
         if not contains -- $path $new_user_path
             set -a new_user_path $path
         end
@@ -86,9 +114,8 @@ function __fish_reconstruct_path -d "Update PATH when fish_user_paths changes" -
 
     set -g __fish_added_user_paths
     if set -q fish_user_paths
-        # Explicitly split on ":" because $fish_user_paths might not be a path variable,
-        # but $PATH definitely is.
-        for x in (string split ":" -- $fish_user_paths[-1..1])
+        # Native drive letters are identities, not Unix colon-list delimiters.
+        for x in $new_user_path[-1..1]
             if set -l idx (contains --index -- $x $local_path)
                 set -e local_path[$idx]
             else
@@ -104,8 +131,10 @@ end
 #
 # Launch debugger on SIGTRAP
 #
-function fish_sigtrap_handler --on-signal TRAP --no-scope-shadowing --description "TRAP handler: debug prompt"
-    breakpoint
+if not builtin -q __fish_native_fs
+    function fish_sigtrap_handler --on-signal TRAP --no-scope-shadowing --description "TRAP handler: debug prompt"
+        breakpoint
+    end
 end
 
 #
@@ -153,8 +182,8 @@ end
 # As last part of initialization, source the conf directories.
 # Implement precedence (User > Admin > Extra (e.g. vendors) > Fish) by basically doing "basename".
 set -l sourcelist
-for file in $__fish_config_dir/conf.d/*.fish $__fish_sysconf_dir/conf.d/*.fish $__fish_vendor_confdirs/*.fish
-    set -l basename (string replace -r '^.*/' '' -- $file)
+for file in $__fish_config_dir$dir_sep'conf.d'$dir_sep*.fish $__fish_sysconf_dir$dir_sep'conf.d'$dir_sep*.fish $__fish_vendor_confdirs$dir_sep*.fish
+    set -l basename (string replace -r $basename_pattern '' -- $file)
     contains -- $basename $sourcelist
     and continue
     set sourcelist $sourcelist $basename

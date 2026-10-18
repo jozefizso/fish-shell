@@ -326,7 +326,8 @@ jobs:
         foreach ($phase in @(
           @{ Name = 'n1'; Tests = @('N1_PATHS', 'N1_DISCOVERY', 'N1_GLOB'); Gates = @('N1-PATHS', 'N1-DISCOVERY', 'N1-GLOB') },
           @{ Name = 'n2'; Tests = @('N2_STREAM', 'N2_REDIRECT', 'N2_LIFETIME'); Gates = @('N2-STREAM', 'N2-REDIRECT', 'N2-LIFETIME') },
-          @{ Name = 'n3'; Tests = @('N3_LANGUAGE', 'N3_CAPTURE', 'N3_SCRIPTS'); Gates = @('N3-LANGUAGE', 'N3-CAPTURE', 'N3-SCRIPTS') }
+          @{ Name = 'n3'; Tests = @('N3_LANGUAGE', 'N3_CAPTURE', 'N3_SCRIPTS'); Gates = @('N3-LANGUAGE', 'N3-CAPTURE', 'N3-SCRIPTS') },
+          @{ Name = 'n4'; Tests = @('N4_STARTUP', 'N4_SHARING', 'N4_RECOVERY'); Gates = @('N4-STARTUP', 'N4-SHARING', 'N4-RECOVERY') }
         )) {
           foreach ($profile in @('debug', 'release')) {
             $profileArgs = @()
@@ -354,6 +355,23 @@ jobs:
               })
               if ($casePasses.Count -ne 16 -or @(Compare-Object ($expectedCases | Sort-Object) ($casePasses | Sort-Object)).Count -ne 0) {
                 throw "N3 must execute every mapped behavioral family against both artifacts in the $profile harness"
+              }
+            }
+            if ($phase.Name -eq 'n4') {
+              $cases = @(
+                'N4-STARTUP/configuration-autoload-save', 'N4-STARTUP/history-modes',
+                'N4-SHARING/universal-values-events', 'N4-SHARING/storage-transactions',
+                'N4-SHARING/history-sessions', 'N4-SHARING/locale-timezone',
+                'N4-RECOVERY/universal-formats-errors', 'N4-RECOVERY/storage-crash-acl',
+                'N4-RECOVERY/autoload-save-errors', 'N4-RECOVERY/history-recovery',
+                'N4-RECOVERY/directory-notifications'
+              )
+              $casePasses = @(Get-Content "native-windows-results/$name.txt" | Where-Object { $_ -match '^PASS-CASE (debug|release) N4-' })
+              $expectedCases = @(foreach ($artifact in @('debug', 'release')) {
+                foreach ($case in $cases) { "PASS-CASE $artifact $case" }
+              })
+              if ($casePasses.Count -ne 22 -or @(Compare-Object ($expectedCases | Sort-Object) ($casePasses | Sort-Object)).Count -ne 0) {
+                throw "N4 must execute the exact eleven behavioral families against both artifacts in the $profile harness"
               }
             }
           }

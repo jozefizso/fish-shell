@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::{os::fd::RawFd, sync::LazyLock};
 
 #[cfg(apple)]
@@ -12,6 +13,11 @@ mod kqueue;
 #[cfg(all(test, any(apple, any(target_os = "android", target_os = "linux"), bsd)))]
 mod test_helpers;
 
+#[cfg(windows)]
+pub mod windows;
+#[cfg(windows)]
+pub use windows::NativeDirectoryWatcher;
+
 /// The "universal notifier" is an object responsible for broadcasting and receiving universal
 /// variable change notifications. These notifications do not contain the change, but merely
 /// indicate that the uvar file has changed. It is up to the uvar subsystem to re-read the file.
@@ -23,6 +29,7 @@ mod test_helpers;
 /// fd. This will be added to the "read" file descriptor list in select(). If the fd is readable,
 /// notification_fd_became_readable() will be called; that function should be overridden to return
 /// true if the file may have changed.
+#[cfg(unix)]
 pub trait UniversalNotifier: Send + Sync {
     // Triggers a notification.
     fn post_notification(&self);
@@ -36,8 +43,10 @@ pub trait UniversalNotifier: Send + Sync {
 }
 
 /// A notifier which does nothing.
+#[cfg(unix)]
 pub struct NullNotifier;
 
+#[cfg(unix)]
 impl UniversalNotifier for NullNotifier {
     fn post_notification(&self) {}
 
@@ -51,6 +60,7 @@ impl UniversalNotifier for NullNotifier {
 }
 
 /// Create a notifier.
+#[cfg(unix)]
 pub fn create_notifier() -> Box<dyn UniversalNotifier> {
     #[cfg(apple)]
     if let Some(notifier) = notifyd::NotifydNotifier::new() {
@@ -67,6 +77,7 @@ pub fn create_notifier() -> Box<dyn UniversalNotifier> {
     Box::new(NullNotifier)
 }
 
+#[cfg(unix)]
 pub fn default_notifier() -> &'static dyn UniversalNotifier {
     // Default instance. Other instances are possible for testing.
     static DEFAULT_NOTIFIER: LazyLock<Box<dyn UniversalNotifier>> = LazyLock::new(create_notifier);

@@ -1,13 +1,19 @@
 //! Real native child used by the Windows acceptance suite; never implements shell behavior.
 #[cfg(windows)]
+#[path = "n2.rs"]
+mod windows_native_n2;
+#[cfg(windows)]
+#[path = "../windows_n4/notification_probe.rs"]
+mod windows_native_n4_notifications;
+#[cfg(windows)]
+#[path = "../windows_n4/storage_probe.rs"]
+mod windows_native_n4_storage;
+#[cfg(windows)]
 #[path = "runtime.rs"]
 mod windows_native_runtime;
 #[cfg(windows)]
 #[path = "transport.rs"]
 mod windows_native_transport;
-#[cfg(windows)]
-#[path = "n2.rs"]
-mod windows_native_n2;
 #[cfg(windows)]
 fn main() {
     use std::io::{Read, Write};
@@ -28,6 +34,36 @@ fn main() {
     match mode.to_str().expect("Unicode mode") {
         "runtime-init" => windows_native_runtime::run(),
         mode if mode.starts_with("n2-") => windows_native_n2::run(mode, args.collect()),
+        "known-folder-roots" => {
+            let (local, profile) =
+                fish::path::native_known_folder_roots().expect("native known folders");
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "{}", local.to_str().expect("Unicode local app data")).unwrap();
+            writeln!(out, "{}", profile.to_str().expect("Unicode profile")).unwrap();
+            let defaults = fish::path::native_state_paths(&fish::env::EnvNull::new())
+                .expect("read-only default state policy");
+            for path in defaults {
+                writeln!(out, "{}", path.to_str().expect("Unicode default root")).unwrap();
+            }
+        }
+        "n4-notifications" => windows_native_n4_notifications::run(
+            std::path::Path::new(&args.next().expect("local root")),
+            std::path::Path::new(&args.next().expect("required UNC root")),
+        ),
+        "n4-barrier" => {
+            let ready = args.next().expect("ready event");
+            let release = args.next().expect("release event");
+            if let Err(error) = windows_native_n4_storage::barrier(&ready, &release) {
+                writeln!(std::io::stderr().lock(), "{error}").unwrap();
+                std::process::exit(1);
+            }
+        }
+        mode @ ("n4-storage-append" | "n4-storage-rewrite" | "n4-rewrite") => {
+            if let Err(error) = windows_native_n4_storage::run(mode, args) {
+                writeln!(std::io::stderr().lock(), "{error}").unwrap();
+                std::process::exit(1);
+            }
+        }
         "transport-console-builtin" => {
             windows_native_transport::run_console_builtin(&args.next().expect("fish script"))
         }
@@ -59,7 +95,9 @@ fn main() {
             }
             let result = match mode {
                 "n1-rename" => std::fs::rename(source, args.next().expect("destination path")),
-                "n1-copy" => std::fs::copy(source, args.next().expect("destination path")).map(|_| ()),
+                "n1-copy" => {
+                    std::fs::copy(source, args.next().expect("destination path")).map(|_| ())
+                }
                 "n1-remove-dir" => std::fs::remove_dir(source),
                 _ => unreachable!(),
             };

@@ -34,11 +34,12 @@ pub mod fish_key_reader;
 pub mod function;
 pub mod functions;
 pub mod r#gettext;
-#[cfg(unix)]
 pub mod history;
 #[cfg(unix)]
 pub mod jobs;
 pub mod math;
+#[cfg(windows)]
+pub mod native_fs;
 pub mod path;
 pub mod printf;
 pub mod pwd;

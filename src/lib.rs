@@ -22,7 +22,6 @@ pub mod editable_line;
 pub mod env;
 #[cfg_attr(windows, path = "env_dispatch/windows.rs")]
 pub mod env_dispatch;
-#[cfg(unix)]
 pub mod env_universal_common;
 pub mod event;
 #[cfg_attr(windows, path = "exec_windows.rs")]
@@ -37,12 +36,11 @@ pub mod fds;
 pub mod flog;
 #[cfg(unix)]
 pub mod fork_exec;
-#[cfg(unix)]
+#[cfg_attr(windows, path = "fs/windows.rs")]
 pub mod fs;
 pub mod function;
 pub mod global_safety;
 pub mod highlight;
-#[cfg(unix)]
 pub mod history;
 #[cfg(unix)]
 pub mod input;
@@ -103,7 +101,6 @@ pub mod topic_monitor;
 pub mod trace;
 #[cfg(unix)]
 pub mod tty_handoff;
-#[cfg(unix)]
 pub mod universal_notifier;
 pub mod wait_handle;
 pub mod wildcard;

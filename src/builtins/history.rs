@@ -3,6 +3,7 @@
 use crate::builtins::Error;
 use crate::history::in_private_mode;
 use crate::history::{self, History, history_id};
+#[cfg(unix)]
 use crate::reader::commandline_get_state;
 use crate::{err_fmt, err_str};
 
@@ -253,9 +254,13 @@ pub fn history(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr])
 
     // Use the default history if we have none (which happens if invoked non-interactively, e.g.
     // from webconfig.py.
+    #[cfg(unix)]
     let history = commandline_get_state(true)
         .history
         .unwrap_or_else(|| History::new(history_id(parser.vars())));
+    #[cfg(windows)]
+    let history =
+        crate::reader::current_history().unwrap_or_else(|| History::new(history_id(parser.vars())));
 
     // If a history command hasn't already been specified via a flag check the first word.
     // Note that this can be simplified after we eliminate allowing subcommands as flags.
@@ -315,15 +320,24 @@ pub fn history(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr])
             if check_for_unexpected_hist_args(&opts, cmd, args, streams) {
                 return Err(STATUS_INVALID_ARGS);
             }
-            history.clear();
-            history.save();
+            if let Err(err) = history.clear_checked() {
+                err_fmt!("could not clear history: %s", err.to_string())
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_CMD_ERROR);
+            }
         }
         HistCmd::ClearSession => {
             if check_for_unexpected_hist_args(&opts, cmd, args, streams) {
                 return Err(STATUS_INVALID_ARGS);
             }
             history.clear_session();
-            history.save();
+            if let Err(err) = history.save_checked() {
+                err_fmt!("could not save history: %s", err.to_string())
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_CMD_ERROR);
+            }
         }
         HistCmd::Merge => {
             if check_for_unexpected_hist_args(&opts, cmd, args, streams) {
@@ -336,13 +350,23 @@ pub fn history(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr])
                     .finish(streams);
                 return Err(STATUS_INVALID_ARGS);
             }
-            history.incorporate_external_changes();
+            if let Err(err) = history.incorporate_external_changes_checked() {
+                err_fmt!("could not merge history: %s", err.to_string())
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_CMD_ERROR);
+            }
         }
         HistCmd::Save => {
             if check_for_unexpected_hist_args(&opts, cmd, args, streams) {
                 return Err(STATUS_INVALID_ARGS);
             }
-            history.save();
+            if let Err(err) = history.save_checked() {
+                err_fmt!("could not save history: %s", err.to_string())
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_CMD_ERROR);
+            }
         }
         HistCmd::Append => {
             for &arg in args {

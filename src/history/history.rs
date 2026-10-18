@@ -1,29 +1,29 @@
 //! Fish supports multiple shells writing to history at once. Here is its strategy:
 //!
-//! 1. All history files are append-only. Data, once written, is never modified.
+//! 1. Unix normally appends history records. Native Windows publishes complete snapshots so
+//!    interrupted writes cannot leave a partial append in the acknowledged history file.
 //!
 //! 2. A history file may be re-written ("vacuumed"). This involves reading in the file and writing
 //!    a new one, while performing maintenance tasks: discarding items in an LRU fashion until we
-//!    reach the desired maximum count, removing duplicates, and sorting them by timestamp
-//!    (eventually, not implemented yet). The new file is atomically moved into place via `rename()`.
+//!    reach the desired maximum count, removing duplicates, and sorting them by timestamp.
+//!    The filesystem backend atomically publishes the replacement.
 //!
-//! 3. History files are mapped in via `mmap()`. This allows only storing one `usize` per item (its
-//!    offset), and lazily loading items on demand, which reduces memory consumption.
+//! 3. History files use immutable snapshots (mappings on Unix, owned bytes on Windows). Only one
+//!    `usize` per item (its offset) is stored, and items are decoded lazily on demand.
 //!
 //! 4. Accesses to the history file need to be synchronized. This is achieved by functionality in
-//!    `src/fs.rs`. By default, `flock()` is used for locking. If that is unavailable, an imperfect
-//!    fallback solution attempts to detect races and retries if a race is detected.
+//!    the shared filesystem transaction API. Windows uses a stable parent lock file and
+//!    native file identity checks; Unix retains its platform locking policy.
 
+#[cfg(unix)]
+use crate::fs::{LockedFile, LockingMode, WriteMethod, fsync};
 use crate::{
     ast::{self, Kind, Node as _},
     common::valid_var_name,
     env::{EnvMode, EnvSetMode, EnvStack, EnvVar, Environment},
     expand::{ExpandFlags, expand_one},
     flog::{flog, flogf},
-    fs::{
-        LockedFile, LockingMode, PotentialUpdate, WriteMethod, fsync, lock_and_load,
-        rewrite_via_temporary_file,
-    },
+    fs::{PotentialUpdate, lock_and_load, rewrite_via_temporary_file},
     highlight::highlight_and_colorize,
     history::file::{HistoryFile, RawHistoryFile},
     io::IoStreams,
@@ -40,20 +40,27 @@ use crate::{
 };
 use fish_common::{UnescapeStringStyle, unescape_string};
 use fish_wcstringutil::{subsequence_in_string, trim_in_place};
-use fish_widestring::{ANY_STRING, bytes2wcstring, cstr2wcstring, subslice_position};
+#[cfg(unix)]
+use fish_widestring::cstr2wcstring;
+use fish_widestring::{ANY_STRING, bytes2wcstring, subslice_position};
 use lru::LruCache;
 use rand::RngExt as _;
+#[cfg(unix)]
+use std::time::{Duration, UNIX_EPOCH};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
-    ffi::{CStr, CString},
     fs::File,
     io::{BufRead, BufWriter, Write as _},
-    mem::MaybeUninit,
     num::NonZeroUsize,
     ops::ControlFlow,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::SystemTime,
+};
+#[cfg(unix)]
+use std::{
+    ffi::{CStr, CString},
+    mem::MaybeUninit,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -311,6 +318,51 @@ static HISTORIES: Mutex<BTreeMap<HistoryId, Arc<History>>> = Mutex::new(BTreeMap
 enum DeletionScope {
     SessionOnly,
     AllSessions,
+    /// An explicit global deletion followed by a staged native clear-session.
+    #[cfg(windows)]
+    AllSessionsAndLocal,
+}
+
+#[cfg(windows)]
+impl DeletionScope {
+    fn clears_local(self) -> bool {
+        matches!(self, Self::SessionOnly | Self::AllSessionsAndLocal)
+    }
+}
+
+/// Publication data is returned through the transaction; a failed replacement
+/// must not advance native ownership to an unacknowledged duplicate.
+#[derive(Default)]
+struct HistoryRewrite {
+    #[cfg(windows)]
+    acknowledged: HashMap<WString, NativeSavedCommand>,
+}
+
+#[cfg(windows)]
+struct NativeSavedCommand {
+    first_added: i64,
+    last_added: i64,
+    required_paths: PathList,
+    /// The predecessor actually observed under the save lock, not a stale read baseline.
+    previous: Option<HistoryItem>,
+}
+
+#[cfg(windows)]
+impl NativeSavedCommand {
+    fn new(item: &HistoryItem, previous: Option<HistoryItem>) -> Self {
+        Self {
+            first_added: time_to_seconds(item.first_added_timestamp()),
+            last_added: time_to_seconds(item.last_added_timestamp()),
+            required_paths: item.required_paths.clone(),
+            previous,
+        }
+    }
+
+    fn matches(&self, item: &HistoryItem) -> bool {
+        self.first_added == time_to_seconds(item.first_added_timestamp())
+            && self.last_added == time_to_seconds(item.last_added_timestamp())
+            && self.required_paths == item.required_paths
+    }
 }
 
 struct HistoryImpl {
@@ -340,7 +392,15 @@ struct HistoryImpl {
     /// the boundary are considered "old". Items whose timestamps are > the boundary are new, and are
     /// ignored by this instance (unless they came from this instance). The timestamp may be adjusted
     /// by incorporate_external_changes().
+    #[cfg(unix)]
     boundary_timestamp: SystemTime,
+    /// Native sessions pin owned baseline bytes until an explicit successful merge.
+    /// Notifications mark disk state stale without importing another session's commands.
+    #[cfg(windows)]
+    native_snapshot_stale: bool,
+    /// Last acknowledged disk versions survive merging/compacting unsaved duplicates.
+    #[cfg(windows)]
+    native_committed: HashMap<WString, NativeSavedCommand>,
     /// How many items we add until the next vacuum. Initially a random value.
     countdown_to_vacuum: Option<usize>,
     /// Thread pool for background operations.
@@ -370,8 +430,7 @@ impl HistoryImpl {
             path.to_owned()
         };
 
-        path.push('/');
-        path.push_utfstr(&self.name);
+        crate::path::append_path_component(&mut path, &self.name);
         path.push_utfstr(L!("_history"));
 
         // For custom directories, skip wrealpath since file may not exist yet
@@ -393,6 +452,21 @@ impl HistoryImpl {
             return;
         }
 
+        // Pin the native baseline before a first automatic save can publish our own items.
+        #[cfg(windows)]
+        self.load_old_if_needed();
+        #[cfg(windows)]
+        match self.deleted_items.get(item.str()).copied() {
+            Some(DeletionScope::SessionOnly) => {
+                self.deleted_items.remove(item.str());
+            }
+            Some(DeletionScope::AllSessionsAndLocal) => {
+                self.deleted_items
+                    .insert(item.contents.clone(), DeletionScope::AllSessions);
+            }
+            _ => {}
+        }
+
         // Try merging with the last item.
         let item = if let Some(last) = self.new_items.last_mut() {
             match last.merge(item) {
@@ -400,6 +474,15 @@ impl HistoryImpl {
                     // We merged, so we don't have to add anything. Maybe this item was pending, but it just got
                     // merged with an item that is not pending, so pending just becomes false.
                     self.has_pending_item = false;
+                    #[cfg(windows)]
+                    {
+                        self.first_unwritten_new_item_index = self
+                            .first_unwritten_new_item_index
+                            .min(self.new_items.len() - 1);
+                        if do_save {
+                            self.save_unless_disabled();
+                        }
+                    }
                     return;
                 }
                 Err(item) => item,
@@ -418,25 +501,35 @@ impl HistoryImpl {
 
     /// Internal function.
     fn clear_file_state(&mut self) {
-        // Erase everything we know about our file.
-        self.file_contents = None;
+        #[cfg(unix)]
+        {
+            self.file_contents = None;
+        }
+        #[cfg(windows)]
+        {
+            self.native_snapshot_stale = true;
+        }
     }
 
-    /// Returns a timestamp for new items - see the implementation for a subtlety.
+    /// Native timestamps are real wall time; immutable baseline membership defines visibility.
+    /// Unix timestamps remain beyond the boundary's serialized second for session deletion.
     fn timestamps_as_of_now(&self) -> Timestamps {
-        let mut now = SystemTime::now();
-        // Big hack: do not allow timestamps equal to our boundary date. This is because we include
-        // items whose timestamps are equal to our boundary when reading old history, so we can catch
-        // "just closed" items. But this means that we may interpret our own items, that we just wrote,
-        // as old items, if we wrote them in the same second as our birthdate.
-        if now.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
-            == self
-                .boundary_timestamp
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_secs())
+        let now = SystemTime::now();
+        #[cfg(unix)]
+        let mut now = now;
+        // File timestamps have second precision, and items at the boundary are old history.
+        // Keep new items beyond that entire second, including when a merge has advanced the
+        // boundary ahead of wall time. Otherwise clear-session can mistake them for old items.
+        #[cfg(unix)]
+        if now < self.boundary_timestamp
+            || now.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+                == self
+                    .boundary_timestamp
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs())
         {
-            now += Duration::from_secs(1);
+            now = self.boundary_timestamp + Duration::from_secs(1);
         }
         Timestamps {
             last_added: now,
@@ -459,7 +552,11 @@ impl HistoryImpl {
             Ok((file_id, history_file)) => {
                 self.history_file_id = Some(file_id);
                 let _profiler = TimeProfiler::new("populate_from_file_contents");
-                let file_contents = history_file.decode(Some(self.boundary_timestamp));
+                #[cfg(unix)]
+                let cutoff = Some(self.boundary_timestamp);
+                #[cfg(windows)]
+                let cutoff = None;
+                let file_contents = history_file.decode(cutoff);
                 flogf!(
                     history,
                     "Loaded %u old items",
@@ -524,7 +621,7 @@ impl HistoryImpl {
         &self,
         existing_file: &File,
         dst: &mut File,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<HistoryRewrite> {
         // We are reading FROM existing_file and writing TO dst
 
         // Make an LRU cache to save only the last N elements.
@@ -532,11 +629,14 @@ impl HistoryImpl {
         /// When we rewrite the history, the number of items we keep.
         const HISTORY_SAVE_MAX: NonZeroUsize = NonZeroUsize::new(1024 * 256).unwrap();
         let mut lru = LruCache::new(HISTORY_SAVE_MAX);
+        #[cfg(windows)]
+        let mut publication = HistoryRewrite::default();
 
         // Read in existing items (which may have changed out from underneath us, so don't trust our
         // old file contents).
         let file_id = file_id_for_file(existing_file)?;
-        if let Ok(local_file) = RawHistoryFile::create(existing_file, file_id) {
+        if file_id.size != 0 {
+            let local_file = RawHistoryFile::create(existing_file, file_id)?;
             for offset in local_file.offsets(None) {
                 // Try decoding an old item.
                 let Some(old_item) = local_file.decode_item(offset) else {
@@ -548,10 +648,24 @@ impl HistoryImpl {
 
                 // Check if this item should be deleted.
                 if let Some(&scope) = self.deleted_items.get(old_item.str()) {
-                    // If old item is newer than session always erase if in deleted.
-                    // If old item is older and in deleted items don't erase if added by clear_session.
+                    #[cfg(unix)]
                     let delete = old_item.first_added_timestamp() > self.boundary_timestamp
                         || scope == DeletionScope::AllSessions;
+                    #[cfg(windows)]
+                    let delete = if scope != DeletionScope::SessionOnly {
+                        true
+                    } else {
+                        // An unsaved repeat may have changed/compacted new_items. Only
+                        // the separately retained acknowledged version belongs to us.
+                        let saved = self
+                            .native_committed
+                            .get(old_item.str())
+                            .filter(|saved| saved.matches(&old_item));
+                        if let Some(previous) = saved.and_then(|saved| saved.previous.as_ref()) {
+                            lru.add_item(previous.clone());
+                        }
+                        saved.is_some()
+                    };
                     if delete {
                         continue;
                     }
@@ -566,10 +680,37 @@ impl HistoryImpl {
             .iter()
             .skip(self.first_unwritten_new_item_index)
         {
+            #[cfg(windows)]
+            if self
+                .deleted_items
+                .get(item.str())
+                .is_some_and(|scope| scope.clears_local())
+            {
+                continue;
+            }
             if item.should_write_to_disk() {
+                #[cfg(windows)]
+                let previous = {
+                    let old = lru.peek(item.str());
+                    match (self.native_committed.get(item.str()), old) {
+                        (Some(saved), Some(old)) if saved.matches(old) => saved.previous.clone(),
+                        (_, old) => old.cloned(),
+                    }
+                };
                 lru.add_item(item.clone());
+                #[cfg(windows)]
+                publication.acknowledged.insert(
+                    item.contents.clone(),
+                    NativeSavedCommand::new(
+                        lru.peek(item.str()).expect("just inserted history item"),
+                        previous,
+                    ),
+                );
             }
         }
+
+        #[cfg(windows)]
+        publication.acknowledged.retain(|key, _| lru.contains(key));
 
         // Stable-sort our items by timestamp
         // This is because we may have read "old" items with a later timestamp than our "new" items
@@ -585,7 +726,10 @@ impl HistoryImpl {
             item.write_to(&mut buffer)?;
         }
         buffer.flush()?;
-        Ok(())
+        #[cfg(windows)]
+        return Ok(publication);
+        #[cfg(unix)]
+        Ok(HistoryRewrite::default())
     }
 
     /// Saves history by rewriting the file.
@@ -596,26 +740,36 @@ impl HistoryImpl {
             self.new_items.len() - self.first_unwritten_new_item_index
         );
 
-        let rewrite =
-            |old_file: &File, tmp_file: &mut File| -> std::io::Result<PotentialUpdate<()>> {
-                let result = self.rewrite_to_temporary_file(old_file, tmp_file);
-                if let Err(err) = result {
+        let rewrite = |old_file: &File, tmp_file: &mut File| {
+            let data = self
+                .rewrite_to_temporary_file(old_file, tmp_file)
+                .map_err(|err| {
                     flog!(
                         history_file,
                         "Error writing to temporary history file:",
                         err
                     );
-                    return Err(err);
-                }
-                Ok(PotentialUpdate {
-                    do_save: true,
-                    data: (),
-                })
-            };
+                    err
+                })?;
+            Ok(PotentialUpdate {
+                do_save: true,
+                data,
+            })
+        };
 
-        let (file_id, _) = rewrite_via_temporary_file(history_path, rewrite)?;
+        let (file_id, publication) = rewrite_via_temporary_file(history_path, rewrite)?;
         self.history_file_id = Some(file_id);
 
+        #[cfg(windows)]
+        {
+            for key in self.deleted_items.keys() {
+                self.native_committed.remove(key);
+            }
+            self.native_committed.extend(publication.data.acknowledged);
+            self.finish_native_session_deletions();
+        }
+        #[cfg(unix)]
+        let _ = publication;
         // We've saved everything, so we have no more unsaved items.
         self.first_unwritten_new_item_index = self.new_items.len();
 
@@ -629,6 +783,7 @@ impl HistoryImpl {
         Ok(())
     }
 
+    #[cfg(unix)]
     /// Saves history by appending to the file.
     fn save_internal_via_appending(&mut self, history_path: &wstr) -> std::io::Result<()> {
         flogf!(
@@ -693,12 +848,12 @@ impl HistoryImpl {
     }
 
     /// Saves history.
-    fn save(&mut self, vacuum: bool) {
+    fn save(&mut self, vacuum: bool) -> std::io::Result<()> {
         // Nothing to do if there's no new items.
         if self.first_unwritten_new_item_index >= self.new_items.len()
             && self.deleted_items.is_empty()
         {
-            return;
+            return Ok(());
         }
 
         // Compact our new items so we don't have duplicates.
@@ -706,37 +861,29 @@ impl HistoryImpl {
 
         if self.name.is_empty() {
             // We're in the "incognito" mode. Pretend we've saved the history.
+            #[cfg(windows)]
+            self.finish_native_session_deletions();
             self.first_unwritten_new_item_index = self.new_items.len();
             self.deleted_items.clear();
             self.clear_file_state();
-            return;
+            return Ok(());
         }
 
-        let history_path = match self.history_file_path() {
-            Ok(history_path) => history_path.unwrap(),
-            Err(e) => {
-                flog!(history, "Saving history failed:", e);
-                return;
-            }
-        };
+        let history_path = self.history_file_path()?.unwrap();
 
-        // Try saving. If we have items to delete, we have to rewrite the file. If we do not, we can
-        // append to it.
-        let mut ok = false;
+        // Unix may fast-append if there are no deletions; otherwise merge and rewrite.
+        // Native saves always replace a complete snapshot: process interruption must not leave
+        // a partial append that could consume the next acknowledged command as a corrupt tail.
+        #[cfg(unix)]
         if !vacuum && self.deleted_items.is_empty() {
-            // Try doing a fast append.
-            if let Err(e) = self.save_internal_via_appending(&history_path) {
-                flog!(history, "Appending to history failed:", e);
-            } else {
-                ok = true;
+            match self.save_internal_via_appending(&history_path) {
+                Ok(()) => return Ok(()),
+                Err(e) => flog!(history, "Appending to history failed:", e),
             }
         }
-        if !ok {
-            // We did not or could not append; rewrite the file ("vacuum" it).
-            if let Err(e) = self.save_internal_via_rewrite(&history_path) {
-                flog!(history, "Rewriting history failed:", e);
-            }
-        }
+        #[cfg(windows)]
+        let _ = vacuum;
+        self.save_internal_via_rewrite(&history_path)
     }
 
     /// Saves history unless doing so is disabled.
@@ -771,7 +918,9 @@ impl HistoryImpl {
         } else {
             "save no vacuum"
         });
-        self.save(vacuum);
+        if let Err(err) = self.save(vacuum) {
+            flog!(history, "Saving history failed:", err);
+        }
     }
 
     fn new(name: WString, custom_directory: Option<WString>) -> Self {
@@ -785,7 +934,12 @@ impl HistoryImpl {
             deleted_items: HashMap::new(),
             file_contents: None,
             history_file_id: None,
+            #[cfg(unix)]
             boundary_timestamp: SystemTime::now(),
+            #[cfg(windows)]
+            native_snapshot_stale: false,
+            #[cfg(windows)]
+            native_committed: HashMap::new(),
             countdown_to_vacuum: None,
             // Up to 8 threads, no soft min.
             thread_pool: ThreadPool::new(0, 8),
@@ -828,6 +982,14 @@ impl HistoryImpl {
 
     /// Remove a history item.
     fn remove(&mut self, str_to_remove: &wstr) {
+        #[cfg(windows)]
+        {
+            self.load_old_if_needed();
+            self.file_contents
+                .as_mut()
+                .unwrap()
+                .remove_command(str_to_remove);
+        }
         // Add to our list of deleted items.
         self.deleted_items
             .insert(str_to_remove.to_owned(), DeletionScope::AllSessions);
@@ -864,33 +1026,70 @@ impl HistoryImpl {
     }
 
     /// Irreversibly clears history.
-    fn clear(&mut self) {
-        self.new_items.clear();
-        self.deleted_items.clear();
-        self.first_unwritten_new_item_index = 0;
-        self.clear_file_state();
-        if let Ok(Some(filename)) = self.history_file_path() {
-            // Keep an empty file to prevent reimporting bash history.
-            if let Err(err) = rewrite_via_temporary_file(&filename, |_, _| {
+    fn clear(&mut self) -> std::io::Result<()> {
+        // Do not discard local state until the replacement has actually committed.
+        if let Some(filename) = self.history_file_path()? {
+            let (file_id, _) = rewrite_via_temporary_file(&filename, |_, _| {
                 Ok(PotentialUpdate {
                     do_save: true,
                     data: (),
                 })
-            }) {
-                flog!(history_file, "Error clearing history file:", err);
-            }
+            })?;
+            self.history_file_id = Some(file_id);
         }
+        self.new_items.clear();
+        self.deleted_items.clear();
+        self.first_unwritten_new_item_index = 0;
+        self.has_pending_item = false;
+        #[cfg(unix)]
+        self.clear_file_state();
+        #[cfg(windows)]
+        {
+            self.file_contents = Some(HistoryFile::create_empty());
+            self.native_snapshot_stale = false;
+            self.native_committed.clear();
+        }
+        Ok(())
     }
 
     /// Clears only session.
     fn clear_session(&mut self) {
         for item in &self.new_items {
-            self.deleted_items
-                .insert(item.str().to_owned(), DeletionScope::SessionOnly);
+            let scope = self
+                .deleted_items
+                .entry(item.str().to_owned())
+                .or_insert(DeletionScope::SessionOnly);
+            #[cfg(windows)]
+            if *scope == DeletionScope::AllSessions {
+                *scope = DeletionScope::AllSessionsAndLocal;
+            }
+            #[cfg(unix)]
+            let _ = scope;
         }
 
-        self.new_items.clear();
-        self.first_unwritten_new_item_index = 0;
+        #[cfg(unix)]
+        {
+            self.new_items.clear();
+            self.first_unwritten_new_item_index = 0;
+        }
+    }
+
+    /// Commit the staged native session clear only after the disk transaction succeeds.
+    #[cfg(windows)]
+    fn finish_native_session_deletions(&mut self) {
+        let pending_was_deleted = self.has_pending_item
+            && self.new_items.last().is_some_and(|item| {
+                self.deleted_items
+                    .get(item.str())
+                    .is_some_and(|scope| scope.clears_local())
+            });
+        self.new_items.retain(|item| {
+            !self
+                .deleted_items
+                .get(item.str())
+                .is_some_and(|scope| scope.clears_local())
+        });
+        self.has_pending_item &= !pending_was_deleted;
     }
 
     /// Import a bash command history file. Bash's history format is very simple: just lines with
@@ -920,29 +1119,83 @@ impl HistoryImpl {
     }
 
     /// Incorporates the history of other shells into this history.
-    fn incorporate_external_changes(&mut self) {
-        // To incorporate new items, we simply update our timestamp to now, so that items from previous
-        // instances get added. We then clear the file state so that we remap the file. Note that this
-        // is somewhat expensive because we will be going back over old items. An optimization would be
-        // to preserve old_item_offsets so that they don't have to be recomputed. (However, then items
-        // *deleted* in other instances would not show up here).
-        let new_timestamp = SystemTime::now();
-
-        // If for some reason the clock went backwards, we don't want to start dropping items; therefore
-        // we only do work if time has progressed. This also makes multiple calls cheap.
-        if new_timestamp > self.boundary_timestamp {
-            self.boundary_timestamp = new_timestamp;
-            self.clear_file_state();
-
-            // We also need to erase new items, since we go through those first, and that means we
-            // will not properly interleave them with items from other instances.
-            // We'll pick them up from the file (#2312)
-            // TODO: this will drop items that had no_persist set, how can we avoid that while still
-            // properly interleaving?
-            self.save(false);
-            self.new_items.clear();
-            self.first_unwritten_new_item_index = 0;
+    #[cfg(unix)]
+    fn incorporate_external_changes(&mut self) -> std::io::Result<()> {
+        // Save before advancing the boundary or dropping local state. Failed saves leave both
+        // pending deletions and commands available for a later retry.
+        self.save(false)?;
+        self.boundary_timestamp = self.boundary_timestamp.max(SystemTime::now());
+        // New commands deliberately avoid the session's initial boundary second. Include our
+        // acknowledged timestamps even when merging immediately, before the wall clock catches up.
+        if let Some(timestamp) = self
+            .new_items
+            .iter()
+            .filter(|item| item.should_write_to_disk())
+            .map(HistoryItem::first_added_timestamp)
+            .max()
+        {
+            self.boundary_timestamp = self.boundary_timestamp.max(timestamp);
         }
+        self.clear_file_state();
+        // Memory-only commands have no disk copy to reload. Preserve their pending status too.
+        let pending_is_memory = self.has_pending_item
+            && self
+                .new_items
+                .last()
+                .is_some_and(|item| !item.should_write_to_disk());
+        self.new_items.retain(|item| !item.should_write_to_disk());
+        self.first_unwritten_new_item_index = self.new_items.len();
+        self.has_pending_item = pending_is_memory;
+        Ok(())
+    }
+
+    /// Publish pending edits and capture the replacement while its cooperating transaction is held.
+    /// Any read/write/publish error leaves both the pinned baseline and local edits intact.
+    #[cfg(windows)]
+    fn incorporate_external_changes(&mut self) -> std::io::Result<()> {
+        let Some(path) = self.history_file_path()? else {
+            return self.save(false);
+        };
+        self.load_old_if_needed();
+        self.compact_new_items();
+        let (file_id, snapshot) = rewrite_via_temporary_file(&path, |old, temporary| {
+            if self.first_unwritten_new_item_index >= self.new_items.len()
+                && self.deleted_items.is_empty()
+            {
+                let raw = RawHistoryFile::create(old, file_id_for_file(old)?)?;
+                return Ok(PotentialUpdate {
+                    do_save: false,
+                    data: raw.decode(None),
+                });
+            }
+            self.rewrite_to_temporary_file(old, temporary)?;
+            let raw = RawHistoryFile::create(temporary, file_id_for_file(temporary)?)?;
+            Ok(PotentialUpdate {
+                do_save: true,
+                data: raw.decode(None),
+            })
+        })?;
+        let pending_is_memory = self.has_pending_item
+            && self
+                .new_items
+                .last()
+                .is_some_and(|item| !item.should_write_to_disk())
+            && self.new_items.last().is_some_and(|item| {
+                !self
+                    .deleted_items
+                    .get(item.str())
+                    .is_some_and(|scope| scope.clears_local())
+            });
+        self.finish_native_session_deletions();
+        self.new_items.retain(|item| !item.should_write_to_disk());
+        self.first_unwritten_new_item_index = self.new_items.len();
+        self.has_pending_item = pending_is_memory;
+        self.deleted_items.clear();
+        self.native_committed.clear();
+        self.file_contents = Some(snapshot.data);
+        self.history_file_id = Some(file_id);
+        self.native_snapshot_stale = false;
+        Ok(())
     }
 
     /// Gets all the history into a list. This is intended for the $history environment variable.
@@ -1112,14 +1365,21 @@ fn format_history_record(
     null_terminate: bool,
     parser: &mut Parser,
     color_enabled: bool,
-) -> WString {
+) -> std::io::Result<WString> {
     let mut result = WString::new();
-    let seconds = time_to_seconds(item.last_added_timestamp());
-    // This warns for musl, but the warning is useless to us - there is nothing we can or should do.
-    #[allow(deprecated)]
-    let seconds = seconds as libc::time_t;
-    let mut timestamp = MaybeUninit::uninit();
+    #[cfg(windows)]
+    if let Some(format) = show_time_format {
+        result.push_utfstr(&crate::locale::format_history_timestamp(
+            time_to_seconds(item.last_added_timestamp()),
+            format,
+        )?);
+    }
+    #[cfg(unix)]
     if let Some(show_time_format) = show_time_format.and_then(|s| CString::new(s).ok()) {
+        // The deprecated time_t alias is necessary for the platform's localtime ABI.
+        #[allow(deprecated)]
+        let seconds = time_to_seconds(item.last_added_timestamp()) as libc::time_t;
+        let mut timestamp = MaybeUninit::uninit();
         if !unsafe { libc::localtime_r(&seconds, timestamp.as_mut_ptr()).is_null() } {
             const MAX_TIMESTAMP_LENGTH: usize = 100;
             let mut timestamp_str = [0_u8; MAX_TIMESTAMP_LENGTH];
@@ -1147,7 +1407,7 @@ fn format_history_record(
 
     result.push_utfstr(&command);
     result.push(if null_terminate { '\0' } else { '\n' });
-    result
+    Ok(result)
 }
 
 /// Decide whether we ought to import a bash history line into fish. This is a very crude heuristic.
@@ -1213,7 +1473,7 @@ impl History {
     /// The history file will be stored at `{directory}/{name}_history`.
     /// If the directory is None, it will be stored at path_get_data().
     fn new_with_directory(id: HistoryId, directory: Option<WString>) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(HistoryImpl::new(
+        let imp = HistoryImpl::new(
             match id {
                 HistoryId::Memory(_) => WString::new(),
                 HistoryId::Disk {
@@ -1221,7 +1481,12 @@ impl History {
                 } => filename,
             },
             directory,
-        ))))
+        );
+        #[cfg(windows)]
+        let mut imp = imp;
+        #[cfg(windows)]
+        imp.load_old_if_needed();
+        Arc::new(Self(Mutex::new(imp)))
     }
 
     /// Returns the history with the given name, creating it if necessary, using the default data directory.
@@ -1343,7 +1608,9 @@ impl History {
             // cause us to lose file hinting for some commands, but it beats losing history items.
             imp.add(item, /*pending=*/ true, to_disk);
             if to_disk && needs_sync_write {
-                imp.save(false);
+                if let Err(err) = imp.save(false) {
+                    flog!(history, "Saving history failed:", err);
+                }
             }
         }
     }
@@ -1353,9 +1620,16 @@ impl History {
         self.imp().resolve_pending();
     }
 
-    /// Saves history.
+    /// Saves history automatically, logging failures and retaining unsaved changes.
     pub fn save(&self) {
-        self.imp().save(false);
+        if let Err(err) = self.save_checked() {
+            flog!(history, "Saving history failed:", err);
+        }
+    }
+
+    /// Saves history and acknowledges only a successfully committed transaction.
+    pub fn save_checked(&self) -> std::io::Result<()> {
+        self.imp().save(false)
     }
 
     /// Searches history.
@@ -1376,6 +1650,7 @@ impl History {
         let mut remaining = max_items;
         let mut collected = Vec::new();
         let mut output_error = false;
+        let mut format_error = false;
 
         // The function we use to act on each item.
         let mut func = |parser: &mut Parser, item: &HistoryItem| {
@@ -1383,13 +1658,23 @@ impl History {
                 return ControlFlow::Break(());
             }
             remaining -= 1;
-            let formatted_record = format_history_record(
+            let formatted_record = match format_history_record(
                 item,
                 show_time_format,
                 null_terminate,
                 parser,
                 color_enabled,
-            );
+            ) {
+                Ok(record) => record,
+                Err(err) => {
+                    streams.err.append(&wgettext_fmt!(
+                        "history: could not format timestamp: %s\n",
+                        err.to_string(),
+                    ));
+                    format_error = true;
+                    return ControlFlow::Break(());
+                }
+            };
 
             if reverse {
                 // We need to collect this for later.
@@ -1450,15 +1735,23 @@ impl History {
 
         // We are intentionally not returning false in case of an output error, as the user aborting the
         // output early (the most common case) isn't a reason to exit w/ a non-zero status code.
-        true
+        !format_error
     }
 
-    /// Irreversibly clears history.
+    /// Clears history, logging failures without discarding unsaved local commands.
     pub fn clear(&self) {
-        self.imp().clear();
+        if let Err(err) = self.clear_checked() {
+            flog!(history, "Clearing history failed:", err);
+        }
     }
 
-    /// Irreversibly clears history for the current session.
+    /// Clears history only after the empty replacement has committed.
+    pub fn clear_checked(&self) -> std::io::Result<()> {
+        self.imp().clear()
+    }
+
+    /// Clears history for the current session. On native Windows, the following save commits
+    /// the staged clear; until it succeeds local items remain available for recovery or retry.
     pub fn clear_session(&self) {
         self.imp().clear_session();
     }
@@ -1470,7 +1763,22 @@ impl History {
 
     /// Incorporates the history of other shells into this history.
     pub fn incorporate_external_changes(&self) {
-        self.imp().incorporate_external_changes();
+        if let Err(err) = self.incorporate_external_changes_checked() {
+            flog!(history, "Merging history failed:", err);
+        }
+    }
+
+    /// Merge another shell's history without dropping unacknowledged local changes.
+    pub fn incorporate_external_changes_checked(&self) -> std::io::Result<()> {
+        self.imp().incorporate_external_changes()
+    }
+
+    /// Whether a native disk notification or save has made the pinned session baseline stale.
+    /// Reading this flag never imports foreign history. A successful checked merge or full
+    /// clear establishes a fresh baseline and resets it; saves and notifications set it.
+    #[cfg(windows)]
+    pub fn native_snapshot_is_stale(&self) -> bool {
+        self.imp().native_snapshot_stale
     }
 
     /// Gets all the history into a list. This is intended for the $history environment variable.
@@ -1682,8 +1990,20 @@ pub fn save_all() {
     }
 }
 
+/// Mark native disk state stale without discarding pinned session bytes or local commands.
+/// `History::native_snapshot_is_stale()` exposes this invalidation; checked merge refreshes it.
+#[cfg(windows)]
+pub fn invalidate_native_snapshots() {
+    for history in HISTORIES.lock().unwrap().values() {
+        history.imp().clear_file_state();
+    }
+}
+
 /// Return the prefix for the files to be used for command and read history.
 pub fn history_id(vars: &dyn Environment) -> HistoryId {
+    if in_private_mode(vars) {
+        return HistoryId::Memory(MemoryHistoryId::PrivateMode);
+    }
     history_id_from_var(vars.get(L!("fish_history")))
 }
 
@@ -1780,7 +2100,7 @@ pub fn in_private_mode(vars: &dyn Environment) -> bool {
     vars.get_unless_empty(L!("fish_private_mode")).is_some()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         History, HistoryItem, HistorySearch, PathList, PersistenceMode, SearchDirection,
@@ -1842,6 +2162,54 @@ mod tests {
             result.push(c);
         }
         result
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_clear_session_after_future_boundary_merge() {
+        let tmpdir = fish_tempfile::new_dir().unwrap();
+        let hist_dir = osstr2wcstring(tmpdir.path());
+        let name = L!("future_boundary_merge");
+        let foreign = create_test_history(name, &hist_dir);
+        foreign.add_commandline(L!("foreign").to_owned());
+        foreign.save_checked().unwrap();
+
+        let history = create_test_history(name, &hist_dir);
+        // Force the same future-boundary state that an immediate append/merge can create,
+        // without depending on wall-clock scheduling or sleeping.
+        let boundary = SystemTime::now() + Duration::from_secs(3600);
+        history.imp().boundary_timestamp = boundary;
+        history.add_commandline(L!("before_merge").to_owned());
+        history.incorporate_external_changes_checked().unwrap();
+        assert!(history_contains(&history, L!("foreign")));
+        assert!(history_contains(&history, L!("before_merge")));
+        let merged_boundary = history.imp().boundary_timestamp;
+        assert!(merged_boundary > boundary);
+
+        history.add_commandline(L!("after_merge").to_owned());
+        assert!(
+            history
+                .imp()
+                .new_items
+                .last()
+                .unwrap()
+                .first_added_timestamp()
+                > merged_boundary
+        );
+        // Persist the item first so clear-session must delete its disk copy, not merely
+        // drop an unsaved in-memory command.
+        history.save_checked().unwrap();
+        history.clear_session();
+        history.save_checked().unwrap();
+        drop(history);
+        drop(foreign);
+
+        let restarted = create_test_history(name, &hist_dir);
+        // Read the deliberately future-dated fixture without waiting for wall time.
+        restarted.imp().boundary_timestamp = merged_boundary + Duration::from_secs(10);
+        assert!(history_contains(&restarted, L!("foreign")));
+        assert!(history_contains(&restarted, L!("before_merge")));
+        assert!(!history_contains(&restarted, L!("after_merge")));
     }
 
     #[test]
@@ -2569,3 +2937,7 @@ mod tests {
         test_history_imported_from_corrupted.clear();
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "native_tests.rs"]
+mod native_tests;

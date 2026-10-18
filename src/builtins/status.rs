@@ -383,13 +383,13 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     let Some(subcmd) = opts.status_cmd else {
         debug_assert!(args.is_empty(), "passed arguments to nothing");
 
+        if crate::proc::get_login() {
+            streams.out.appendln(wgettext!("This is a login shell"));
+        } else {
+            streams.out.appendln(wgettext!("This is not a login shell"));
+        }
         #[cfg(unix)]
         {
-            if get_login() {
-                streams.out.appendln(wgettext!("This is a login shell"));
-            } else {
-                streams.out.appendln(wgettext!("This is not a login shell"));
-            }
             let job_control_mode = match get_job_control_mode() {
                 JobControl::Interactive => wgettext!("Only on interactive jobs"),
                 JobControl::None => wgettext!("Never"),
@@ -403,9 +403,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
         {
             streams
                 .out
-                .appendln(L!("Login state: unavailable on native Windows (N4)"));
-            streams
-                .out
                 .appendln(L!("Job control: unavailable on native Windows (N5/N6)"));
         }
         streams.out.append(&parser.stack_trace());
@@ -416,10 +413,17 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     match subcmd {
         #[cfg(windows)]
         IsLogin => {
-            err_fmt!("login state is unavailable on native Windows (N4)")
-                .cmd(cmd)
-                .finish(streams);
-            return Err(STATUS_INVALID_ARGS);
+            if !args.is_empty() {
+                err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 0, args.len())
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_INVALID_ARGS);
+            }
+            return if crate::proc::get_login() {
+                Ok(SUCCESS)
+            } else {
+                Err(STATUS_CMD_ERROR)
+            };
         }
         #[cfg(windows)]
         JobControl | IsFullJobControl | IsInteractiveJobControl | IsNoJobControl => {
@@ -429,19 +433,64 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             return Err(STATUS_INVALID_ARGS);
         }
         #[cfg(windows)]
-        IsInteractive | IsInteractiveRead | IsBreakpoint | Terminal | TerminalOs
-        | TestTerminalFeature => {
+        IsInteractive | IsInteractiveRead => {
+            if !args.is_empty() {
+                err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 0, args.len())
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_INVALID_ARGS);
+            }
+            return Err(STATUS_CMD_ERROR);
+        }
+        #[cfg(windows)]
+        IsBreakpoint | Terminal | TerminalOs | TestTerminalFeature => {
             err_fmt!("reader and terminal state are unavailable on native Windows (N6/N7)")
                 .cmd(cmd)
                 .finish(streams);
             return Err(STATUS_INVALID_ARGS);
         }
         #[cfg(windows)]
-        GetFile | ListFiles | Language => {
-            err_fmt!("resource and language services are unavailable on native Windows (N9)")
-                .cmd(cmd)
-                .finish(streams);
-            return Err(STATUS_INVALID_ARGS);
+        GetFile => {
+            if args.len() != 1 {
+                err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 1, args.len())
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_INVALID_ARGS);
+            }
+            let name = args[0].to_string();
+            let Some(asset) = crate::autoload::Asset::get(&name) else {
+                return Err(STATUS_CMD_ERROR);
+            };
+            streams
+                .out
+                .append(&fish_widestring::bytes2wcstring(&asset.data));
+            return Ok(SUCCESS);
+        }
+        #[cfg(windows)]
+        ListFiles => {
+            let mut files: Vec<_> = crate::autoload::Asset::iter()
+                .filter(|name| {
+                    args.is_empty() || args.iter().any(|arg| name.starts_with(&arg.to_string()))
+                })
+                .collect();
+            files.sort();
+            for name in &files {
+                streams.out.appendln(&str2wcstring(name));
+            }
+            return if files.is_empty() {
+                Err(STATUS_CMD_ERROR)
+            } else {
+                Ok(SUCCESS)
+            };
+        }
+        #[cfg(windows)]
+        Language => {
+            err_fmt!(
+                "fish was built without native message catalogs; status language is unavailable"
+            )
+            .cmd(cmd)
+            .finish(streams);
+            return Err(STATUS_CMD_ERROR);
         }
         #[cfg(unix)]
         c @ JobControl => {
@@ -769,8 +818,8 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                 }
                 #[cfg(windows)]
                 FishPath => {
-                    let path = match std::env::current_exe()
-                        .and_then(|path| crate::path::native_path_text(&path))
+                    let path = match crate::wutil::native_current_exe_path()
+                        .and_then(crate::path::native_path_text)
                         .and_then(|path| crate::wutil::native_realpath(&path))
                     {
                         Ok(path) => path,

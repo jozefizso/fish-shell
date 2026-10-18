@@ -38,11 +38,12 @@ fn rejected(result: Captured) {
     );
 }
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    // Native startup may initialize state directories even with -N. Compare
+    // persisted files, not the incidental directory layout of an isolated root.
     fn visit(root: &Path, dir: &Path, entries: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for item in fs::read_dir(dir).unwrap() {
             let path = item.unwrap().path();
             if path.is_dir() {
-                entries.insert(path.strip_prefix(root).unwrap().to_owned(), Vec::new());
                 visit(root, &path, entries);
             } else {
                 entries.insert(
@@ -87,6 +88,9 @@ fn no_config(f: &Fixture) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, &script).unwrap();
     }
+    // Establish supported native state (including its locking files) before
+    // checking that no-config execution leaves user content untouched.
+    exact(f.eval("true"), 0, b"", b"");
     let before = snapshot(&f.state);
     exact(f.eval("echo no-config"), 0, b"no-config\n", b"");
     exact(
@@ -111,14 +115,20 @@ fn no_config(f: &Fixture) {
         b"stdin-no-config",
         b"",
     );
-    for args in [vec![], vec![OsStr::new("-N"), OsStr::new("-i")]] {
-        let result = run(&mut f.command(&args), b"");
-        assert!(
-            result.out.is_empty(),
-            "unsupported mode emitted prompt/output"
-        );
-        rejected(result);
-    }
+    let result = run(&mut f.command(&[OsStr::new("-N"), OsStr::new("-i")]), b"");
+    assert!(
+        result.out.is_empty(),
+        "unsupported interactive mode emitted output"
+    );
+    rejected(result);
+    exact(
+        f.eval(
+            "builtin history append 'private batch'; builtin history save; builtin history search",
+        ),
+        0,
+        b"private batch\n",
+        b"",
+    );
     assert!(!marker.exists());
     assert_eq!(
         snapshot(&f.state),
@@ -127,13 +137,7 @@ fn no_config(f: &Fixture) {
     );
 }
 fn reject(f: &Fixture) {
-    let jobs = [
-        "echo forbidden &",
-        "exec echo forbidden",
-        "fg",
-        "bg",
-        "set -U forbidden yes",
-    ];
+    let jobs = ["echo forbidden &", "exec echo forbidden", "fg", "bg"];
     for job in jobs {
         let result = f.eval(job);
         assert!(
@@ -155,6 +159,18 @@ fn reject(f: &Fixture) {
         assert!(!result.err.is_empty());
     }
     assert!(!f.root.join("excluded-exec-output").exists());
+    exact(
+        f.eval("set -U native_accept_value 'persistent 雪'"),
+        0,
+        b"",
+        b"",
+    );
+    exact(
+        f.eval("printf '%s' $native_accept_value; set -eU native_accept_value"),
+        0,
+        "persistent 雪".as_bytes(),
+        b"",
+    );
 }
 fn paths(f: &Fixture) {
     let pwd = f.eval("printf '%s\\n' $PWD");
@@ -483,6 +499,7 @@ fn native_required_acceptance_cases() {
                 "W2-RUNTIME" => runtime_initialization(&f.probe, &f.root),
                 "W3-BYTES" | "W3-ERRORS" | "W3-LIFETIME" | "W3-CONSOLE" => transport(&f, id),
                 "W4-PATHS" => {
+                    exact(f.eval("true"), 0, b"", b"");
                     let before = snapshot(&f.state);
                     paths(&f);
                     assert_eq!(snapshot(&f.state), before);
@@ -496,6 +513,7 @@ fn native_required_acceptance_cases() {
                 "W6-FAILURE" => failures(&f),
                 "W6-BOUNDARY" => boundary(&f),
                 "W6-CLEAN-RUN" => {
+                    exact(f.eval("true"), 0, b"", b"");
                     let before = snapshot(&f.state);
                     language(&f);
                     child(&f);

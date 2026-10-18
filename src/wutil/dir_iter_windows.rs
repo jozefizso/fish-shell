@@ -77,6 +77,7 @@ impl Drop for FindHandle {
 pub struct DirEntry {
     pub name: WString,
     path: PathBuf,
+    policy_path: PathBuf,
     attributes: u32,
     reparse_tag: u32,
     typ: OnceCell<Option<DirEntryType>>,
@@ -84,6 +85,28 @@ pub struct DirEntry {
 }
 
 impl DirEntry {
+    /// Validate a selected name before following or publishing it. An unrelated
+    /// unsupported entry must not prevent matching another name in this directory.
+    pub fn validate(&self) -> io::Result<()> {
+        native_absolute_path(&native_path_text(&self.policy_path)?)?;
+        if self.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            && !matches!(
+                self.reparse_tag,
+                IO_REPARSE_TAG_SYMLINK | IO_REPARSE_TAG_MOUNT_POINT
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "unsupported native reparse tag {:#x} at {}",
+                    self.reparse_tag,
+                    self.path.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn check_type(&self) -> Option<DirEntryType> {
         *self.typ.get_or_init(|| {
             if self.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
@@ -97,7 +120,7 @@ impl DirEntry {
                 self.reparse_tag,
                 IO_REPARSE_TAG_SYMLINK | IO_REPARSE_TAG_MOUNT_POINT
             ) {
-                // Enumeration rejects unknown tags; never infer a traversable target for one.
+                // Selected entries are validated before traversal; never infer a target here.
                 return None;
             }
             match fs::metadata(&self.path) {
@@ -182,6 +205,7 @@ impl DirIter {
             entry: DirEntry {
                 name: WString::new(),
                 path: PathBuf::new(),
+                policy_path: PathBuf::new(),
                 attributes: 0,
                 reparse_tag: 0,
                 typ: OnceCell::new(),
@@ -237,6 +261,9 @@ impl DirIter {
             self.dots -= 1;
             self.entry.name = name.to_owned();
             self.entry.path = self.path.clone();
+            self.entry.policy_path = self
+                .policy_path
+                .join(if self.dots == 1 { "." } else { ".." });
             if self.dots == 0 {
                 self.entry.path.pop();
             }
@@ -282,31 +309,12 @@ impl DirIter {
             if units == [46] || units == [46, 46] {
                 continue;
             }
-            if self.data.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                && !matches!(
-                    self.data.reparse_tag,
-                    IO_REPARSE_TAG_SYMLINK | IO_REPARSE_TAG_MOUNT_POINT
-                )
-            {
-                self.handle = None;
-                self.done = true;
-                return Some(Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "unsupported native reparse tag {:#x}",
-                        self.data.reparse_tag
-                    ),
-                )));
-            }
             let name = OsString::from_wide(units);
             let path = self.path.join(&name);
+            self.entry.policy_path = self.policy_path.join(&name);
             let result = osstr2wcstring(&name)
                 .map(native_to_shell_text_owned)
-                .map_err(io::Error::from)
-                .and_then(|text| {
-                    native_absolute_path(&native_path_text(&self.policy_path.join(&name))?)?;
-                    Ok(text)
-                });
+                .map_err(io::Error::from);
             let name = match result {
                 Ok(name) => name,
                 Err(error) => {

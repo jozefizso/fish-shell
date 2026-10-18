@@ -2,6 +2,7 @@ use crate::common::{BUILD_DIR, get_program_name};
 use crate::{flog, flogf};
 use fish_build_helper::workspace_root;
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -21,6 +22,7 @@ const SYSCONF_DIR: &str = env!("SYSCONFDIR");
 const DATADIR: Option<&str> = option_env!("DATADIR");
 
 impl ConfigPaths {
+    #[cfg(unix)]
     pub fn new() -> Self {
         let exec_path = get_fish_path();
         flog!(
@@ -57,6 +59,31 @@ impl ConfigPaths {
         paths
     }
 
+    #[cfg(windows)]
+    pub fn new() -> Self {
+        // Installation assets are never resolved beneath the user's persistent-state roots.
+        let executable =
+            crate::wutil::native_current_exe_path().expect("native executable path unavailable");
+        let bin = executable
+            .parent()
+            .expect("native executable has no parent")
+            .to_owned();
+        let prefix = if bin.ends_with("bin") {
+            bin.parent().unwrap()
+        } else {
+            &bin
+        };
+        let data = prefix.join("share").join("fish");
+        Self {
+            sysconf: prefix.join("etc").join("fish"),
+            bin: Some(bin.clone()),
+            man: Some(data.join("man")),
+            doc: Some(prefix.join("share").join("doc").join("fish")),
+            data: Some(data),
+        }
+    }
+
+    #[cfg(unix)]
     fn from_exec_path(unresolved_exec_path: &'static FishPath) -> Self {
         let default_layout = |exec_path_parent: Option<&Path>| {
             let data = DATADIR.map(|p| PathBuf::from(p).join("fish"));
@@ -181,12 +208,18 @@ fn compute_fish_path() -> FishPath {
         return Absolute(path);
     }
 
+    #[cfg(windows)]
+    let Ok(path) = crate::wutil::native_current_exe_path().map(Path::to_path_buf) else {
+        return LookUpInPath;
+    };
+    #[cfg(unix)]
     let Ok(mut path) = std::env::current_exe() else {
         return LookUpInPath;
     };
 
     assert!(path.is_absolute());
 
+    #[cfg(unix)]
     // When /proc/self/exe points to a file that was deleted (or overwritten on update!)
     // then linux adds a " (deleted)" suffix.
     // If that's not a valid path, let's remove that awkward suffix.
@@ -218,4 +251,35 @@ fn getexecpath() -> Option<PathBuf> {
 
     let path = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
     Some(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
+}
+
+/// Publish installation assets independently of the already initialized native state roots.
+#[cfg(windows)]
+pub fn initialize_native_variables(vars: &crate::env::EnvStack) -> std::io::Result<()> {
+    use crate::env::{EnvMode, EnvSetMode};
+    use crate::prelude::*;
+    let paths = ConfigPaths::new();
+    let mode = EnvSetMode::new_at_early_startup(EnvMode::GLOBAL);
+    for (name, value) in [
+        (L!("__fish_config_dir"), crate::path::path_get_config()),
+        (L!("__fish_user_data_dir"), crate::path::path_get_data()),
+        (L!("__fish_cache_dir"), crate::path::path_get_cache()),
+    ] {
+        if !value.ok {
+            return Err(std::io::Error::other(
+                "native state roots are not initialized",
+            ));
+        }
+        vars.set_one(name, mode, value.path.to_owned());
+    }
+    for (name, path) in [
+        (L!("__fish_sysconf_dir"), Some(paths.sysconf)),
+        (L!("__fish_data_dir"), paths.data),
+        (L!("__fish_bin_dir"), paths.bin),
+    ] {
+        let path =
+            path.ok_or_else(|| std::io::Error::other("native install directory unavailable"))?;
+        vars.set_one(name, mode, crate::path::native_path_text(&path)?);
+    }
+    Ok(())
 }

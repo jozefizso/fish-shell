@@ -559,8 +559,7 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     }
 
     #[cfg(windows)]
-    if opts.set_mode.mode.universal
-        || opts.commandline.is_some()
+    if opts.commandline.is_some()
         || opts.prompt.is_some()
         || opts.prompt_str.is_some()
         || !opts.right_prompt.is_empty()
@@ -568,7 +567,7 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
         || opts.silent
         || streams.is_terminal(0)
     {
-        err_str!("universal variables require N4; terminal/editor read options require N6")
+        err_str!("terminal/editor read options require N6")
             .cmd(cmd)
             .finish(streams);
         return Err(STATUS_INVALID_ARGS);

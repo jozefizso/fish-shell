@@ -7,7 +7,7 @@ use crate::path::{
 use crate::prelude::*;
 use fish_widestring::{native_to_shell_text_owned, shell_text_to_osstring, utf16_to_wcstring};
 use std::{
-    ffi::c_void,
+    ffi::{OsString, c_void},
     fs::{self, File},
     io,
     mem::{MaybeUninit, size_of},
@@ -17,7 +17,64 @@ use std::{
         io::{AsRawHandle, FromRawHandle, RawHandle},
     },
     path::{Path, PathBuf},
+    sync::LazyLock,
 };
+
+/// The loader's absolute image name is authoritative OS identity, not user path
+/// syntax. Rust's process launcher may remove its extended prefix even when the
+/// loaded name contains literal trailing dots/spaces. Restore that namespace
+/// before applying N1 validation; ordinary user inputs never take this route.
+pub fn native_current_exe_path() -> io::Result<&'static Path> {
+    static IMAGE: LazyLock<io::Result<PathBuf>> = LazyLock::new(|| {
+        let path = std::env::current_exe()?;
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "loader image path is not absolute",
+            ));
+        }
+        if let Ok(validated) = native_absolute_path(&native_path_text(&path)?) {
+            return Ok(validated);
+        }
+        let mut components = path.components();
+        let Some(std::path::Component::Prefix(prefix)) = components.next() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "loader image path has no native root",
+            ));
+        };
+        let path = match prefix.kind() {
+            std::path::Prefix::Disk(_) => {
+                let mut name = OsString::with_capacity(path.as_os_str().len() + 4);
+                name.push("\\\\?\\");
+                name.push(path.as_os_str());
+                PathBuf::from(name)
+            }
+            std::path::Prefix::UNC(server, share) => {
+                let mut name = OsString::with_capacity(path.as_os_str().len() + 6);
+                name.push("\\\\?\\UNC\\");
+                name.push(server);
+                name.push("\\");
+                name.push(share);
+                components.next(); // Absolute UNC root separator.
+                if !components.as_path().as_os_str().is_empty() {
+                    name.push("\\");
+                    name.push(components.as_path().as_os_str());
+                }
+                PathBuf::from(name)
+            }
+            _ => path,
+        };
+        native_absolute_path(&native_path_text(&path)?)
+    });
+    IMAGE
+        .as_ref()
+        .map(PathBuf::as_path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(code) => io::Error::from_raw_os_error(code),
+            None => io::Error::new(error.kind(), error.to_string()),
+        })
+}
 
 #[link(name = "kernel32")]
 unsafe extern "system" {

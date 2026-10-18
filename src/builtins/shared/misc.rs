@@ -132,6 +132,11 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("_"),
         func: gettext::gettext,
     },
+    #[cfg(windows)]
+    BuiltinData {
+        name: L!("__fish_native_fs"),
+        func: native_fs::native_fs,
+    },
     BuiltinData {
         name: L!("abbr"),
         func: abbr::abbr,
@@ -272,7 +277,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("functions"),
         func: functions::functions,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("history"),
         func: history::history,
@@ -396,7 +400,6 @@ pub fn builtin_is_unsupported(name: &wstr) -> bool {
         L!("exec"),
         L!("fg"),
         L!("fish_key_reader"),
-        L!("history"),
         L!("jobs"),
         L!("set_color"),
         L!("time"),

@@ -2,12 +2,12 @@
 
 #[cfg(unix)]
 use crate::common::{WSL, is_windows_subsystem_for_linux};
+#[cfg(windows)]
+use crate::wutil::AccessFlags;
 use crate::wutil::{
     dir_iter::{DirEntry, DirEntryType},
     lwstat, waccess,
 };
-#[cfg(windows)]
-use crate::wutil::AccessFlags;
 use crate::{
     complete::{
         CompleteFlags, Completion, CompletionReceiver, PROG_COMPLETE_SEP, ReplacementScope,
@@ -26,9 +26,9 @@ use fish_widestring::{ANY_CHAR, ANY_STRING, ANY_STRING_RECURSIVE};
 #[cfg(unix)]
 use nix::unistd::AccessFlags;
 use std::cmp::Ordering;
-use std::{borrow::Cow, cell::LazyCell, collections::HashSet, io};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
+use std::{borrow::Cow, cell::LazyCell, collections::HashSet, io};
 
 localizable_consts!(
     COMPLETE_EXEC_DESC "command"
@@ -263,7 +263,9 @@ fn wildcard_complete_internal(
                         continue;
                     }
                     // Note early return
-                    WildcardResult::Cancel | WildcardResult::Overflow | WildcardResult::Error(_) => {
+                    WildcardResult::Cancel
+                    | WildcardResult::Overflow
+                    | WildcardResult::Error(_) => {
                         return submatch_res;
                     }
                 }
@@ -350,11 +352,6 @@ fn wildcard_test_flags_then_complete(
     let mut flags = CompleteFlags::default();
     if expand_flags.no_space_for_unclosed_brace {
         flags.wants_suffix = WantsSuffix::No;
-    }
-
-    // Check if it will match before stat().
-    if wildcard_complete(filename, wc, None, None, expand_flags, flags) != WildcardResult::Match {
-        return WildcardResult::NoMatch;
     }
 
     if need_directory && !entry.is_dir() {
@@ -444,15 +441,11 @@ fn wildcard_test_flags_then_complete(
 
 mod expander {
 
-    use crate::{
-        expand::ForCdArgument,
-        path::append_path_component,
-        wutil::dir_iter::DirIter,
-    };
     #[cfg(unix)]
     use crate::wutil::DevInode as DirectoryIdentity;
     #[cfg(unix)]
     use crate::wutil::normalize_path;
+    use crate::{expand::ForCdArgument, path::append_path_component, wutil::dir_iter::DirIter};
     #[cfg(windows)]
     use crate::{
         path::{native_path_text, native_resolve_path},
@@ -742,13 +735,21 @@ mod expander {
             while !self.interrupted_or_overflowed() {
                 let entry = match base_dir_iter.next() {
                     Some(Ok(entry)) => entry,
-                    Some(Err(error)) => { self.traversal_error(error); break; }
+                    Some(Err(error)) => {
+                        self.traversal_error(error);
+                        break;
+                    }
                     None => break,
                 };
                 // Note that it's critical we ignore leading dots here, else we may descend into . and ..
                 if !wildcard_match_with_case_policy(&entry.name, wc_segment, true, case_sensitive) {
                     // Doesn't match the wildcard for this segment, skip it.
                     continue;
+                }
+                #[cfg(windows)]
+                if let Err(error) = entry.validate() {
+                    self.traversal_error(error);
+                    break;
                 }
                 if !entry.is_dir() {
                     continue;
@@ -779,7 +780,10 @@ mod expander {
                 #[cfg(windows)]
                 let dev_inode = match entry.file_identity() {
                     Ok(identity) => identity,
-                    Err(error) => { self.traversal_error(error); continue; }
+                    Err(error) => {
+                        self.traversal_error(error);
+                        continue;
+                    }
                 };
 
                 if !self.visited_files.insert(dev_inode) {
@@ -818,7 +822,10 @@ mod expander {
             while !self.interrupted_or_overflowed() {
                 let entry = match base_dir_iter.next() {
                     Some(Ok(entry)) => entry,
-                    Some(Err(error)) => { self.traversal_error(error); break; }
+                    Some(Err(error)) => {
+                        self.traversal_error(error);
+                        break;
+                    }
                     None => break,
                 };
 
@@ -832,6 +839,11 @@ mod expander {
                 };
                 if m.is_samecase_exact() {
                     continue;
+                }
+                #[cfg(windows)]
+                if let Err(error) = entry.validate() {
+                    self.traversal_error(error);
+                    break;
                 }
 
                 // Note is_dir() may trigger a stat call.
@@ -891,11 +903,15 @@ mod expander {
             while !self.interrupted_or_overflowed() {
                 let entry = match base_dir_iter.next() {
                     Some(Ok(entry)) => entry,
-                    Some(Err(error)) => { self.traversal_error(error); break; }
+                    Some(Err(error)) => {
+                        self.traversal_error(error);
+                        break;
+                    }
                     None => break,
                 };
 
                 // Note that is_dir() may cause a stat() call.
+                #[cfg(unix)]
                 if need_dir && !entry.is_dir() {
                     continue;
                 }
@@ -917,6 +933,16 @@ mod expander {
                         true, /* skip files with leading dots */
                         case_sensitive,
                     ) {
+                        #[cfg(windows)]
+                        {
+                            if let Err(error) = entry.validate() {
+                                self.traversal_error(error);
+                                break;
+                            }
+                            if need_dir && !entry.is_dir() {
+                                continue;
+                            }
+                        }
                         self.add_expansion_result(base_dir.to_owned() + entry.name.as_utfstr());
                     }
                 }
@@ -984,7 +1010,11 @@ mod expander {
                 while !self.interrupted_or_overflowed() {
                     let entry = match dir.next() {
                         Some(Ok(entry)) => entry,
-                        Some(Err(error)) => { self.traversal_error(error); unique_entry.clear(); break; }
+                        Some(Err(error)) => {
+                            self.traversal_error(error);
+                            unique_entry.clear();
+                            break;
+                        }
                         None => break,
                     };
                     if entry.name.is_empty() || entry.name.starts_with('.') {
@@ -996,7 +1026,10 @@ mod expander {
                     #[cfg(windows)]
                     let already_visited = match entry.file_identity() {
                         Ok(identity) => !visited.insert(identity),
-                        Err(error) => { self.traversal_error(error); true }
+                        Err(error) => {
+                            self.traversal_error(error);
+                            true
+                        }
                     };
                     if already_visited {
                         unique_entry.clear();
@@ -1024,7 +1057,11 @@ mod expander {
                 #[cfg(unix)]
                 abs_unique_hierarchy.push('/');
                 #[cfg(windows)]
-                abs_unique_hierarchy.push(if abs_unique_hierarchy.starts_with(L!("\\\\?\\")) { '\\' } else { '/' });
+                abs_unique_hierarchy.push(if abs_unique_hierarchy.starts_with(L!("\\\\?\\")) {
+                    '\\'
+                } else {
+                    '/'
+                });
             }
 
             unique_hierarchy
@@ -1041,6 +1078,22 @@ mod expander {
         ) {
             // This function is only for the completions case.
             assert!(self.flags.for_completions);
+            // Match the name before resolving its path: unrelated native names may
+            // be unrepresentable in the caller's ordinary namespace.
+            let mut flags = CompleteFlags::default();
+            if self.flags.no_space_for_unclosed_brace {
+                flags.wants_suffix = WantsSuffix::No;
+            }
+            if wildcard_complete(filename, wildcard, None, None, self.flags, flags)
+                != WildcardResult::Match
+            {
+                return;
+            }
+            #[cfg(windows)]
+            if let Err(error) = entry.validate() {
+                self.traversal_error(error);
+                return;
+            }
             #[cfg(unix)]
             let mut abs_path = {
                 let mut path = self.working_directory.to_owned();
@@ -1051,11 +1104,17 @@ mod expander {
                 path
             };
             #[cfg(windows)]
-            let mut abs_path = match native_resolve_path(&native_glob_filesystem_text(filepath), self.working_directory)
-                .and_then(|path| native_path_text(&path))
+            let mut abs_path = match native_resolve_path(
+                &native_glob_filesystem_text(filepath),
+                self.working_directory,
+            )
+            .and_then(|path| native_path_text(&path))
             {
                 Ok(path) => path,
-                Err(error) => { self.traversal_error(error); return; }
+                Err(error) => {
+                    self.traversal_error(error);
+                    return;
+                }
             };
 
             let before = self.resolved_completions.len();
@@ -1070,9 +1129,18 @@ mod expander {
             ) {
                 WildcardResult::Match => true,
                 WildcardResult::NoMatch => false,
-                WildcardResult::Overflow => { self.did_overflow = true; false }
-                WildcardResult::Cancel => { self.did_interrupt = true; false }
-                WildcardResult::Error(error) => { self.error = Some(error); false }
+                WildcardResult::Overflow => {
+                    self.did_overflow = true;
+                    false
+                }
+                WildcardResult::Cancel => {
+                    self.did_interrupt = true;
+                    false
+                }
+                WildcardResult::Error(error) => {
+                    self.error = Some(error);
+                    false
+                }
             };
             if did_match {
                 // Hack. We added this completion result based on the last component of the wildcard.
@@ -1127,26 +1195,38 @@ mod expander {
                     self.working_directory.to_owned()
                 } else {
                     native_path_text(&native_resolve_path(
-                        &native_glob_filesystem_text(base_dir), self.working_directory,
+                        &native_glob_filesystem_text(base_dir),
+                        self.working_directory,
                     )?)?
                 };
-                if dotdot { DirIter::new_with_dots(&path) } else { DirIter::new(&path) }
+                if dotdot {
+                    DirIter::new_with_dots(&path)
+                } else {
+                    DirIter::new(&path)
+                }
             })();
             match result {
                 Ok(dir) => Some(dir),
-                Err(error) => { self.traversal_error(error); None }
+                Err(error) => {
+                    self.traversal_error(error);
+                    None
+                }
             }
         }
 
         fn traversal_error(&mut self, error: io::Error) {
             #[cfg(windows)]
-            if !matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory | io::ErrorKind::PermissionDenied) {
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::NotADirectory
+                    | io::ErrorKind::PermissionDenied
+            ) {
                 self.error.get_or_insert(error);
             }
             #[cfg(unix)]
             let _ = error;
         }
-
     }
 }
 
@@ -1155,7 +1235,9 @@ mod expander {
 fn native_glob_restore_namespace(path: &mut WString) {
     if path.starts_with(L!("//?/")) {
         for character in path.as_char_slice_mut() {
-            if *character == '/' { *character = '\\'; }
+            if *character == '/' {
+                *character = '\\';
+            }
         }
     }
 }
@@ -1183,11 +1265,19 @@ fn native_glob_root(pattern: &wstr, cwd: &wstr) -> io::Result<usize> {
     }
     let native_pattern = native_glob_filesystem_text(&identity_pattern);
     crate::path::native_resolve_path(
-        if native_pattern.is_empty() { L!(".") } else { &native_pattern }, cwd,
+        if native_pattern.is_empty() {
+            L!(".")
+        } else {
+            &native_pattern
+        },
+        cwd,
     )?;
     let root = crate::path::native_root_length(&native_pattern);
     if wildcard_has_internal(&pattern[..root]) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "wildcards are not supported in native filesystem roots"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "wildcards are not supported in native filesystem roots",
+        ));
     }
     Ok(root)
 }
@@ -1232,7 +1322,10 @@ pub fn wildcard_expand_string<'closure>(
     // so we just check for them and return 0 (no matches) if there is an embedded null.
     if wc.contains('\0') {
         #[cfg(windows)]
-        return WildcardResult::Error(io::Error::new(io::ErrorKind::InvalidInput, "NUL in filesystem wildcard"));
+        return WildcardResult::Error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "NUL in filesystem wildcard",
+        ));
         #[cfg(unix)]
         return WildcardResult::NoMatch;
     }
@@ -1259,13 +1352,18 @@ pub fn wildcard_expand_string<'closure>(
     };
     #[cfg(windows)]
     if wc.starts_with(L!("//?/")) {
-        return WildcardResult::Error(io::Error::new(io::ErrorKind::InvalidInput, "extended filesystem paths require backslash separators"));
+        return WildcardResult::Error(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "extended filesystem paths require backslash separators",
+        ));
     }
     #[cfg(windows)]
     let normalized_wc = if wc.contains('\\') {
         let mut normalized = wc.to_owned();
         for character in normalized.as_char_slice_mut() {
-            if *character == '\\' { *character = '/'; }
+            if *character == '\\' {
+                *character = '/';
+            }
         }
         Cow::Owned(normalized)
     } else {
@@ -1278,7 +1376,9 @@ pub fn wildcard_expand_string<'closure>(
     };
     #[cfg(windows)]
     let (prefix, base_dir, effective_wc) = (
-        working_directory, &normalized_wc[..root_len], &normalized_wc[root_len..],
+        working_directory,
+        &normalized_wc[..root_len],
+        &normalized_wc[root_len..],
     );
 
     let mut expander = WildCardExpander::new(prefix, flags, &mut cancel_checker, output);
@@ -1300,7 +1400,12 @@ pub fn wildcard_match(
     pattern: impl AsRef<wstr>,
     leading_dots_fail_to_match: bool,
 ) -> bool {
-    wildcard_match_with_case_policy(name.as_ref(), pattern.as_ref(), leading_dots_fail_to_match, true)
+    wildcard_match_with_case_policy(
+        name.as_ref(),
+        pattern.as_ref(),
+        leading_dots_fail_to_match,
+        true,
+    )
 }
 
 fn wildcard_match_with_case_policy(
@@ -1380,19 +1485,37 @@ fn wildcard_match_with_case_policy(
 
 #[inline]
 fn wildcard_char_equal(left: char, right: char, case_sensitive: bool) -> bool {
-    if left == right { return true; }
-    if case_sensitive { return false; }
+    if left == right {
+        return true;
+    }
+    if case_sensitive {
+        return false;
+    }
     #[cfg(windows)]
     {
         #[link(name = "kernel32")]
         unsafe extern "system" {
-            fn CompareStringOrdinal(left: *const u16, left_len: i32, right: *const u16, right_len: i32, ignore_case: i32) -> i32;
+            fn CompareStringOrdinal(
+                left: *const u16,
+                left_len: i32,
+                right: *const u16,
+                right_len: i32,
+                ignore_case: i32,
+            ) -> i32;
         }
         let mut left_units = [0; 2];
         let mut right_units = [0; 2];
         let left = left.encode_utf16(&mut left_units);
         let right = right.encode_utf16(&mut right_units);
-        return unsafe { CompareStringOrdinal(left.as_ptr(), left.len() as i32, right.as_ptr(), right.len() as i32, 1) } == 2;
+        return unsafe {
+            CompareStringOrdinal(
+                left.as_ptr(),
+                left.len() as i32,
+                right.as_ptr(),
+                right.len() as i32,
+                1,
+            )
+        } == 2;
     }
     #[cfg(unix)]
     false

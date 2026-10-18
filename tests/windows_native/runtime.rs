@@ -1,6 +1,6 @@
 //! Assertions run from the native probe's actual startup thread in an isolated process.
 
-use std::{ffi::CStr, io::ErrorKind, sync::mpsc, time::Duration};
+use std::{io::ErrorKind, sync::mpsc, time::Duration};
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -11,18 +11,6 @@ pub fn run() {
     fish::threads::init();
     assert!(fish::threads::is_main_thread());
     fish::threads::assert_is_main_thread();
-
-    // The selected runtime deliberately ignores inherited locale categories.
-    // This process has not created any locale-using worker yet.
-    assert!(unsafe { fish::locale::set_libc_locales(false) });
-    let current_locale = unsafe { libc::setlocale(libc::LC_ALL, std::ptr::null()) };
-    assert!(!current_locale.is_null());
-    assert_eq!(unsafe { CStr::from_ptr(current_locale) }.to_bytes(), b"C");
-    let numeric = fish::locale::get_numeric_locale();
-    assert_eq!(numeric.decimal_point, '.');
-    assert_eq!(numeric.thousands_sep, None);
-    assert_eq!(numeric.grouping, [0; 4]);
-    assert!(!numeric.group_repeat);
 
     let (send, receive) = mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -42,8 +30,8 @@ pub fn run() {
         .join("missing child");
     // Test the owning Win32 open boundary. Componentwise metadata traversal may fail
     // earlier with ERROR_FILE_NOT_FOUND instead of the full path's ERROR_PATH_NOT_FOUND.
-    let error = fish::wutil::native_open(&missing, 0, true)
-        .expect_err("missing path unexpectedly exists");
+    let error =
+        fish::wutil::native_open(&missing, 0, true).expect_err("missing path unexpectedly exists");
     // Win32 ERROR_PATH_NOT_FOUND is 3, which is not Unix ENOENT. Capturing
     // this error in std::io::Error must preserve its native domain and value.
     unsafe { SetLastError(87) }; // ERROR_INVALID_PARAMETER, an unrelated later error.
