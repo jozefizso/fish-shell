@@ -1291,7 +1291,8 @@ fn process_completions_into_infos(lst: &[Completion]) -> Vec<PagerComp> {
                 &mut OperationContext::empty(),
                 false,
                 None,
-            );
+            )
+            .expect("uncancellable syntax-only highlighting");
             assert!(comp_info.comp.last().unwrap().len() >= comp_info.colors.len());
         }
 
@@ -1319,6 +1320,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_pager_navigation() {
+        #[cfg(unix)]
         test_init();
         // Generate 19 strings of width 10. There's 2 spaces between completions, and our term size is
         // 80; these can therefore fit into 6 columns (6 * 12 - 2 = 70) or 5 columns (58) but not 7
@@ -1409,6 +1411,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_pager_layout() {
+        #[cfg(unix)]
         test_init();
         // These tests are woefully incomplete
 

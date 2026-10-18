@@ -4,16 +4,13 @@ pub mod abbr;
 pub mod argparse;
 #[cfg(unix)]
 pub mod bg;
-#[cfg(unix)]
 pub mod bind;
 pub mod block;
 pub mod r#break;
-#[cfg(unix)]
 pub mod breakpoint;
 pub mod builtin;
 pub mod cd;
 pub mod command;
-#[cfg(unix)]
 pub mod commandline;
 pub mod complete;
 pub mod contains;
@@ -28,7 +25,6 @@ pub mod r#false;
 #[cfg(unix)]
 pub mod fg;
 pub mod fish_indent;
-#[cfg(unix)]
 pub mod fish_key_reader;
 pub mod function;
 pub mod functions;
@@ -36,6 +32,8 @@ pub mod r#gettext;
 pub mod history;
 pub mod jobs;
 pub mod math;
+#[cfg(windows)]
+pub mod native_clipboard;
 #[cfg(windows)]
 pub mod native_fs;
 pub mod path;
@@ -46,7 +44,6 @@ pub mod read;
 pub mod realpath;
 pub mod r#return;
 pub mod set;
-#[cfg(unix)]
 pub mod set_color;
 pub mod source;
 pub mod status;

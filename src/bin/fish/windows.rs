@@ -1,4 +1,4 @@
-//! Native batch startup, sharing state and bootstrap policy with the shell evaluator.
+//! Native startup, sharing bootstrap policy and the interactive reader with the evaluator.
 use fish::{
     common::{PROFILING_ACTIVE, PROGRAM_NAME},
     env::{EnvMode, EnvStack},
@@ -9,7 +9,49 @@ use fish::{
 };
 use fish_wgetopt::{ArgType::*, WGetopter, WOption, wopt};
 use fish_widestring::{native_to_shell_text_owned, osstr2wcstring, wcs2bytes};
-use std::{fs::File, io::Write, sync::Arc};
+use std::{
+    fs::File,
+    io::{self, Write},
+    os::windows::io::{BorrowedHandle, RawHandle},
+    sync::Arc,
+};
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetStdHandle(kind: u32) -> RawHandle;
+    fn GetConsoleMode(handle: RawHandle, mode: *mut u32) -> i32;
+    fn GetFileType(handle: RawHandle) -> u32;
+    fn SetLastError(error: u32);
+}
+
+/// Probe each actual standard handle independently, without reading bytes or
+/// changing modes. A pipe (including an arbitrary VT-speaking pipe) is not a console.
+fn standard_console(kind: u32) -> io::Result<Option<BorrowedHandle<'static>>> {
+    let handle = unsafe { GetStdHandle(kind) };
+    if handle.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "standard handle is unavailable",
+        ));
+    }
+    if handle == (-1isize) as RawHandle {
+        return Err(io::Error::last_os_error());
+    }
+    let mut mode = 0;
+    if unsafe { GetConsoleMode(handle, &mut mode) } != 0 {
+        return Ok(Some(unsafe { BorrowedHandle::borrow_raw(handle) }));
+    }
+    // GetConsoleMode also fails for valid files, pipes and NUL. Distinguish those
+    // from a broken inherited handle rather than diagnosing all of them as consoles.
+    unsafe { SetLastError(0) };
+    if unsafe { GetFileType(handle) } == 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(0) {
+            return Err(error);
+        }
+    }
+    Ok(None)
+}
 
 fn diagnostic(message: &str) -> i32 {
     if let Ok(mut stderr) = NativeOutput::stderr() {
@@ -41,6 +83,17 @@ pub(super) fn main() {
 }
 
 fn run() -> i32 {
+    let status = run_shell();
+    if let Err(error) = fish::fs::cleanup_editor_directories() {
+        let cleanup_status = diagnostic(&format!("unable to clean up editor workspaces: {error}"));
+        if status == 0 {
+            return cleanup_status;
+        }
+    }
+    status
+}
+
+fn run_shell() -> i32 {
     let args: Vec<WString> = match std::env::args_os()
         .map(|arg| osstr2wcstring(arg).map(native_to_shell_text_owned))
         .collect()
@@ -80,6 +133,7 @@ fn run() -> i32 {
     let mut login = args.first().is_some_and(|arg| arg.starts_with('-'));
     let mut startup_profile_output = None;
     let mut print_rusage_self = false;
+    let mut force_interactive = false;
     while let Some(option) = options.next_opt() {
         match option {
             'N' => no_config = true,
@@ -123,7 +177,7 @@ fn run() -> i32 {
             'l' => login = true,
             'P' => private = true,
             '\x03' => startup_profile_output = Some(options.woptarg.unwrap().to_owned()),
-            'i' => return diagnostic("interactive mode requires N6"),
+            'i' => force_interactive = true,
             'h' => return diagnostic("help delivery requires N9"),
             '\x01' => print_rusage_self = true,
             ':' => {
@@ -148,6 +202,53 @@ fn run() -> i32 {
     }
     let operands = &options.argv[options.wopt_index..];
     let _rusage = print_rusage_self.then(|| PrintRusageOnDrop);
+    let input_console = standard_console(-10i32 as u32);
+    let output_console = standard_console(-11i32 as u32);
+    let console_input = matches!(&input_console, Ok(Some(_)));
+    let console_output = matches!(&output_console, Ok(Some(_)));
+    let read_stdin = commands.is_empty() && operands.is_empty();
+    let interactive = !no_execute && (force_interactive || (read_stdin && console_input));
+    let enter_editor = interactive && read_stdin;
+    if enter_editor {
+        for (name, capability) in [
+            ("standard input", &input_console),
+            ("standard output", &output_console),
+        ] {
+            match capability {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return diagnostic(&format!(
+                        "interactive editing requires {name} to be a native console"
+                    ));
+                }
+                Err(error) => {
+                    return diagnostic(&format!("{name} is unavailable: {error}"));
+                }
+            }
+        }
+    }
+    // Session installation only retains the original handles/modes. In particular,
+    // -ic with captured streams is interactive script evaluation, not a physical UI.
+    // Batch -c with real consoles may still enter read/key-reader/breakpoint scopes.
+    let _console_session = if !no_execute && console_input && console_output {
+        let session = match fish::console_windows::ConsoleSession::new(
+            input_console.as_ref().unwrap().unwrap(),
+            output_console.as_ref().unwrap().unwrap(),
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                return diagnostic(&format!(
+                    "unable to initialize native console session: {error}"
+                ));
+            }
+        };
+        Some(fish::console_windows::install_session(session))
+    } else {
+        None
+    };
+    if !no_execute {
+        fish::proc::set_interactive_session(interactive);
+    }
     let mut console_controls = match fish::signal::initialize_console_controls() {
         Ok(guard) => guard,
         Err(error) => {
@@ -166,6 +267,9 @@ fn run() -> i32 {
         ));
     }
     let state_start = std::time::Instant::now();
+    // Install cleanup before fallible initialization, including partially-created
+    // persistent state. No-execute never initializes or acquires that state.
+    let _state_cleanup = (!no_execute).then(|| variables.native_state_guard());
     if !no_execute {
         if private || no_config {
             fish::history::start_private_mode(&variables);
@@ -174,7 +278,6 @@ fn run() -> i32 {
             return diagnostic(&format!("unable to initialize native state: {error}"));
         }
     }
-    let _state_cleanup = variables.native_state_guard();
     if login {
         fish::proc::mark_login();
     }
@@ -301,6 +404,17 @@ fn run() -> i32 {
                 }
             }
         }
+        if interactive && no_config && !parser.libdata().exit_current_script {
+            parser.set_one(
+                L!("fish_key_bindings"),
+                ParserEnvSetMode::new(EnvMode::UNEXPORT),
+                L!("fish_default_key_bindings").to_owned(),
+            );
+            if !fish::function::exists(L!("fish_default_key_bindings"), &mut parser) {
+                return diagnostic("embedded default interactive key bindings are missing");
+            }
+            parser.eval(L!("fish_default_key_bindings"), &io);
+        }
         if !parser.libdata().exit_current_script {
             for command in init_commands {
                 if no_execute {
@@ -366,6 +480,39 @@ fn run() -> i32 {
                     break;
                 }
             }
+        } else if enter_editor {
+            let editor_scope = match fish::tty_handoff::NativeEditorScope::enter() {
+                Ok(scope) => scope,
+                Err(error) => {
+                    return diagnostic(&format!(
+                        "unable to enter native interactive reader: {error}"
+                    ));
+                }
+            };
+            let result = {
+                let _interactive = parser.push_scope(|scope| scope.is_interactive = true);
+                fish::reader::reader_read_interactive(&mut parser)
+            };
+            // No completion observed during exit handlers may reclaim editor
+            // ownership from a child after this final reader has returned.
+            fish::tty_handoff::native_begin_shutdown();
+            let explicit_exit = parser.libdata().exit_current_script;
+            status = parser.last_status();
+            if let Err(error) = result {
+                let failure_status = diagnostic(&format!("interactive reader failed: {error}"));
+                if !explicit_exit {
+                    status = failure_status;
+                }
+            } else if fish::reader::native_reader_failed() && !explicit_exit {
+                status = 2;
+            }
+            if let Err(error) = editor_scope.finish() {
+                let failure_status =
+                    diagnostic(&format!("unable to restore native console state: {error}"));
+                if status == 0 && !explicit_exit {
+                    status = failure_status;
+                }
+            }
         } else {
             let mut input = if let Some(filename) = operands.first() {
                 *parser.current_filename.borrow_mut() = Some(Arc::new((*filename).to_owned()));
@@ -384,12 +531,7 @@ fn run() -> i32 {
                 }
             } else {
                 match BorrowedFdFile::stdin() {
-                    Ok(input) if !input.is_console() => input,
-                    Ok(_) => {
-                        return diagnostic(
-                            "interactive input requires N6; supply a script, redirected stdin or -c",
-                        );
-                    }
+                    Ok(input) => input,
                     Err(error) => {
                         return diagnostic(&format!("standard input is unavailable: {error}"));
                     }
@@ -429,6 +571,7 @@ fn run() -> i32 {
         }
     })();
     if !no_execute {
+        fish::tty_handoff::native_begin_shutdown();
         if fish::signal::signal_check_cancel() != 0 {
             if let Err(error) = console_controls.rearm() {
                 let _ = diagnostic(&format!(

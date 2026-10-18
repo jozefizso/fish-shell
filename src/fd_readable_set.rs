@@ -1,4 +1,6 @@
+#[cfg(unix)]
 use libc::c_int;
+#[cfg(unix)]
 use std::os::unix::prelude::*;
 use std::time::Duration;
 
@@ -13,6 +15,7 @@ impl Timeout {
 
     /// Convert from usecs to poll-friendly msecs.
     #[allow(unused)]
+    #[cfg(unix)]
     fn as_poll_msecs(&self) -> c_int {
         match self {
             // Negative values mean wait forever in poll-speak.
@@ -30,11 +33,13 @@ impl Timeout {
 
 /// Returns `true` if the fd is or becomes readable within the given timeout.
 /// This returns `false` if the waiting is interrupted by a signal.
+#[cfg(unix)]
 pub fn is_fd_readable(fd: i32, timeout: Timeout) -> bool {
     FdReadableSet::is_fd_readable(fd, timeout)
 }
 
 /// Returns whether an fd is readable.
+#[cfg(unix)]
 pub fn poll_fd_readable(fd: i32) -> bool {
     FdReadableSet::poll_fd_readable(fd)
 }
@@ -125,12 +130,12 @@ impl FdReadableSet {
     }
 }
 
-#[cfg(not(apple))]
+#[cfg(all(unix, not(apple)))]
 pub struct FdReadableSet {
     pollfds_: Vec<libc::pollfd>,
 }
 
-#[cfg(not(apple))]
+#[cfg(all(unix, not(apple)))]
 impl FdReadableSet {
     /// Construct an empty set.
     pub fn new() -> FdReadableSet {

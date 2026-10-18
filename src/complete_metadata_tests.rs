@@ -1,14 +1,11 @@
 use super::*;
+use crate::tests::prelude::run_native_test_in_child;
 use crate::{
     abbrs::{self, Position, Replacement},
     builtins::BuiltinResultExt,
     env::EnvStack,
     io::{IoChain, IoStreams, OutputStream, StringOutputStream},
     parser::{CancelBehavior, Parser},
-};
-use std::{
-    os::windows::io::AsRawHandle,
-    process::{Command, Stdio},
 };
 
 fn invoke(parser: &mut Parser, arguments: &[&wstr]) -> WString {
@@ -116,39 +113,10 @@ fn replay(parser: &mut Parser, source: &wstr) {
     assert!(!result.break_expand);
 }
 
-fn run_metadata_test_in_child(test_name: &str) -> bool {
-    // Parser execution is main-thread-only. Each owning test gets an isolated
-    // libtest process rather than changing another test's thread ID or globals.
-    if std::env::var_os("FISH_NATIVE_METADATA_TEST_CHILD").as_deref()
-        != Some(std::ffi::OsStr::new(test_name))
-    {
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
-        }
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test_name, "--nocapture"])
-            .env("FISH_NATIVE_METADATA_TEST_CHILD", test_name)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let wait = unsafe { WaitForSingleObject(child.as_raw_handle(), 30_000) };
-        if wait != 0 {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("native metadata test exceeded its process bound: {wait}");
-        }
-        assert!(child.wait().unwrap().success());
-        return false;
-    }
-    true
-}
 
 #[test]
 fn native_declarative_metadata() {
-    if !run_metadata_test_in_child("complete::metadata_tests::native_declarative_metadata") {
+    if !run_native_test_in_child("complete::metadata_tests::native_declarative_metadata") {
         return;
     }
     crate::threads::init();
@@ -723,7 +691,7 @@ fn native_declarative_metadata() {
 
 #[test]
 fn native_disk_completion_autoload() {
-    if !run_metadata_test_in_child("complete::metadata_tests::native_disk_completion_autoload") {
+    if !run_native_test_in_child("complete::metadata_tests::native_disk_completion_autoload") {
         return;
     }
     crate::threads::init();

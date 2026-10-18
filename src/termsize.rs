@@ -5,6 +5,7 @@ use crate::parser::{Parser, ParserEnvSetMode};
 use crate::prelude::*;
 use crate::wutil::fish_wcstoi;
 use fish_common::assert_sync;
+#[cfg(unix)]
 use std::mem::MaybeUninit;
 use std::num::NonZeroU16;
 use std::sync::Mutex;
@@ -31,6 +32,7 @@ fn var_to_int(var: Option<EnvVar>) -> Option<NonZeroU16> {
 }
 
 /// Return a termsize from ioctl, or None on error or if not supported.
+#[cfg(unix)]
 fn read_termsize_from_tty() -> Option<Termsize> {
     // Note: historically we've supported libc::winsize not existing.
     let winsize = {
@@ -55,6 +57,35 @@ fn read_termsize_from_tty() -> Option<Termsize> {
         Termsize::DEFAULT_HEIGHT
     });
     Some(Termsize::new(width, height))
+}
+
+/// Native sizing is tied to the visible output viewport, never the backing
+/// screen buffer. An installed editor session owns the authoritative output
+/// handle; outside an editor, probe native stdout without opening CONOUT$ or
+/// treating redirected streams as terminals.
+#[cfg(windows)]
+fn read_termsize_from_tty() -> Option<Termsize> {
+    // Session routing is main-thread-only; sizing can also be requested while
+    // initializing an environment before registration or on a worker thread.
+    let session = if crate::threads::is_registered_main_thread() {
+        crate::console_windows::current_session()
+    } else {
+        None
+    };
+    let (width, height) = if let Some(session) = session {
+        session.viewport().ok()?
+    } else {
+        let handle = crate::fds::standard_handle(-11i32 as u32).ok()?;
+        let state = crate::terminal::native_console_state(handle).ok()??;
+        let window = state.info.window;
+        let width = i32::from(window[2]) - i32::from(window[0]) + 1;
+        let height = i32::from(window[3]) - i32::from(window[1]) + 1;
+        (u16::try_from(width).ok()?, u16::try_from(height).ok()?)
+    };
+    Some(Termsize::new(
+        NonZeroU16::new(width)?,
+        NonZeroU16::new(height)?,
+    ))
 }
 
 impl Termsize {
@@ -89,7 +120,7 @@ impl Termsize {
 }
 
 struct TermsizeData {
-    // The last termsize returned by TIOCGWINSZ, or none if none.
+    // The last size returned by the native tty/console probe, or none if none.
     last_from_tty: Option<Termsize>,
     // The last termsize seen from the environment (COLUMNS/LINES), or none if none.
     last_from_env: Option<Termsize>,
@@ -125,10 +156,10 @@ impl TermsizeData {
 }
 
 /// Termsize monitoring is more complicated than one may think.
-/// The main source of complexity is the interaction between the environment variables COLUMNS/ROWS,
-/// the WINCH signal, and the TIOCGWINSZ ioctl.
-/// Our policy is "last seen wins": if COLUMNS or LINES is modified, we respect that until we get a
-/// SIGWINCH.
+/// The main source of complexity is the interaction between COLUMNS/LINES and
+/// native terminal resize notifications (SIGWINCH on Unix, console records on Windows).
+/// Our policy is "last seen wins": if COLUMNS or LINES is modified, we respect that
+/// until the terminal is invalidated.
 pub struct TermsizeContainer {
     // Our lock-protected data.
     data: Mutex<TermsizeData>,
@@ -162,6 +193,14 @@ impl TermsizeContainer {
             data.last_from_tty = (self.tty_size_reader)();
         }
         data.current()
+    }
+
+    /// Publish the initial dimensions before native prompts or bindings run.
+    /// `initialize` alone intentionally updates only the size model.
+    #[cfg(windows)]
+    pub(crate) fn initialize_and_publish(&self, parser: &mut Parser) {
+        let size = self.initialize(parser.vars());
+        self.set_columns_lines_vars(size, parser);
     }
 
     /// If our termsize is stale, update it, using `parser` to fire any events that may be
@@ -256,7 +295,7 @@ pub fn termsize_update(parser: &mut Parser) -> Termsize {
     SHARED_CONTAINER.updating(parser)
 }
 
-/// May be called form a signal handler (WINCH).
+/// May be called from a signal handler (WINCH), or for a native console resize record.
 pub fn signal_safe_termsize_invalidate_tty() {
     TTY_TERMSIZE_GEN_COUNT.fetch_add(1, Ordering::Relaxed);
 }
@@ -272,7 +311,15 @@ mod tests {
     #[test]
     #[serial]
     fn test_termsize() {
+        #[cfg(unix)]
         test_init();
+        #[cfg(windows)]
+        {
+            if !run_native_test_in_child("termsize::tests::test_termsize") {
+                return;
+            }
+            crate::threads::init();
+        }
         let env_global = EnvSetMode::new(EnvMode::GLOBAL, false);
         let parser = &mut TestParser::new();
 

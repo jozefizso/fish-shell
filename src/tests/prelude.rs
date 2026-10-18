@@ -1,17 +1,26 @@
+#[cfg(unix)]
 use crate::common::BUILD_DIR;
+use crate::env::EnvStack;
 use crate::env::{EnvMode, EnvVar, EnvVarFlags, Environment};
+#[cfg(unix)]
 use crate::locale::set_libc_locales;
 use crate::parser::{CancelBehavior, Parser};
 use crate::prelude::*;
+#[cfg(unix)]
+use crate::proc::proc_init;
+#[cfg(unix)]
 use crate::signal::signal_reset_handlers;
+#[cfg(unix)]
 use crate::wutil::wgetcwd;
-use crate::{env::EnvStack, proc::proc_init};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::env::set_current_dir;
+#[cfg(unix)]
 use std::path::PathBuf;
 
 pub use serial_test::serial;
 
+#[cfg(unix)]
 pub fn test_init() {
     static DONE: std::sync::Once = std::sync::Once::new();
     DONE.call_once(|| {
@@ -35,6 +44,39 @@ pub fn test_init() {
         // Set PWD from getcwd - fixes #5599
         EnvStack::globals().set_pwd_from_getcwd();
     });
+}
+
+#[cfg(windows)]
+pub fn run_native_test_in_child(test_name: &str) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::{Command, Stdio};
+    // Own the real registered main thread in an isolated exact-test process,
+    // without changing another library test's thread ID or process globals.
+    if std::env::var_os("FISH_NATIVE_TEST_CHILD").as_deref()
+        != Some(std::ffi::OsStr::new(test_name))
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env("FISH_NATIVE_TEST_CHILD", test_name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let wait = unsafe { WaitForSingleObject(child.as_raw_handle(), 30_000) };
+        if wait != 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("native owning test exceeded its process bound: {wait}");
+        }
+        assert!(child.wait().unwrap().success());
+        return false;
+    }
+    true
 }
 
 /// An environment built around an std::map.
@@ -73,7 +115,14 @@ impl PwdEnvironment {
 impl Environment for PwdEnvironment {
     fn getf(&self, name: &wstr, mode: EnvMode) -> Option<EnvVar> {
         if name == "PWD" {
-            return Some(EnvVar::new(wgetcwd(), EnvVarFlags::default()));
+            #[cfg(unix)]
+            let cwd = wgetcwd();
+            #[cfg(windows)]
+            let cwd = fish_widestring::native_to_shell_text_owned(
+                fish_widestring::osstr2wcstring(std::env::current_dir().expect("test cwd"))
+                    .expect("valid native test cwd"),
+            );
+            return Some(EnvVar::new(cwd, EnvVarFlags::default()));
         }
         self.parent.getf(name, mode)
     }
@@ -90,14 +139,24 @@ impl Environment for PwdEnvironment {
 /// A wrapper around a Parser with some test helpers.
 pub struct TestParser {
     pub parser: Parser,
+    #[cfg(unix)]
     pub pushed_dirs: Vec<String>,
 }
 
 impl TestParser {
     pub fn new() -> TestParser {
+        let variables = EnvStack::new();
+        #[cfg(windows)]
+        variables
+            .initialize_native_from(
+                std::iter::empty(),
+                &std::env::current_dir().expect("native model-test cwd"),
+            )
+            .expect("native model-test environment");
         TestParser {
-            parser: Parser::new(EnvStack::new(), CancelBehavior::default())
+            parser: Parser::new(variables, CancelBehavior::default())
                 .expect("test parser initialization"),
+            #[cfg(unix)]
             pushed_dirs: Vec::new(),
         }
     }
@@ -109,12 +168,14 @@ impl TestParser {
     }
 }
 
+#[cfg(unix)]
 pub trait ParserExt {
     /// Helper to chdir and then update $PWD.
     fn pushd(&self, pushed_dirs: &mut Vec<String>, path: &str);
     fn popd(&self, pushed_dirs: &mut Vec<String>);
 }
 
+#[cfg(unix)]
 impl ParserExt for Parser {
     fn pushd(&self, pushed_dirs: &mut Vec<String>, path: &str) {
         let cwd = wgetcwd();

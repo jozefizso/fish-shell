@@ -6,12 +6,11 @@ use crate::env::config_paths::get_fish_path;
 use crate::err_fmt;
 #[cfg(all(unix, not(feature = "localize-messages")))]
 use crate::err_raw;
+#[cfg(unix)]
+use crate::proc::get_login;
+use crate::proc::is_interactive_session;
 use crate::proc::{JobControl, get_job_control_mode, set_job_control_mode};
-#[cfg(unix)]
-use crate::proc::{get_login, is_interactive_session};
-#[cfg(unix)]
 use crate::reader::reader_in_interactive_read;
-#[cfg(unix)]
 use crate::tty_handoff::{TERMINAL_OS_NAME, get_scroll_content_up_capability, xtversion};
 use crate::wutil::{self, wbasename, wdirname};
 #[cfg(unix)]
@@ -419,23 +418,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             };
         }
         #[cfg(windows)]
-        IsInteractive | IsInteractiveRead => {
-            if !args.is_empty() {
-                err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 0, args.len())
-                    .cmd(cmd)
-                    .finish(streams);
-                return Err(STATUS_INVALID_ARGS);
-            }
-            return Err(STATUS_CMD_ERROR);
-        }
-        #[cfg(windows)]
-        IsBreakpoint | Terminal | TerminalOs | TestTerminalFeature => {
-            err_fmt!("reader and terminal state are unavailable on native Windows (N6/N7)")
-                .cmd(cmd)
-                .finish(streams);
-            return Err(STATUS_INVALID_ARGS);
-        }
-        #[cfg(windows)]
         GetFile => {
             if args.len() != 1 {
                 err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 1, args.len())
@@ -631,7 +613,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                 return Err(STATUS_CMD_ERROR);
             }
         }
-        #[cfg(unix)]
         c @ TestTerminalFeature => {
             if args.len() != 1 {
                 err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 1, args.len())
@@ -724,7 +705,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         .out
                         .appendln(&parser.lineno_for_display().to_wstring());
                 }
-                #[cfg(unix)]
                 IsInteractive => {
                     if is_interactive_session() {
                         return Ok(SUCCESS);
@@ -745,7 +725,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
-                #[cfg(unix)]
                 IsBreakpoint => {
                     if parser.is_breakpoint() {
                         return Ok(SUCCESS);
@@ -775,7 +754,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
-                #[cfg(unix)]
                 IsInteractiveRead => {
                     if reader_in_interactive_read() {
                         return Ok(SUCCESS);
@@ -843,12 +821,14 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                     };
                     streams.out.appendln(&result);
                 }
-                #[cfg(unix)]
                 Terminal => {
+                    #[cfg(windows)]
+                    if xtversion().is_none_or(|version| version.is_empty()) {
+                        return Err(STATUS_CMD_ERROR);
+                    }
                     let xtversion = xtversion().unwrap_or_default();
                     streams.out.appendln(xtversion);
                 }
-                #[cfg(unix)]
                 TerminalOs => {
                     let Some(Some(terminal_os_name)) = TERMINAL_OS_NAME.get() else {
                         return Err(STATUS_CMD_ERROR);
@@ -856,8 +836,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                     streams.out.appendln(first_line(terminal_os_name));
                 }
                 #[cfg(windows)]
-                IsLogin | IsInteractive | IsInteractiveRead | IsBreakpoint | Terminal
-                | TerminalOs => unreachable!(),
+                IsLogin => unreachable!(),
                 JobControl | Features | TestFeature | GetFile | ListFiles | Language
                 | TestTerminalFeature => {
                     unreachable!("")
@@ -869,7 +848,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     Ok(SUCCESS)
 }
 
-#[cfg(unix)]
 fn first_line(s: &wstr) -> &wstr {
     &s[..s.chars().position(|c| c == '\n').unwrap_or(s.len())]
 }

@@ -1,6 +1,5 @@
 //! Prototypes for various functions, mostly string utilities, that are used by most parts of fish.
 
-#[cfg(unix)]
 use crate::terminal::Outputter;
 use crate::{
     global_safety::{AtomicRef, RelaxedAtomicBool},
@@ -95,11 +94,10 @@ pub fn valid_func_name(name: &wstr) -> bool {
     || name.contains('\0'))
 }
 
-// Output writes always succeed; this adapter allows us to use it in a write-like macro.
-#[cfg(unix)]
+// Formatting appends are infallible; native owners check the outputter's sticky
+// I/O result at flush before admitting input, donating, or returning.
 struct OutputterWriteAdapter<'a>(&'a mut Outputter);
 
-#[cfg(unix)]
 impl<'a> std::fmt::Write for OutputterWriteAdapter<'a> {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
         self.0.write_bytes(s.as_bytes());
@@ -107,18 +105,21 @@ impl<'a> std::fmt::Write for OutputterWriteAdapter<'a> {
     }
 }
 
-#[cfg(unix)]
 impl<'a> std::io::Write for OutputterWriteAdapter<'a> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.write_bytes(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            return self.0.flush();
+        }
+        #[cfg(unix)]
         Ok(())
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn do_write_to_output(writer: &mut Outputter, args: std::fmt::Arguments<'_>) {
     let mut adapter = OutputterWriteAdapter(writer);
     std::fmt::write(&mut adapter, args).unwrap();
@@ -310,14 +311,19 @@ pub fn valid_var_name(s: &wstr) -> bool {
 #[macro_export]
 macro_rules! env_stack_set_from_env {
     ($vars:ident, $var_name:literal) => {{
-        if let Some(var) = std::env::var_os($var_name) {
-            $vars.set_one(
-                L!($var_name),
-                $crate::env::EnvSetMode::new_at_early_startup($crate::env::EnvMode::GLOBAL),
-                fish_widestring::osstr2wcstring(var),
-            );
-        }
-    }};
+            if let Some(var) = std::env::var_os($var_name) {
+                let var = fish_widestring::osstr2wcstring(var);
+                #[cfg(windows)]
+                let var = fish_widestring::native_to_shell_text_owned(
+                    var.map_err(std::io::Error::other)?,
+                );
+                $vars.set_one(
+                    L!($var_name),
+                    $crate::env::EnvSetMode::new_at_early_startup($crate::env::EnvMode::GLOBAL),
+                    var,
+                );
+            }
+        }};
 }
 
 /// The highest character number of character to try and escape.

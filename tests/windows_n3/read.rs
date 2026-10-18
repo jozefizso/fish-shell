@@ -173,6 +173,33 @@ pub(super) fn exercise(f: &Fixture) {
         "persisted 雪\n".as_bytes(),
         b"",
     );
+    // Editor-only options are accepted but have no startup/prompt effects for
+    // redirected input; the typed bytes alone become the assigned value.
+    for options in [
+        "--command 'startup text'",
+        "--prompt 'printf prompt-effect'",
+        "--prompt-str literal-prompt",
+        "--right-prompt 'printf right-prompt-effect'",
+        "--shell",
+        "--silent",
+        "--command 'startup text' --prompt 'printf prompt-effect' --right-prompt 'printf right-prompt-effect' --shell --silent",
+    ] {
+        exact(
+            f.input(
+                &format!("read {options} value; printf '%s:<%s>' $status $value"),
+                b"batch value\n",
+            ),
+            0,
+            b"0:<batch value>",
+            b"",
+        );
+    }
+    exact(
+        f.input("read value; printf '%s' $value", b"\xff\n"),
+        0,
+        b"\xff",
+        b"",
+    );
     for code in [
         "read --unknown value",
         "read --nchars nope value",
@@ -182,14 +209,9 @@ pub(super) fn exercise(f: &Fixture) {
         "read --delimiter=, --tokenize value",
         "read --line --null value",
         "read --line --delimiter=, value",
+        "read --prompt 'printf marker' --prompt-str text value",
         "read 'invalid-name'",
         "read status",
-        "read --command text value",
-        "read --prompt 'printf marker' value",
-        "read --prompt-str text value",
-        "read --right-prompt text value",
-        "read --shell value",
-        "read --silent value",
         "read --help",
     ] {
         let result = f.input(code, b"must remain input\n");

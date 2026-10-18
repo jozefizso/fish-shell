@@ -78,7 +78,7 @@ pub enum EndExecutionReason {
     Error,
 }
 
-pub struct ExecutionContext {
+pub struct ExecutionContext<'io> {
     // The parsed source and its AST.
     pstree: ParsedSourceRef,
 
@@ -88,7 +88,7 @@ pub struct ExecutionContext {
 
     /// The block IO chain.
     /// For example, in `begin; foo ; end < file.txt` this would have the 'file.txt' IO.
-    block_io: IoChain,
+    block_io: &'io IoChain,
 }
 
 // Report an error, setting $status to `status`. Always returns
@@ -120,10 +120,10 @@ pub fn varname_error<'a>(command: &'a wstr, bad_name: &'a wstr) -> Error<'a> {
     .cmd(command)
 }
 
-impl ExecutionContext {
+impl<'io> ExecutionContext<'io> {
     /// Construct a context in preparation for evaluating a node in a tree, with the given block_io.
     /// The execution context may access the parser and parent job group (if any) through ctx.
-    pub fn new(pstree: ParsedSourceRef, block_io: IoChain) -> Self {
+    pub fn new(pstree: ParsedSourceRef, block_io: &'io IoChain) -> Self {
         Self {
             pstree,
             cancel_signal: None,

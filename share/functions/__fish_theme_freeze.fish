@@ -2,15 +2,25 @@
 function __fish_theme_freeze
     set -l data_source $argv[1]
     set -l theme_data $argv[2..]
-    set -l relative_path conf.d/fish_frozen_theme.fish
+    set -l separator /
+    if builtin -q __fish_native_fs
+        set separator '\\'
+    end
+    set -l relative_path conf.d$separator'fish_frozen_theme.fish'
     __fish_backup_config_files $relative_path
+    or return
 
     set -l help_section interactive#syntax-highlighting
     status get-file help_sections | string match -q $help_section
     or echo "fish: internal error: missing help section '$help_section'"
 
-    mkdir -p -- $__fish_config_dir/conf.d
-    printf >$__fish_config_dir/$relative_path %s\n \
+    if builtin -q __fish_native_fs
+        __fish_native_fs mkdir $__fish_config_dir$separator'conf.d'
+    else
+        mkdir -p -- $__fish_config_dir/conf.d
+    end
+    or return
+    printf >$__fish_config_dir$separator$relative_path %s\n \
         $(test $data_source = __fish_theme_migrate &&
             echo "\
 # This file was created by fish when upgrading to version 4.3, to migrate

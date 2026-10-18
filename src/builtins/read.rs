@@ -6,25 +6,23 @@ use crate::{
     common::valid_var_name,
     env::{EnvMode, EnvVar, Environment as _, READ_BYTE_LIMIT},
     err_fmt, err_str,
+    history::{HistoryId, MemoryHistoryId},
     parse_execution::varname_error,
     parser::ParserEnvSetMode,
+    reader::{ReaderConfig, commandline_set_buffer, reader_pop, reader_push, reader_readline},
     tokenizer::{Tok, TokFlags, Tokenizer},
     wutil,
 };
 #[cfg(unix)]
 use crate::{
-    history::{HistoryId, MemoryHistoryId},
     input::{DecodeState, InvalidPolicy, decode_utf8},
     nix::isatty,
-    reader::{
-        ReaderConfig, commandline_set_buffer, reader_pop, reader_push, reader_readline,
-        set_shell_modes_temporarily,
-    },
+    reader::set_shell_modes_temporarily,
     wutil::perror_nix,
 };
 #[cfg(unix)]
 use fish_common::read_blocked;
-use fish_common::{UnescapeStringStyle, escape, unescape_string};
+use fish_common::{ScopeGuard, UnescapeStringStyle, escape, unescape_string};
 use fish_wcstringutil::{split_about, split_string_tok};
 use fish_widestring::bytes2wcstring;
 #[cfg(unix)]
@@ -32,6 +30,8 @@ use nix::unistd::{Whence, lseek};
 #[cfg(unix)]
 use std::os::fd::{BorrowedFd, RawFd};
 use std::{num::NonZeroUsize, sync::atomic::Ordering};
+#[cfg(windows)]
+type RawFd = i32; // Logical reader input selector, never a native HANDLE.
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum TokenOutputMode {
@@ -229,7 +229,6 @@ fn parse_cmd_opts(
 
 /// Read from the tty. This is only valid when the stream is stdin and it is attached to a tty and
 /// we weren't asked to split on null characters.
-#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn read_interactive(
     parser: &mut Parser,
@@ -242,9 +241,7 @@ fn read_interactive(
     right_prompt: &wstr,
     commandline: Option<&WString>,
     inputfd: RawFd,
-) -> BuiltinResult {
-    let mut exit_res = Ok(SUCCESS);
-
+) -> std::io::Result<BuiltinResult> {
     // Construct a configuration.
     let conf = ReaderConfig {
         complete_ok: shell,
@@ -268,43 +265,232 @@ fn read_interactive(
         ..Default::default()
     };
 
+    #[cfg(windows)]
+    let editor_scope = crate::tty_handoff::NativeEditorScope::enter()?;
+    #[cfg(unix)]
     let old_modes = set_shell_modes_temporarily(inputfd);
 
-    // Keep in-memory history only.
-    reader_push(
-        parser,
-        HistoryId::Memory(MemoryHistoryId::BuiltinRead),
-        conf,
-    );
-    let _modifiable_commandline = parser.scope().readonly_commandline.then(|| {
-        parser.push_scope(|s| {
-            s.readonly_commandline = false;
-        })
-    });
-    if let Some(commandline) = commandline {
-        commandline_set_buffer(parser, Some(commandline.clone()), None);
-    }
+    let result = (|| {
+        // Keep in-memory history only. If initialization fails, readline has not yet
+        // acquired responsibility for restoring the original Unix terminal modes.
+        match reader_push(
+            parser,
+            HistoryId::Memory(MemoryHistoryId::BuiltinRead),
+            conf,
+        ) {
+            Ok(reader) => drop(reader),
+            Err(error) => {
+                #[cfg(unix)]
+                if let Some(old_modes) = old_modes.as_ref() {
+                    if let Err(restore) = nix::sys::termios::tcsetattr(
+                        unsafe { BorrowedFd::borrow_raw(inputfd) },
+                        nix::sys::termios::SetArg::TCSANOW,
+                        old_modes,
+                    ) {
+                        return Err(std::io::Error::new(
+                            error.kind(),
+                            format!("{error}; restoring terminal: {restore}"),
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+        }
+        let _reader = ScopeGuard::new((), |()| reader_pop());
+        let _modifiable_commandline = parser.scope().readonly_commandline.then(|| {
+            parser.push_scope(|s| {
+                s.readonly_commandline = false;
+            })
+        });
+        if let Some(commandline) = commandline {
+            commandline_set_buffer(parser, Some(commandline.clone()), None);
+        }
 
-    let mline = {
-        let _interactive = parser.push_scope(|s| s.is_interactive = true);
-        reader_readline(parser, old_modes, nchars)
-    };
-    if let Some(line) = mline {
+        let mline = {
+            let _interactive = parser.push_scope(|s| s.is_interactive = true);
+            #[cfg(unix)]
+            {
+                reader_readline(parser, old_modes, nchars)
+            }
+            #[cfg(windows)]
+            {
+                reader_readline(parser, nchars)
+            }
+        };
+        #[cfg(windows)]
+        {
+            let input = &mut crate::reader::reader_current_data().unwrap().input_data;
+            if let Some(error) = input.native_error.take() {
+                return Err(error);
+            }
+            if let Some(status) = input.native_exit_status {
+                parser.libdata_mut().exit_current_script = true;
+                return Ok(BuiltinResult::from_dynamic(status));
+            }
+            if input.native_cancelled {
+                return Ok(Err(130));
+            }
+        }
+        let Some(line) = mline else {
+            return Ok(Err(STATUS_CMD_ERROR));
+        };
         *buff = line;
         if let Some(nchars) = nchars.map(usize::from) {
-            // Line may be longer than nchars if a keybinding used `commandline -i`
-            // note: we're deliberately throwing away the tail of the commandline.
-            // It shouldn't be unread because it was produced with `commandline -i`,
-            // not typed.
+            // A binding may insert more than nchars. Its tail is not typed input,
+            // and must not be returned to the native stream cursor.
+            #[cfg(windows)]
+            let nchars = crate::native_text::prefix_end(buff, nchars);
             if nchars < buff.len() {
                 buff.truncate(nchars);
             }
         }
-    } else {
-        exit_res = Err(STATUS_CMD_ERROR);
+        Ok(Ok(SUCCESS))
+    })();
+    #[cfg(windows)]
+    {
+        let restore = editor_scope.finish();
+        return match (result, restore) {
+            (Err(error), Err(restore)) => Err(std::io::Error::new(
+                error.kind(),
+                format!("{error}; restoring console: {restore}"),
+            )),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(status), Ok(())) => Ok(status),
+        };
     }
-    reader_pop();
-    exit_res
+    #[cfg(unix)]
+    result
+}
+
+/// Nonediting console input uses the same session decoder as the surrounding
+/// reader. Delimiters, byte limits and EOF are handled before any key binding or
+/// VT paste transformation; no second console consumer is created.
+#[cfg(windows)]
+fn read_native_console_null(
+    parser: &mut Parser,
+    output: &mut WString,
+    nchars: Option<NonZeroUsize>,
+) -> std::io::Result<BuiltinResult> {
+    use crate::fd_readable_set::Timeout;
+    use crate::input::{CharEvent, InputEventTrigger, NativeInput, WaitSources};
+    let mut scope = crate::tty_handoff::NativeEditorScope::enter()?;
+    let result = (|| {
+        scope.disable_protocols()?;
+        let mut input = NativeInput::default();
+        let mut bytes = Vec::new();
+        let mut scalar_start = 0;
+        let mut characters = 0;
+        let limit = READ_BYTE_LIMIT.load(Ordering::Relaxed);
+        let status = 'collect: loop {
+            crate::event::fire_delayed(parser);
+            crate::proc::job_reap(parser, true, None);
+            if parser.libdata().exit_current_script {
+                break BuiltinResult::from_dynamic(parser.last_status());
+            }
+            let jobs = crate::proc::native_runtime_if_initialized(parser);
+            let state = parser.variables.native_state_runtime();
+            let event = input.next(
+                Timeout::Forever,
+                WaitSources {
+                    jobs: jobs.as_ref().map(|runtime| runtime.notification_handle()),
+                    state: state.as_ref().map(|runtime| runtime.notification_handle()),
+                    workers: None,
+                },
+            );
+            let mut encoded = [0; 4];
+            let text: &[u8] = match event {
+                InputEventTrigger::Byte(byte) => {
+                    encoded[0] = byte;
+                    &encoded[..1]
+                }
+                InputEventTrigger::Event(CharEvent::Key(key)) => {
+                    let Some(text) = key.key.native_text else {
+                        continue;
+                    };
+                    text.encode_utf8(&mut encoded).as_bytes()
+                }
+                InputEventTrigger::Error(error) => return Err(error),
+                InputEventTrigger::Eof => {
+                    break if bytes.is_empty() {
+                        Err(STATUS_CMD_ERROR)
+                    } else {
+                        Ok(SUCCESS)
+                    };
+                }
+                InputEventTrigger::Interrupted => {
+                    let controls = crate::signal::pending_console_controls();
+                    input.interrupt()?;
+                    crate::signal::rearm_console_controls()?;
+                    crate::event::fire_delayed(parser);
+                    if parser.libdata().exit_current_script {
+                        break BuiltinResult::from_dynamic(parser.last_status());
+                    }
+                    if controls.close != 0 {
+                        crate::reader::native_console_closed();
+                        break Err(STATUS_CMD_ERROR);
+                    }
+                    if controls.ctrl_c != 0 || controls.ctrl_break != 0 {
+                        crate::reader::native_reader_interrupt();
+                        break Err(130);
+                    }
+                    input.resume()?;
+                    continue;
+                }
+                InputEventTrigger::UvarNotified => {
+                    for event in parser.variables.service_native_state()? {
+                        crate::event::fire(parser, event);
+                    }
+                    continue;
+                }
+                InputEventTrigger::JobNotified => continue,
+                InputEventTrigger::Event(_)
+                | InputEventTrigger::IOPortNotified
+                | InputEventTrigger::TimeoutElapsed => continue,
+            };
+            for &byte in text {
+                if byte == 0 {
+                    break 'collect Ok(SUCCESS);
+                }
+                if byte == 4 {
+                    break 'collect if bytes.is_empty() {
+                        Err(STATUS_CMD_ERROR)
+                    } else {
+                        Ok(SUCCESS)
+                    };
+                }
+                if byte == 3 {
+                    break 'collect Err(130);
+                }
+                if bytes.len() == limit {
+                    break 'collect Err(STATUS_READ_TOO_MUCH);
+                }
+                bytes.push(byte);
+                match std::str::from_utf8(&bytes[scalar_start..]) {
+                    Ok(_) => {
+                        scalar_start = bytes.len();
+                        characters += 1;
+                        if nchars.is_some_and(|count| characters == count.get()) {
+                            break 'collect Ok(SUCCESS);
+                        }
+                    }
+                    Err(error) if error.error_len().is_none() => {}
+                    Err(error) => {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+                    }
+                }
+            }
+        };
+        *output = bytes2wcstring(&bytes);
+        Ok(status)
+    })();
+    match (result, scope.finish()) {
+        (Err(error), Err(restore)) => Err(std::io::Error::new(
+            error.kind(),
+            format!("{error}; restoring console: {restore}"),
+        )),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(status), Ok(())) => Ok(status),
+    }
 }
 
 /// Bash uses 128 bytes for its chunk size. Very informal testing I did suggested that a smaller
@@ -558,20 +744,6 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
         return builtin_print_help(parser, streams, cmd);
     }
 
-    #[cfg(windows)]
-    if opts.commandline.is_some()
-        || opts.prompt.is_some()
-        || opts.prompt_str.is_some()
-        || !opts.right_prompt.is_empty()
-        || opts.shell
-        || opts.silent
-        || streams.is_terminal(0)
-    {
-        err_str!("terminal/editor read options require N6")
-            .cmd(cmd)
-            .finish(streams);
-        return Err(STATUS_INVALID_ARGS);
-    }
     validate_read_args(cmd, &mut opts, argv, parser, streams)?;
 
     // stdin may have been explicitly closed
@@ -598,6 +770,8 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
 
     #[cfg(unix)]
     let stream_stdin_is_a_tty = streams.stdin_fd() >= 0 && isatty(streams.stdin_fd());
+    #[cfg(windows)]
+    let stream_stdin_is_a_tty = streams.is_terminal(0);
 
     // Normally, we either consume a line of input or all available input. But if we are reading a
     // line at a time, we need a middle ground where we only consume as many lines as we need to
@@ -619,7 +793,13 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
                 &opts.right_prompt,
                 opts.commandline.as_ref(),
                 streams.stdin_fd(),
-            );
+            )
+            .unwrap_or_else(|error| {
+                err_fmt!("interactive input failed: %s", error.to_string())
+                    .cmd(cmd)
+                    .finish(streams);
+                Err(STATUS_CMD_ERROR)
+            });
         } else if opts.nchars.is_none() && !stream_stdin_is_a_tty &&
             // "one_line" is implemented as reading n-times to a new line,
             // if we're chunking we could get multiple lines so we would have to advance
@@ -658,12 +838,40 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
 
         #[cfg(windows)]
         {
-            exit_res = read_native(
-                streams.stdin_file.as_mut().unwrap(),
-                &mut buff,
-                opts.nchars,
-                opts.split_null,
-            );
+            exit_res = if stream_stdin_is_a_tty && opts.split_null {
+                read_native_console_null(parser, &mut buff, opts.nchars).unwrap_or_else(|error| {
+                    err_fmt!("console input failed: %s", error.to_string())
+                        .cmd(cmd)
+                        .finish(streams);
+                    Err(STATUS_CMD_ERROR)
+                })
+            } else if stream_stdin_is_a_tty {
+                read_interactive(
+                    parser,
+                    &mut buff,
+                    opts.nchars,
+                    opts.shell,
+                    opts.silent,
+                    opts.prompt.as_ref().unwrap(),
+                    opts.prompt_str.as_ref().is_some_and(|ps| ps.is_empty()),
+                    &opts.right_prompt,
+                    opts.commandline.as_ref(),
+                    0,
+                )
+                .unwrap_or_else(|error| {
+                    err_fmt!("interactive input failed: %s", error.to_string())
+                        .cmd(cmd)
+                        .finish(streams);
+                    Err(STATUS_CMD_ERROR)
+                })
+            } else {
+                read_native(
+                    streams.stdin_file.as_mut().unwrap(),
+                    &mut buff,
+                    opts.nchars,
+                    opts.split_null,
+                )
+            };
         }
         if exit_res.is_err() {
             clear_remaining_vars(parser, &mut var_ptr);

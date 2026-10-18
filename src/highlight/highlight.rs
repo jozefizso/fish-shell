@@ -1,9 +1,10 @@
 //! Functions for syntax highlighting.
 #[cfg(windows)]
 use super::ansi::AnsiBuffer as Outputter;
+#[cfg(unix)]
+use crate::terminal::Outputter;
 #[cfg(windows)]
 use crate::text_face::{color_support_from_env, parse_text_face_with_color_support};
-#[cfg(unix)]
 use crate::{
     abbrs::{self, with_abbrs},
     complete::complete_wrap_map,
@@ -11,7 +12,6 @@ use crate::{
     history::all_paths_are_valid,
     parse_util::get_process_first_token_offset,
     path::{path_get_cdpath, paths_are_same_file},
-    terminal::Outputter,
 };
 use crate::{
     ast::{
@@ -41,7 +41,10 @@ use fish_widestring::{
     ASCII_MAX, EXPAND_RESERVED_BASE, EXPAND_RESERVED_END, L, PROCESS_EXPAND_SELF_STR, WExt as _,
     WString, wstr,
 };
-use std::collections::{HashMap, hash_map::Entry};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    io,
+};
 use strum_macros::Display;
 
 use super::file_tester::IsFile;
@@ -108,28 +111,38 @@ pub fn colorize(text: &wstr, colors: &[HighlightSpec], vars: &dyn Environment) -
 /// With I/O disabled, all platforms use the same AST and token coloration without
 /// resolving commands, touching history, or probing the filesystem.
 /// \param cursor The position of the cursor in the commandline.
+///
+/// Native I/O highlighting requires a resolvable retained working directory; errors leave
+/// `color` unchanged. Syntax-only highlighting does not require a working directory.
 pub fn highlight_shell<'src, 'ctx>(
     buff: &'src wstr,
     color: &mut Vec<HighlightSpec>,
     ctx: &'ctx mut OperationContext<'src>,
     io_ok: bool, /* = false */
     cursor: Option<usize>,
-) {
+) -> io::Result<()> {
+    #[cfg(windows)]
+    if io_ok && ctx.check_cancel() {
+        return Err(io::Error::from(io::ErrorKind::Interrupted));
+    }
     #[cfg(unix)]
     let working_directory = ctx.vars().get_pwd_slash();
-    // Native PWD belongs to a retained per-stack directory identity. In particular, a
-    // globals-only context need not have a PWD variable; "/" is not a native cwd fallback.
-    // If that identity cannot be resolved, syntax highlighting still works without I/O.
+    // Resolve the snapshot's retained native cwd only when filesystem checks were requested.
+    // An unavailable identity is an error, not permission to silently skip those checks.
     #[cfg(windows)]
-    let working_directory = io_ok
-        .then(|| ctx.vars().get_working_directory().ok())
-        .flatten();
-    #[cfg(windows)]
-    let io_ok = working_directory.is_some();
-    #[cfg(windows)]
-    let working_directory = working_directory.unwrap_or_default();
+    let working_directory = if io_ok {
+        ctx.vars().get_working_directory()?
+    } else {
+        WString::new()
+    };
     let mut highlighter = Highlighter::new(buff, cursor, ctx, &working_directory, io_ok);
-    *color = highlighter.highlight();
+    let colors = highlighter.highlight();
+    #[cfg(windows)]
+    if io_ok && highlighter.ctx().check_cancel() {
+        return Err(io::Error::from(io::ErrorKind::Interrupted));
+    }
+    *color = colors;
+    Ok(())
 }
 
 pub fn highlight_and_colorize<'src, 'ctx>(
@@ -143,7 +156,8 @@ pub fn highlight_and_colorize<'src, 'ctx>(
         ctx,
         /*io_ok=*/ false,
         /*cursor=*/ None,
-    );
+    )
+    .expect("syntax-only highlighting does not require filesystem context");
     let vars = ctx.vars();
     colorize(text, &colors, vars)
 }
@@ -306,10 +320,7 @@ fn command_role(
         return Some(Function);
     }
 
-    // Abbreviations belong to the interactive Unix runtime.
-    #[cfg(unix)]
     let abbreviation_ok = decoration == StatementDecoration::None;
-    #[cfg(unix)]
     if abbreviation_ok && with_abbrs(|set| set.has_match(cmd, abbrs::Position::Command, L!(""))) {
         return Some(Command);
     }
@@ -338,7 +349,6 @@ fn has_expand_reserved(s: &wstr) -> bool {
 
 // Parse a command line. Return by reference the first command, and the first argument to that
 // command (as a string), if any. This is used to validate autosuggestions.
-#[cfg(unix)]
 fn autosuggest_parse_command(
     buff: &wstr,
     ctx: &mut OperationContext<'_>,
@@ -374,13 +384,7 @@ pub fn is_veritable_cd(expanded_command: &wstr) -> bool {
     if expanded_command != L!("cd") {
         return false;
     }
-    #[cfg(unix)]
-    {
-        return complete_wrap_map().get(L!("cd")).is_none();
-    }
-    // Native batch mode has no programmable completion wrappers.
-    #[cfg(windows)]
-    true
+    complete_wrap_map().get(L!("cd")).is_none()
 }
 
 fn is_cd_option(candidate: &wstr) -> bool {
@@ -399,7 +403,10 @@ fn is_cd_option(candidate: &wstr) -> bool {
 /// Given an item `item` from the history which is a proposed autosuggestion, return whether the
 /// autosuggestion is valid. It may not be valid if e.g. it is attempting to cd into a directory
 /// which does not exist.
-#[cfg(unix)]
+///
+/// Call on a background thread with snapshot variables and a cancellation checker. The native
+/// working directory must be the resolved directory from that same snapshot. Publication still
+/// belongs to the reader, which must reject an obsolete command-line/context generation.
 pub fn autosuggest_validate_from_history(
     item_commandline: &wstr,
     suggested_range: std::ops::Range<usize>,
@@ -408,6 +415,14 @@ pub fn autosuggest_validate_from_history(
     ctx: &mut OperationContext<'_>,
 ) -> bool {
     assert_is_background_thread();
+
+    #[cfg(windows)]
+    if ctx.check_cancel()
+        || crate::path::native_absolute_path(working_directory).is_err()
+        || ctx.vars().get_working_directory().is_err()
+    {
+        return false;
+    }
 
     if suggested_range != (0..item_commandline.char_count())
         && get_process_first_token_offset(item_commandline, suggested_range.start)
@@ -421,6 +436,10 @@ pub fn autosuggest_validate_from_history(
     let Some((parsed_command, mut cd_dir)) = autosuggest_parse_command(suggested_command, ctx)
     else {
         // This is for autosuggestions which are not decorated commands, e.g. function declarations.
+        #[cfg(windows)]
+        if ctx.check_cancel() {
+            return false;
+        }
         return true;
     };
 
@@ -429,6 +448,10 @@ pub fn autosuggest_validate_from_history(
         && !cd_dir.is_empty()
         && expand_one(&mut cd_dir, ExpandFlags::FAIL_ON_CMDSUBST, ctx, None)
     {
+        #[cfg(windows)]
+        if ctx.check_cancel() {
+            return false;
+        }
         if is_cd_option(&cd_dir) {
             // known arguments are always valid
             return true;
@@ -436,7 +459,16 @@ pub fn autosuggest_validate_from_history(
             // Check the directory target, respecting CDPATH.
             // Permit the autosuggestion if the path is valid and not our directory.
             let path = path_get_cdpath(&cd_dir, working_directory, ctx.vars());
-            return path.is_some_and(|p| !paths_are_same_file(working_directory, &p));
+            #[cfg(windows)]
+            if ctx.check_cancel() {
+                return false;
+            }
+            let valid_path = path.is_some_and(|p| !paths_are_same_file(working_directory, &p));
+            #[cfg(windows)]
+            if ctx.check_cancel() {
+                return false;
+            }
+            return valid_path;
         }
     }
 
@@ -453,6 +485,10 @@ pub fn autosuggest_validate_from_history(
         return false;
     }
 
+    #[cfg(windows)]
+    if ctx.check_cancel() {
+        return false;
+    }
     true
 }
 
@@ -1514,7 +1550,8 @@ mod tests {
                     &mut OperationContext::background(vars, EXPANSION_LIMIT_BACKGROUND),
                     true, /* io_ok */
                     Some(text.len()),
-                );
+                )
+                .unwrap();
                 assert_eq!(colors.len(), expected_colors.len());
 
                 for (i, c) in text.chars().enumerate() {
@@ -2014,7 +2051,8 @@ mod tests {
             &mut OperationContext::background(vars, EXPANSION_LIMIT_BACKGROUND),
             true, /* io_ok */
             Some(text.len()),
-        );
+        )
+        .unwrap();
 
         // Verify we have the right number of colors
         assert_eq!(colors.len(), text.len());

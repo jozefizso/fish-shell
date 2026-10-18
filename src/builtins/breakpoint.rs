@@ -1,8 +1,10 @@
 use super::prelude::*;
 use crate::builtins::Error;
 use crate::parser::{Block, BlockType};
+#[cfg(unix)]
 use crate::reader::reader_read;
 use crate::{err_fmt, err_str};
+#[cfg(unix)]
 use libc::STDIN_FILENO;
 
 /// Implementation of the builtin breakpoint command, used to launch the interactive debugger.
@@ -19,8 +21,11 @@ pub fn breakpoint(
         return Err(STATUS_INVALID_ARGS);
     }
 
-    // If we're not interactive then we can't enter the debugger. So treat this command as a no-op.
+    // The debugger requires an interactive parser and an actual native console.
     if !parser.is_interactive() {
+        err_str!("breakpoint requires an interactive context")
+            .cmd(cmd)
+            .finish(streams);
         return Err(STATUS_CMD_ERROR);
     }
 
@@ -37,10 +42,52 @@ pub fn breakpoint(
             return Err(STATUS_ILLEGAL_CMD);
         }
     }
+    #[cfg(windows)]
+    if !streams.is_terminal(0) {
+        err_str!("breakpoint requires console input")
+            .cmd(cmd)
+            .finish(streams);
+        return Err(STATUS_CMD_ERROR);
+    }
+    #[cfg(windows)]
+    let editor_scope = match crate::tty_handoff::NativeEditorScope::enter() {
+        Ok(scope) => scope,
+        Err(error) => {
+            err_fmt!("cannot enter debugger: %s", error.to_string())
+                .cmd(cmd)
+                .finish(streams);
+            return Err(STATUS_CMD_ERROR);
+        }
+    };
 
     let bpb = parser.push_block(Block::breakpoint_block());
-    let io_chain = &streams.io_chain;
-    reader_read(parser, STDIN_FILENO, io_chain)?;
+    #[cfg(unix)]
+    let result = reader_read(parser, STDIN_FILENO, &streams.io_chain);
+    #[cfg(windows)]
+    let result = crate::reader::reader_read_interactive(parser);
     parser.pop_block(bpb);
+    #[cfg(unix)]
+    result?;
+    #[cfg(windows)]
+    {
+        let restore = editor_scope.finish();
+        if let Err(error) = result {
+            err_fmt!("debugger input failed: %s", error.to_string())
+                .cmd(cmd)
+                .finish(streams);
+            if let Err(error) = restore {
+                err_fmt!("restoring debugger console failed: %s", error.to_string())
+                    .cmd(cmd)
+                    .finish(streams);
+            }
+            return Err(STATUS_CMD_ERROR);
+        }
+        if let Err(error) = restore {
+            err_fmt!("restoring debugger console failed: %s", error.to_string())
+                .cmd(cmd)
+                .finish(streams);
+            return Err(STATUS_CMD_ERROR);
+        }
+    }
     BuiltinResult::from_dynamic(parser.last_status())
 }

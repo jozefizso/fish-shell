@@ -900,7 +900,12 @@ impl<'a> Reader<'a> {
 
         let evt_to_return: CharEvent = loop {
             let evt = self.readch();
-            if (predicate)(&evt) {
+            #[cfg(windows)]
+            let stopping = matches!(evt, CharEvent::Implicit(ImplicitEvent::CheckExit))
+                && self.native_input_stopping();
+            #[cfg(not(windows))]
+            let stopping = false;
+            if stopping || (predicate)(&evt) {
                 break evt;
             }
             saved_events.push(evt);
@@ -925,7 +930,9 @@ impl<'a> Reader<'a> {
         for cmd in m.commands.iter().rev() {
             let evt = match input_function_get_code(cmd) {
                 Some(code) => {
-                    self.function_push_args(code);
+                    if !self.function_push_args(code) {
+                        return;
+                    }
                     CharEvent::from_readline(code, key_events.clone())
                 }
                 None => CharEvent::Command(cmd.clone()),
@@ -950,32 +957,33 @@ impl<'a> Reader<'a> {
         self.get_input_data_mut().input_function_args.pop()
     }
 
-    fn function_push_args(&mut self, code: ReadlineCmd) {
-        let arity = input_function_arity(code);
-        let mut skipped = std::mem::take(&mut self.get_input_data_mut().event_storage);
-        assert!(skipped.is_empty(), "event_storage should be empty");
-
-        for _ in 0..arity {
-            // Skip and queue up any function codes. See issue #2357.
-            let arg: char;
-            loop {
-                let evt = self.readch();
-                if let Some(kevt) = evt.get_key() {
-                    if let Some(mut cs) = kevt.key.text_to_insert() {
-                        // TODO forward the whole key
-                        arg = cs.next().unwrap();
-                        break;
-                    }
+    fn function_push_args(&mut self, code: ReadlineCmd) -> bool {
+        for _ in 0..input_function_arity(code) {
+            let event = self.read_character_matching(|event| {
+                #[cfg(windows)]
+                if event.get_key().is_some_and(|key| {
+                    let key = key.key.key;
+                    key.modifiers.ctrl && !key.modifiers.alt && matches!(key.codepoint, 'c' | 'd')
+                }) {
+                    return true;
                 }
-                skipped.push(evt);
-            }
-            self.function_push_arg(arg);
+                matches!(event, CharEvent::Implicit(ImplicitEvent::Eof))
+                    || event
+                        .get_key()
+                        .and_then(|key| key.key.text_to_insert())
+                        .is_some()
+            });
+            let argument = event
+                .get_key()
+                .and_then(|key| key.key.text_to_insert())
+                .and_then(|mut text| text.next());
+            let Some(argument) = argument else {
+                self.push_front(event);
+                return false;
+            };
+            self.function_push_arg(argument);
         }
-
-        // Push the function codes back into the input stream.
-        self.insert_front(skipped.drain(..));
-        skipped.clear();
-        self.get_input_data_mut().event_storage = skipped;
+        true
     }
 }
 

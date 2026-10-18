@@ -225,7 +225,8 @@ impl BuiltinBind {
                         out
                     } else {
                         let mut colors = Vec::new();
-                        highlight_shell(&out, &mut colors, &mut parser.context(), false, None);
+                        highlight_shell(&out, &mut colors, &mut parser.context(), false, None)
+                            .expect("highlighting binding comments does not perform IO");
                         let colored = colorize(&out, &colors, parser.vars());
                         bytes2wcstring(&colored)
                     });

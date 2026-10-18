@@ -1408,7 +1408,7 @@ pub fn wildcard_match(
     )
 }
 
-fn wildcard_match_with_case_policy(
+pub(crate) fn wildcard_match_with_case_policy(
     name: &wstr,
     pattern: &wstr,
     leading_dots_fail_to_match: bool,

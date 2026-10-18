@@ -419,6 +419,14 @@ pub fn initialize_console_controls() -> io::Result<ConsoleControlGuard> {
         registered: true,
         closed: false,
     };
+    // CREATE_NEW_PROCESS_GROUP launchers may pass an inherited ignore-Ctrl-C
+    // attribute. Installing a handler alone does not clear it. This process
+    // explicitly adopts console interrupts after its handler/gate are ready.
+    if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
+        let error = io::Error::last_os_error();
+        guard.shutdown()?;
+        return Err(error);
+    }
     // Controls arriving between registration and gate publication are counted.
     let reconciled = guard.state.reconcile(&lock(&guard.state.cancellation));
     if let Err(error) = reconciled {

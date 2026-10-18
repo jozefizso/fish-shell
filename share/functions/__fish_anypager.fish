@@ -28,5 +28,8 @@ function __fish_anypager --description "Print a pager to use"
     # We have no pager.
     # We could fall back to "cat",
     # but in some cases that's probably not helpful.
+    if builtin -q __fish_native_fs
+        echo "fish: no pager available; set PAGER to an installed pager" >&2
+    end
     return 1
 end

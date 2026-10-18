@@ -45,10 +45,14 @@ function fish_hg_prompt --description 'Write out the hg prompt'
 
     set -l root (fish_print_hg_root)
     or return 1
+    set -l separator /
+    if builtin -q __fish_native_fs
+        set separator '\\'
+    end
 
     # Read branch and bookmark
-    set -l branch (command cat $root/branch 2>/dev/null; or echo default)
-    if set -l bookmark (command cat $root/bookmarks.current 2>/dev/null)
+    set -l branch (string sub --start 1 <$root$separator'branch' 2>/dev/null; or echo default)
+    if set -l bookmark (string sub --start 1 <$root$separator'bookmarks.current' 2>/dev/null)
         set branch "$branch|$bookmark"
     end
 
@@ -64,7 +68,9 @@ function fish_hg_prompt --description 'Write out the hg prompt'
     echo -n '|'
 
     # Disabling color and pager is always a good idea.
-    set -l repo_status (hg status | string sub -l 2 | sort -u)
+    # Duplicates do not affect the membership checks below; no external sort is
+    # needed to display any of the requested status symbols in configured order.
+    set -l repo_status (hg status | string sub -l 2)
 
     # Show nice color for a clean repo
     if test -z "$repo_status"

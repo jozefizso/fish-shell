@@ -14,11 +14,10 @@ use crate::{
         get_token_extent, lineno,
     },
     prelude::*,
-    proc::is_interactive_session,
     reader::{
         JumpDirection, JumpPrecision, commandline_get_state, commandline_set_buffer,
-        commandline_set_search_field, reader_execute_readline_cmd, reader_jump,
-        reader_showing_suggestion,
+        commandline_set_search_field, reader_current_data, reader_execute_readline_cmd,
+        reader_jump, reader_showing_suggestion,
     },
     tokenizer::{TokFlags, TokenType, Tokenizer},
 };
@@ -412,6 +411,31 @@ pub fn commandline(
             _ => panic!(),
         }
     }
+    // Editor operations require a live reader, not merely an initialized interactive parser.
+    // Explicit/transient buffers remain available to noninteractive completion providers.
+    let needs_reader = forward_jump
+        || forward_jump_till
+        || backward_jump
+        || backward_jump_till
+        || function_mode
+        || selection_mode
+        || selection_start_mode
+        || selection_end_mode
+        || line_mode
+        || column_mode
+        || search_mode
+        || paging_mode
+        || paging_full_mode
+        || search_field_mode
+        || showing_suggestion
+        || (override_buffer.is_none() && parser.libdata().transient_commandline.borrow().is_none());
+    if needs_reader && reader_current_data().is_none() {
+        err_str!("commandline requires an active interactive reader")
+            .cmd(cmd)
+            .full_trailer(parser)
+            .finish(streams);
+        return Err(STATUS_CMD_ERROR);
+    }
     if forward_jump || forward_jump_till || backward_jump || backward_jump_till {
         let direction = if forward_jump || forward_jump_till {
             JumpDirection::Forward
@@ -715,7 +739,7 @@ pub fn commandline(
             .clone();
         current_buffer = &transient;
         current_cursor_pos = transient.len();
-    } else if parser.interactive_initialized || is_interactive_session() {
+    } else if reader_current_data().is_some() {
         current_buffer = &rstate.text;
         current_cursor_pos = rstate.cursor_pos;
     } else {

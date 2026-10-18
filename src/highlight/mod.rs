@@ -1,5 +1,5 @@
 #[cfg(windows)]
-mod ansi;
+pub(crate) mod ansi;
 mod file_tester;
 #[allow(clippy::module_inception)]
 mod highlight;

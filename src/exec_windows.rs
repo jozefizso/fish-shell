@@ -1,4 +1,6 @@
 //! Native launch and deferred internal scheduling for the shared process model.
+//! Substitutions inherit the enclosing logical descriptors and capture only stdout;
+//! they never reset redirected stderr to the process's original console/pipe.
 use crate::builtins::{
     ErrorCode, STATUS_CMD_ERROR, STATUS_CMD_UNKNOWN, STATUS_INVALID_ARGS, STATUS_NOT_EXECUTABLE,
     STATUS_READ_TOO_MUCH, builtin_run,
@@ -374,6 +376,15 @@ fn execute_pipeline(
         // Keep only replayed logical cursors for read-error accounting. Holding
         // ordinary native read ends would hide a downstream child's closure.
     }
+    // Pause/cancel the one editor reader and donate native modes/protocols before
+    // spawn_prepared can resume the first child. The Job owns the lease until
+    // actual completion, including a foreground wait interrupted by Ctrl-Break.
+    if has_external && job.is_foreground() {
+        let donation = crate::tty_handoff::NativeChildDonation::acquire()?;
+        if donation.is_active() {
+            job.native_terminal.replace(Some(donation));
+        }
+    }
     for (index, stage) in stages.iter_mut().enumerate().rev() {
         if let Some(plan) = stage.plan.take() {
             parser.libdata_mut().exec_count += 1;
@@ -594,7 +605,10 @@ fn exec_subshell_internal(
             return (Err(STATUS_CMD_ERROR), true);
         }
     };
-    let io = capture.io_chain();
+    // Copy the inherited overlay before recursive evaluation; do not retain a
+    // RefCell borrow while nested functions/source/substitutions replace it.
+    let mut io = parser.libdata().native_block_io.borrow().clone();
+    io.set_endpoint(1, NativeEndpoint::capture(Arc::clone(&capture)), false);
     let result = parser.eval_with(cmd, &io, job_group, BlockType::Subst);
     let captured = match capture.finish() {
         Ok(captured) => captured,

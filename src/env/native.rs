@@ -97,6 +97,12 @@ impl EnvStack {
         if let Some(value) = path_value {
             imported.insert(L!("PATH").to_owned(), value);
         }
+        let username = if imported.contains_key(L!("USER")) {
+            None
+        } else {
+            Some(crate::identity_windows::username()?)
+        };
+        let hostname = crate::identity_windows::hostname()?;
         // Validate the complete snapshot before making any variable visible.
         for (key, value) in &imported {
             if !is_electric_var(key) && key != "fish_user_paths" {
@@ -110,6 +116,14 @@ impl EnvStack {
         // Erasing this one canonical spelling cannot revive an inherited Path alias.
         let _ = INHERITED_VARS.set(imported);
         let global = EnvSetMode::new_at_early_startup(EnvMode::GLOBAL);
+        if let Some(username) = username {
+            self.set_one(
+                L!("USER"),
+                EnvSetMode::new_at_early_startup(EnvMode::GLOBAL_EXPORTED),
+                username,
+            );
+        }
+        self.set_one(L!("hostname"), global, hostname);
         self.set_one(L!("IFS"), global, L!("\n \t").to_owned());
         self.set_one(L!("version"), global, str2wcstring(crate::BUILD_VERSION));
         self.set_one(
@@ -118,6 +132,14 @@ impl EnvStack {
             str2wcstring(crate::BUILD_VERSION),
         );
         self.set_one(L!("fish_pid"), global, std::process::id().to_wstring());
+        // Binding helpers assign without an explicit scope. Match Unix startup:
+        // establish the global before config/functions can accidentally create
+        // a function-local mode which disappears before the first reader.
+        self.set_one(
+            crate::input::FISH_BIND_MODE_VAR,
+            global,
+            crate::input::DEFAULT_BIND_MODE.to_owned(),
+        );
         if self.set_native_cwd(native_cwd) != EnvStackSetResult::Ok {
             return Err(io::Error::other("unable to initialize native PWD"));
         }

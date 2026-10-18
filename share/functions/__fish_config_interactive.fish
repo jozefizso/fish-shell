@@ -15,7 +15,9 @@ function __fish_config_interactive -d "Initializations that should be performed 
     # Generate man page completions if not present.
     #
     # Don't do this if we're being invoked as part of running unit tests.
-    if not set -q FISH_UNIT_TESTS_RUNNING
+    # Native Windows does not ship Unix man pages or the extractor toolchain.
+    # Explicit fish_update_completions remains an optional integration.
+    if not builtin -q __fish_native_fs; and not set -q FISH_UNIT_TESTS_RUNNING
         if not test -d $__fish_cache_dir/generated_completions
             # We cannot simply do `fish_update_completions &` because it is a function.
             # We don't want to call `fish -c` since that is unnecessary and sources config.fish again.
@@ -45,7 +47,7 @@ function __fish_config_interactive -d "Initializations that should be performed 
     # Completions for SysV startup scripts. These aren't bound to any
     # specific command, so they can't be autoloaded.
     #
-    if test -d /etc/init.d
+    if not builtin -q __fish_native_fs; and test -d /etc/init.d
         complete -x -p "/etc/init.d/*" -a start --description 'Start service'
         complete -x -p "/etc/init.d/*" -a stop --description 'Stop service'
         complete -x -p "/etc/init.d/*" -a status --description 'Print service status'
@@ -137,9 +139,13 @@ function __fish_config_interactive -d "Initializations that should be performed 
         end
     end
 
-    function __fish_winch_handler --on-signal WINCH -d "Repaint screen when window changes size"
-        if test "$fish_handle_reflow" = 1 2>/dev/null
-            commandline -f repaint >/dev/null 2>/dev/null
+    # Native console resize is delivered through the shared reader transport,
+    # not a fictitious POSIX SIGWINCH subscription.
+    if not builtin -q __fish_native_fs
+        function __fish_winch_handler --on-signal WINCH -d "Repaint screen when window changes size"
+            if test "$fish_handle_reflow" = 1 2>/dev/null
+                commandline -f repaint >/dev/null 2>/dev/null
+            end
         end
     end
 
@@ -147,6 +153,26 @@ function __fish_config_interactive -d "Initializations that should be performed 
     if not functions --query __fish_update_cwd_osc
         function __fish_update_cwd_osc --description 'Notify terminals when $PWD might have changed' \
             --on-variable=PWD --on-event=fish_prompt
+            if builtin -q __fish_native_fs
+                # Only the console output transport may receive terminal data.
+                # Convert native drive/UNC paths to real file URI paths, rather
+                # than treating a Windows drive as a Unix hostname suffix.
+                if not isatty stdout; or test "$TERM" = dumb
+                    return
+                end
+                set -l cwd (string replace -a '\\' / -- $PWD |
+                    string replace -r '^//[?]/UNC/' '//' |
+                    string replace -r '^//[?]/' '')
+                set -l host ''
+                if string match -rq '^[A-Za-z]:/' -- $cwd
+                    set cwd /$cwd
+                else if string match -rq '^//[^/]+/' -- $cwd
+                    set host (string split / -- $cwd)[3]
+                    set cwd (string replace -r '^//[^/]+' '' -- $cwd)
+                end
+                printf \e\]7\;file://%s%s\a (string escape --style=url -- $host $cwd)
+                return
+            end
             set -l host $hostname
             # if set -l konsole_version (string match -r -- '^Konsole (\d+)\..*' (status terminal))[2]
             #     # To-do: use a Konsole version where KF6_DEP_VERSION is >= 6.12

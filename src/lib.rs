@@ -16,8 +16,11 @@ pub mod abbrs;
 pub mod ast;
 pub mod autoload;
 pub mod builtins;
+#[cfg(windows)]
+pub mod clipboard_windows;
 pub mod complete;
-#[cfg(unix)]
+#[cfg(windows)]
+pub mod console_windows;
 pub mod editable_line;
 pub mod env;
 #[cfg_attr(windows, path = "env_dispatch/windows.rs")]
@@ -29,7 +32,6 @@ pub mod exec;
 pub mod expand;
 #[cfg(unix)]
 pub mod fd_monitor;
-#[cfg(unix)]
 pub mod fd_readable_set;
 #[cfg_attr(windows, path = "fds_windows.rs")]
 pub mod fds;
@@ -42,14 +44,13 @@ pub mod function;
 pub mod global_safety;
 pub mod highlight;
 pub mod history;
-#[cfg(unix)]
+#[cfg(windows)]
+pub mod identity_windows;
 pub mod input;
 #[cfg_attr(windows, path = "io_windows.rs")]
 pub mod io;
 pub mod job_group;
-#[cfg(unix)]
 pub mod key;
-#[cfg(unix)]
 pub mod kill;
 pub mod locale;
 pub mod localization;
@@ -57,11 +58,12 @@ pub mod localization;
 pub mod native_accounting;
 #[cfg(windows)]
 pub mod native_fd_bridge;
+#[cfg(windows)]
+pub(crate) mod native_text;
 #[cfg(unix)]
 pub mod nix;
 pub mod null_terminated_array;
 pub mod operation_context;
-#[cfg(unix)]
 pub mod pager;
 pub mod panic;
 pub mod parse_constants;
@@ -78,17 +80,13 @@ pub mod prelude;
 pub mod print_help;
 pub mod proc;
 pub mod re;
-#[cfg_attr(windows, path = "reader_windows.rs")]
 pub mod reader;
 pub mod redirection;
-#[cfg(unix)]
 pub mod screen;
 #[cfg_attr(windows, path = "signal_windows.rs")]
 pub mod signal;
 pub mod stdx;
-#[cfg(unix)]
 pub mod terminal;
-#[cfg(unix)]
 pub mod termsize;
 pub mod text_face;
 pub mod text_helpers;
@@ -101,7 +99,6 @@ pub mod tokenizer;
 #[cfg(unix)]
 pub mod topic_monitor;
 pub mod trace;
-#[cfg(unix)]
 pub mod tty_handoff;
 pub mod universal_notifier;
 pub mod wait_handle;
@@ -110,5 +107,5 @@ pub mod wildcard;
 #[cfg(feature = "gettext-extract")]
 pub extern crate fish_gettext_extraction;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests;

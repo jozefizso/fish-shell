@@ -60,15 +60,7 @@ pub fn complete_load(cmd: &wstr, parser: &mut Parser) -> bool {
             }
         }
         AutoloadResult::None => {
-            #[cfg(unix)]
             let stripped = strip_executable_suffix(cmd);
-            #[cfg(windows)]
-            let stripped =
-                if fish_wcstringutil::string_suffixes_string_case_insensitive(L!(".exe"), cmd) {
-                    Some(&cmd[..cmd.len() - 4])
-                } else {
-                    None
-                };
             if let Some(stripped) = stripped {
                 loaded_new = complete_load(stripped, parser);
             }
@@ -91,13 +83,12 @@ pub fn complete_invalidate_path() {
     }
     autoload.clear();
 }
-#[cfg(unix)]
 use crate::{
     abbrs::with_abbrs,
     ast::unescape_keyword,
     builtins::{builtin_exists, builtin_get_desc, builtin_get_names},
     common::valid_var_name_char,
-    env::{EnvMode, EnvStack, EnvStackSetResult, Environment},
+    env::{EnvMode, EnvStackSetResult, Environment},
     exec::exec_subshell,
     expand::{
         self, ExpandFlags, ExpandResultCode, ForCdArgument, PathFilter, expand_escape_string,
@@ -114,29 +105,98 @@ use crate::{
     path::{path_get_path, path_try_get_path},
     reader::{get_quote, is_backslashed},
     tokenizer::{Tok, TokFlags, TokenType, Tokenizer, variable_assignment_equals_pos},
-    wildcard::{wildcard_complete, wildcard_has, wildcard_match},
-    wutil::wrealpath,
+    wildcard::{wildcard_complete, wildcard_has},
 };
 #[cfg(unix)]
+use crate::{env::EnvStack, wildcard::wildcard_match, wutil::wrealpath};
 use assert_matches::assert_matches;
-#[cfg(unix)]
 use fish_common::{ScopeGuard, UnescapeFlags, UnescapeStringStyle, unescape_string};
-#[cfg(unix)]
 use fish_util::wcsfilecmp;
 #[cfg(unix)]
+use fish_wcstringutil::strip_executable_suffix;
 use fish_wcstringutil::{
     string_fuzzy_match_string, string_prefixes_string, string_suffixes_string_case_insensitive,
-    strip_executable_suffix,
 };
+use fish_widestring::WExt as _;
 #[cfg(unix)]
-use fish_widestring::{WExt as _, charptr2wcstring};
+use fish_widestring::charptr2wcstring;
 #[cfg(unix)]
-use std::{
-    cmp::Ordering,
-    collections::HashSet,
-    mem,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
+use std::{cmp::Ordering, collections::HashSet, mem};
+
+#[cfg(windows)]
+fn strip_executable_suffix(command: &wstr) -> Option<&wstr> {
+    string_suffixes_string_case_insensitive(L!(".exe"), command)
+        .then(|| &command[..command.len() - 4])
+}
+
+fn is_path_separator(character: char) -> bool {
+    character == '/' || (cfg!(windows) && character == '\\')
+}
+
+fn is_explicit_command_path(command: &wstr) -> bool {
+    #[cfg(unix)]
+    {
+        command.contains('/')
+    }
+    #[cfg(windows)]
+    {
+        crate::path::native_is_explicit_path(command)
+    }
+}
+
+/// Diagnose unavailable native completion providers without initializing a reader.
+/// Quoted and escaped literal tildes remain ordinary filenames.
+#[cfg(windows)]
+pub fn native_completion_request_error(commandline: &wstr) -> Option<&'static wstr> {
+    let (token, _) = crate::parse_util::get_token_extent(commandline, commandline.len());
+    let token = &commandline[token];
+    if token.starts_with('~') {
+        let unescaped = unescape_string(
+            token,
+            UnescapeStringStyle::Script(UnescapeFlags {
+                incomplete: true,
+                ..Default::default()
+            }),
+        )?;
+        if unescaped
+            .chars()
+            .nth(1)
+            .is_some_and(|c| !is_path_separator(c))
+        {
+            return Some(L!(
+                "Named-user home completion is not supported on native Windows"
+            ));
+        }
+    }
+    None
+}
+
+/// The shared walker uses '/', but extended Win32 identities require literal backslashes.
+#[cfg(windows)]
+fn restore_native_completion_namespace(token: &wstr, completions: &mut [Completion]) {
+    if completions.is_empty() {
+        return;
+    }
+    let extended = token.contains('\\')
+        && unescape_string(
+            token,
+            UnescapeStringStyle::Script(UnescapeFlags {
+                incomplete: true,
+                ..Default::default()
+            }),
+        )
+        .is_some_and(|token| token.starts_with(L!("\\\\?\\")));
+    for completion in completions {
+        if extended || completion.completion.starts_with(L!("//?/")) {
+            for character in completion.completion.as_char_slice_mut() {
+                if *character == '/' {
+                    *character = '\\';
+                }
+            }
+        }
+    }
+}
 
 // Completion description strings, mostly for different types of files, such as sockets, block
 // devices, etc.
@@ -566,10 +626,11 @@ fn resolve_auto_space(comp: &wstr, wants_suffix: &mut WantsSuffix) {
     match *wants_suffix {
         Yes(_) | No => (),
         Auto => {
-            *wants_suffix = if matches!(
-                comp.as_char_slice().last(),
-                Some('/' | '=' | '@' | ':' | '.' | ',' | '-')
-            ) {
+            *wants_suffix = if (cfg!(windows) && comp.ends_with('\\'))
+                || matches!(
+                    comp.as_char_slice().last(),
+                    Some('/' | '=' | '@' | ':' | '.' | ',' | '-')
+                ) {
                 No
             } else {
                 Yes(SuffixType::DEFAULT)
@@ -963,10 +1024,8 @@ pub fn complete_get_wrap_targets(command: &wstr) -> Vec<WString> {
     let wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
     wrappers.get(command).cloned().unwrap_or_default()
 }
-// Declarative rules are shared with batch startup. Only active completion, filesystem
-// discovery and autoloading below depend on the Unix reader.
-#[cfg(unix)]
-mod unix {
+// Active completion shares the evaluator and N1 filesystem/discovery policy on both platforms.
+mod active {
     use super::*;
 
     // If these functions aren't force inlined, it is actually faster to call
@@ -1507,6 +1566,7 @@ mod unix {
             }
         }
 
+        #[cfg(unix)]
         /// If command to complete is short enough, substitute the description with the whatis information
         /// for the executable.
         fn complete_cmd_desc(&mut self, s: &wstr) {
@@ -1514,7 +1574,7 @@ mod unix {
                 return;
             };
 
-            let cmd = if let Some(pos) = s.chars().rposition(|c| c == '/') {
+            let cmd = if let Some(pos) = s.chars().rposition(is_path_separator) {
                 if pos + 1 > s.len() {
                     return;
                 }
@@ -1628,6 +1688,8 @@ mod unix {
         ///
         /// \param str_cmd the command string to find completions for
         fn complete_cmd(&mut self, str_cmd: WString) {
+            #[cfg(windows)]
+            let first_file = self.completions.len();
             // Append all possible executables
             let result = {
                 let expand_flags = ExpandFlags {
@@ -1646,6 +1708,7 @@ mod unix {
             if result == ExpandResultCode::Cancel {
                 return;
             }
+            #[cfg(unix)]
             if result == ExpandResultCode::Ok && self.flags.descriptions() {
                 self.complete_cmd_desc(&str_cmd);
             }
@@ -1668,8 +1731,12 @@ mod unix {
                     None,
                 )
             };
+            #[cfg(windows)]
+            restore_native_completion_namespace(&str_cmd, &mut self.completions[first_file..]);
 
-            if str_cmd.is_empty() || (!str_cmd.contains('/') && str_cmd.as_char_slice()[0] != '~') {
+            if str_cmd.is_empty()
+                || (!is_explicit_command_path(&str_cmd) && str_cmd.as_char_slice()[0] != '~')
+            {
                 let include_hidden = str_cmd.as_char_slice().first() == Some(&'_');
                 // Append all known matching functions
                 let possible_comp: Vec<_> = function::get_names(include_hidden, self.ctx.vars())
@@ -1779,15 +1846,41 @@ mod unix {
 
         // Return whether a command (which may be a command name or a full path)
         // matches a completion entry key.
-        fn command_matches(cmd: &wstr, key: &CompletionEntryKey) -> bool {
-            if wildcard_match(cmd, &key.name, false) {
+        fn command_matches(cmd: &wstr, key: &CompletionEntryKey, case_sensitive: bool) -> bool {
+            let matches = |name: &wstr| {
+                #[cfg(unix)]
+                {
+                    let _ = case_sensitive;
+                    wildcard_match(name, &key.name, false)
+                }
+                #[cfg(windows)]
+                {
+                    fn normalize(path: &wstr, is_path: bool) -> std::borrow::Cow<'_, wstr> {
+                        if is_path && path.contains('\\') {
+                            let mut normalized = path.to_owned();
+                            for character in normalized.as_char_slice_mut() {
+                                if *character == '\\' {
+                                    *character = '/';
+                                }
+                            }
+                            std::borrow::Cow::Owned(normalized)
+                        } else {
+                            std::borrow::Cow::Borrowed(path)
+                        }
+                    }
+                    crate::wildcard::wildcard_match_with_case_policy(
+                        &normalize(name, key.is_path),
+                        &normalize(&key.name, key.is_path),
+                        false,
+                        case_sensitive,
+                    )
+                }
+            };
+            if matches(cmd) {
                 return true;
             }
-            // On cygwin, if we didn't have a completion for "foo.exe",
-            // check if there is one for "foo".
-            !key.is_path
-                && strip_executable_suffix(cmd)
-                    .is_some_and(|stripped| wildcard_match(stripped, &key.name, false))
+            // Executable suffixes do not change the completion definition name.
+            !key.is_path && strip_executable_suffix(cmd).is_some_and(matches)
         }
 
         /// Return the available completion entry options for a given command.
@@ -1806,7 +1899,7 @@ mod unix {
                     } else {
                         cmd_name
                     };
-                    if Self::command_matches(cmd, key) {
+                    if Self::command_matches(cmd, key, cmd_string.case_sensitive) {
                         Some(Arc::clone(completion))
                     } else {
                         None
@@ -2066,12 +2159,13 @@ mod unix {
             let cmd_string = CmdString::new(cmd_orig, self.ctx.vars());
             let cmd_name = cmd_string.basename(cmd_orig);
 
-            let cmd_exists =
-                builtin_exists(cmd_name) || function::exists_no_autoload(cmd_name) || {
-                    // Even if the command is given as absolute path, use the basename, since
-                    // that's the prerequisite for the completion script to use it.
-                    path_get_path(cmd_name, self.ctx.vars()).is_some()
-                };
+            #[cfg(unix)]
+            let lookup_command = cmd_name;
+            #[cfg(windows)]
+            let lookup_command = cmd_orig;
+            let cmd_exists = builtin_exists(cmd_name)
+                || function::exists_no_autoload(cmd_name)
+                || { path_get_path(lookup_command, self.ctx.vars()).is_some() };
             if !cmd_exists {
                 // Do not load custom completions if the command does not exist
                 // This prevents errors caused during the execution of completion providers for
@@ -2149,7 +2243,10 @@ mod unix {
             } else {
                 let mut end = s.len();
                 loop {
-                    match s[..end].chars().rposition(|c| c == '=' || c == ':') {
+                    match s[..end]
+                        .chars()
+                        .rposition(|c| c == '=' || (cfg!(unix) && c == ':'))
+                    {
                         Some(pos) => {
                             if !is_backslashed(s, pos) {
                                 break Some(pos);
@@ -2176,6 +2273,8 @@ mod unix {
                 {
                     flogf!(complete, "Error while expanding string '%s'", s);
                 }
+                #[cfg(windows)]
+                restore_native_completion_namespace(s, &mut self.completions[first_from_start..]);
                 Self::escape_opening_brackets(&mut self.completions[first_from_start..], s);
             }
 
@@ -2196,6 +2295,8 @@ mod unix {
             {
                 flogf!(complete, "Error while expanding string '%s'", sep_string);
             }
+            #[cfg(windows)]
+            restore_native_completion_namespace(sep_string, &mut local_completions);
 
             Self::escape_opening_brackets(&mut local_completions, s);
             // Any COMPLETE_REPLACES_TOKEN will also stomp the separator. We need to "repair" them by
@@ -2339,15 +2440,18 @@ mod unix {
         ///
         /// Returns `false` if unable to complete, `true` otherwise
         fn try_complete_user(&mut self, s: &wstr) -> bool {
-            #[cfg(target_os = "android")]
+            #[cfg(any(target_os = "android", windows))]
             {
                 // The getpwent() function does not exist on Android. A Linux user on Android isn't
                 // really a user - each installed app gets an UID assigned. Listing all UID:s is not
                 // possible without root access, and doing a ~USER type expansion does not make sense
                 // since every app is sandboxed and can't access each other.
+                // Native named-user homes are rejected by the expansion provider; Windows
+                // account names are not passwd entries and must not be synthesized here.
+                let _ = s;
                 return false;
             }
-            #[cfg(not(target_os = "android"))]
+            #[cfg(all(unix, not(target_os = "android")))]
             {
                 static SETPWENT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -2699,6 +2803,7 @@ mod unix {
     struct CmdString {
         path: WString,
         path_last_slash_pos: Option<usize>,
+        case_sensitive: bool,
     }
 
     impl CmdString {
@@ -2706,8 +2811,12 @@ mod unix {
         fn new(cmd_orig: &wstr, vars: &dyn Environment) -> Self {
             let path_result = path_try_get_path(cmd_orig, vars);
             let found = path_result.err.is_none();
+            #[cfg(unix)]
             let mut path = path_result.path;
+            #[cfg(windows)]
+            let path = path_result.path;
             // Resolve commands that use relative paths because we compare full paths with "complete -p".
+            #[cfg(unix)]
             if found && !path.is_empty() && path.as_char_slice().first() != Some(&'/') {
                 if let Ok(full_path) = wrealpath(&path) {
                     path = full_path;
@@ -2715,11 +2824,24 @@ mod unix {
             }
 
             // Make sure the path is not included in the command.
-            let path_last_slash_pos = path.chars().rposition(|c| c == '/');
+            let path_last_slash_pos = path.chars().rposition(is_path_separator);
+            #[cfg(unix)]
+            let case_sensitive = true;
+            #[cfg(windows)]
+            let case_sensitive = if found {
+                path_last_slash_pos
+                    .and_then(|position| {
+                        crate::wutil::native_directory_case_sensitive(&path[..=position]).ok()
+                    })
+                    .unwrap_or(true)
+            } else {
+                true
+            };
 
             Self {
                 path,
                 path_last_slash_pos,
+                case_sensitive,
             }
         }
 
@@ -2811,6 +2933,7 @@ mod unix {
         )
     }
 
+    #[cfg(unix)]
     /// If the cmd contains a partial executable extension, return the stripped
     /// command and missing part of the full extension.
     /// E.g. `cmd.e` -> `Some(("cmd", "xe"))``
@@ -2831,7 +2954,7 @@ mod unix {
         .map(|(ext, comp)| (&cmd[0..cmd.len() - ext.len()], comp))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     mod tests {
         use super::{
             ArgumentPolicy, CompleteFlags, CompleteOptionType, CompletionRequestOptions,
@@ -3573,8 +3696,7 @@ mod unix {
     }
 }
 
-#[cfg(unix)]
-pub use unix::*;
+pub use active::*;
 
 #[cfg(all(test, windows))]
 #[path = "complete_metadata_tests.rs"]

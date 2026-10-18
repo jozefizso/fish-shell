@@ -160,7 +160,7 @@ and __fish_set_locale
 # Some things should only be done for login terminals
 # This used to be in etc/config.fish - keep it here to keep the semantics
 #
-if status is-login && command -sq /usr/libexec/path_helper
+if not builtin -q __fish_native_fs; and status is-login; and command -sq /usr/libexec/path_helper
     __fish_macos_set_env PATH /etc/paths '/etc/paths.d'
     if test -n "$MANPATH"
         __fish_macos_set_env MANPATH /etc/manpaths '/etc/manpaths.d'

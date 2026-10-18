@@ -8,7 +8,11 @@ function __fish_theme_cat -a theme_name
     end
     set -l theme_data (
         if string match -q '/*' -- $theme_path
-            command cat $theme_path
+            or begin
+                builtin -q __fish_native_fs
+                and string match -rq '^(?:[A-Za-z]:[\\\\/]|\\\\\\\\)' -- $theme_path
+            end
+            string sub --start 1 <$theme_path
         else
             status get-file $theme_path
         end

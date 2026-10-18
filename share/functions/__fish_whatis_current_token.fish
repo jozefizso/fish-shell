@@ -20,9 +20,19 @@ function __fish_whatis_current_token -d "Show man page entries or function descr
 
         case builtin
             # Since man pages can be localized, we can't look for "NAME".
-            set desc (__fish_print_help $token | sed -n 4p | string trim)
+            if builtin -q __fish_native_fs
+                set -l help (__fish_print_help $token)
+                or return
+                set desc (string trim -- "$help[4]")
+            else
+                set desc (__fish_print_help $token | sed -n 4p | string trim)
+            end
 
         case file
+            if builtin -q __fish_native_fs; and not type -q whatis
+                echo "fish: manual summary requires the optional whatis command" >&2
+                return 127
+            end
             set -l tmpdesc (whatis $token 2>/dev/null)
             and set desc $tmpdesc
     end

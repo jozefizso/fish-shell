@@ -21,6 +21,15 @@ mod windows_native_n5_cancel;
 #[path = "../windows_n5/jobs_probe.rs"]
 mod windows_native_n5_jobs;
 #[cfg(windows)]
+#[path = "../windows_n6/cases_probe.rs"]
+mod windows_native_n6_cases;
+#[cfg(windows)]
+#[path = "../windows_n6/clipboard_probe.rs"]
+mod windows_native_n6_clipboard;
+#[cfg(windows)]
+#[path = "../windows_n6/console.rs"]
+mod windows_native_n6_console;
+#[cfg(windows)]
 #[path = "runtime.rs"]
 mod windows_native_runtime;
 #[cfg(windows)]
@@ -44,6 +53,13 @@ fn main() {
     let mut args = std::env::args_os().skip(1);
     let mode = args.next().expect("probe mode");
     match mode.to_str().expect("Unicode mode") {
+        mode if mode.starts_with("n6-console-") => {
+            windows_native_n6_console::run(mode, args.collect())
+        }
+        mode if mode.starts_with("n6-case-") => windows_native_n6_cases::run(mode, args.collect()),
+        mode if mode.starts_with("n6-clipboard-") => {
+            windows_native_n6_clipboard::run(mode, args.collect())
+        }
         "runtime-init" => windows_native_runtime::run(),
         mode if mode.starts_with("n2-") => windows_native_n2::run(mode, args.collect()),
         mode if mode.starts_with("n5-jobs-") => windows_native_n5_jobs::run(mode, args.collect()),

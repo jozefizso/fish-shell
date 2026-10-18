@@ -4,7 +4,11 @@ function __fish_echo --description 'run the given command after the current comm
     string >&2 repeat -N \n --count=(math (commandline | count) - $line + 1)
     echo -n \e\[J >&2
     $argv >&2
+    set -l command_status $status
     string >&2 repeat -N \n --count=(math (count (fish_prompt)) - 1)
     string >&2 repeat -N \n --count=(math $line - 1)
     commandline -f repaint
+    if builtin -q __fish_native_fs
+        return $command_status
+    end
 end

@@ -5,8 +5,10 @@ use crate::env::Environment;
 use crate::env_dispatch::MIDNIGHT_COMMANDER_SID;
 use crate::flog::{flog, flogf};
 use crate::global_safety::RelaxedAtomicBool;
+#[cfg(unix)]
 use crate::job_group::JobGroup;
 use crate::prelude::*;
+#[cfg(unix)]
 use crate::proc::JobGroupRef;
 use crate::terminal::Outputter;
 use crate::terminal::TerminalCommand::{
@@ -16,17 +18,33 @@ use crate::terminal::TerminalCommand::{
     KittyKeyboardProgressiveEnhancementsEnable, ModifyOtherKeysDisable, ModifyOtherKeysEnable,
 };
 use crate::threads::assert_is_main_thread;
-use crate::wutil::{perror_nix, wcstoi};
+#[cfg(unix)]
+use crate::wutil::perror_nix;
+use crate::wutil::wcstoi;
+#[cfg(unix)]
 use fish_common::{STDIN_FD, write_loop};
 use fish_feature_flags::{FeatureFlag, feature_test};
+#[cfg(unix)]
 use fish_util::perror;
+#[cfg(unix)]
 use nix::errno::Errno;
+#[cfg(unix)]
 use nix::sys::termios::tcgetattr;
+#[cfg(unix)]
 use nix::sys::wait::{WaitPidFlag, waitpid};
+#[cfg(unix)]
 use nix::unistd::{Pid as NullablePid, getpgrp, tcgetpgrp, tcsetpgrp};
 use std::sync::{
     OnceLock,
     atomic::{AtomicPtr, Ordering},
+};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{
+    NativeChildDonation, NativeEditorScope, native_begin_shutdown, native_input_is_donated,
+    native_pause_for_evaluation, native_resume_editor_modes,
 };
 
 /// Whether kitty keyboard protocol support is present in the TTY.
@@ -156,23 +174,38 @@ fn serialize_commands<'a>(cmds: impl Iterator<Item = TerminalCommand<'a>>) -> Bo
 impl TtyQuirks {
     // Determine which keyboard protocol.
     fn get_supported_protocol(&self) -> ProtocolKind {
-        use TtyQuirks::{BuggyKittyKeyboardProtocol, PreCsiUMidnightCommander, Wezterm};
-        if *self == PreCsiUMidnightCommander {
-            return ProtocolKind::None;
+        #[cfg(windows)]
+        {
+            return if KITTY_KEYBOARD_SUPPORTED.get() == Some(&true)
+                && !matches!(
+                    self,
+                    TtyQuirks::PreCsiUMidnightCommander | TtyQuirks::BuggyKittyKeyboardProtocol
+                ) {
+                ProtocolKind::KittyKeyboard
+            } else {
+                ProtocolKind::None
+            };
         }
-        if *self == BuggyKittyKeyboardProtocol {
-            return ProtocolKind::Other;
-        }
-        match KITTY_KEYBOARD_SUPPORTED.get() {
-            Some(&true) => ProtocolKind::KittyKeyboard,
-            Some(&false) => {
-                if *self == Wezterm {
-                    ProtocolKind::WorkAroundWezTerm
-                } else {
-                    ProtocolKind::Other
-                }
+        #[cfg(unix)]
+        {
+            use TtyQuirks::{BuggyKittyKeyboardProtocol, PreCsiUMidnightCommander, Wezterm};
+            if *self == PreCsiUMidnightCommander {
+                return ProtocolKind::None;
             }
-            None => ProtocolKind::None,
+            if *self == BuggyKittyKeyboardProtocol {
+                return ProtocolKind::Other;
+            }
+            match KITTY_KEYBOARD_SUPPORTED.get() {
+                Some(&true) => ProtocolKind::KittyKeyboard,
+                Some(&false) => {
+                    if *self == Wezterm {
+                        ProtocolKind::WorkAroundWezTerm
+                    } else {
+                        ProtocolKind::Other
+                    }
+                }
+                None => ProtocolKind::None,
+            }
         }
     }
 
@@ -268,6 +301,7 @@ static TTY_INVALID: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
 
 // Enable or disable TTY protocols by writing the appropriate commands to the tty.
 // Note this does NOT intialize the TTY protocols if not already initialized.
+#[cfg(unix)]
 fn set_tty_protocols_active(on_write: fn(), enable: bool) {
     assert_is_main_thread();
     // Have protocols at all? We require someone else to have initialized them.
@@ -313,6 +347,7 @@ pub fn get_tty_protocols_active() -> bool {
 }
 
 // Deactivate TTY protocols before exiting.
+#[cfg(unix)]
 pub fn deactivate_tty_protocols() {
     if !cfg!(test) {
         assert_is_main_thread();
@@ -355,6 +390,7 @@ pub fn signal_safe_mark_tty_invalid() {
 //  Note it only ever makes sense to run this on the main thread.
 pub struct TtyHandoff {
     // The job group which owns the tty, or empty if none.
+    #[cfg(unix)]
     owner: Option<JobGroupRef>,
     // Whether terminal protocols were initially enabled.
     // Restored on drop.
@@ -371,6 +407,7 @@ impl TtyHandoff {
     pub fn new(on_write: fn()) -> Self {
         let protocols_active = get_tty_protocols_active();
         TtyHandoff {
+            #[cfg(unix)]
             owner: None,
             tty_protocols_initial: protocols_active,
             tty_protocols_applied: protocols_active,
@@ -397,6 +434,7 @@ impl TtyHandoff {
     }
 
     /// Transfer to the given job group, if it wants to own the terminal.
+    #[cfg(unix)]
     #[allow(clippy::wrong_self_convention)]
     pub fn to_job_group(&mut self, jg: &JobGroupRef) {
         assert!(self.owner.is_none(), "Terminal already transferred");
@@ -406,6 +444,7 @@ impl TtyHandoff {
     }
 
     /// Save the current tty modes into the owning job group, if we are transferred.
+    #[cfg(unix)]
     pub fn save_tty_modes(&mut self) {
         let Some(ref mut owner) = self.owner else {
             return;
@@ -422,6 +461,7 @@ impl TtyHandoff {
         }
     }
 
+    #[cfg(unix)]
     fn try_transfer(jg: &JobGroup) -> bool {
         if !jg.wants_terminal() {
             // The job doesn't want the terminal.
@@ -575,6 +615,11 @@ impl TtyHandoff {
 
 impl Drop for TtyHandoff {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if native_input_is_donated() || windows::native_shutting_down() {
+            return;
+        }
+        #[cfg(unix)]
         if self.owner.is_some() {
             flog!(proc_pgroup, "fish reclaiming terminal");
             if let Err(err) = tcsetpgrp(STDIN_FD, getpgrp()) {
@@ -589,6 +634,21 @@ impl Drop for TtyHandoff {
         } else {
             self.disable_tty_protocols();
         }
+    }
+}
+
+#[cfg(windows)]
+fn set_tty_protocols_active(on_write: fn(), enable: bool) {
+    match windows::set_protocols_active(enable) {
+        Ok(()) => on_write(),
+        Err(error) => crate::reader::native_input_failed(&error),
+    }
+}
+
+#[cfg(windows)]
+pub fn deactivate_tty_protocols() {
+    if let Err(error) = windows::set_protocols_active(false) {
+        crate::reader::native_input_failed(&error);
     }
 }
 

@@ -1,4 +1,10 @@
 function fish_clipboard_copy
+    # Native stdin is a byte stream, not a list of read records. Let the provider
+    # validate UTF-8 and preserve trailing newlines (and reject embedded NUL).
+    if builtin -q __fish_native_fs; and not isatty stdin
+        __fish_clipboard copy
+        return $status
+    end
     set -l cmdline
     if isatty stdin
         # Copy the current selection, or the entire commandline if that is empty.
@@ -10,6 +16,10 @@ function fish_clipboard_copy
         while read -lz line
             set -a cmdline $line
         end
+    end
+    if builtin -q __fish_native_fs
+        printf '%s' $cmdline | __fish_clipboard copy
+        return $status
     end
 
     if type -q pbcopy
@@ -23,6 +33,7 @@ function fish_clipboard_copy
     else if set -q DISPLAY; and type -q xclip
         printf '%s' $cmdline | xclip -selection clipboard
     else if type -q clip.exe
+        # Preserve the Unix/WSL integration; native Windows returned above.
         printf '%s' $cmdline | clip.exe
     end
 

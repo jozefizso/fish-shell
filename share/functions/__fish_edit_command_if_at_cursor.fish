@@ -14,11 +14,27 @@ function __fish_edit_command_if_at_cursor --description 'If cursor is at the com
     or return 1
     test -r $command_path
     or return 1
+    # Source classification is an optional external integration, not a bootstrap
+    # dependency. Without it the caller can still preview the actual file.
+    if builtin -q __fish_native_fs; and not command -sq file
+        return 1
+    end
     string match -q 'text/*' (file --brief --mime-type -L -- $command_path)
     or return 1
 
     set -l editor (__fish_anyeditor)
-    or return 0 # We already printed a warning, so tell the caller to finish.
+    or begin
+        # 1 means "not a source-editor action"; 2 means the requested action
+        # failed and the caller must not turn it into a successful preview.
+        if builtin -q __fish_native_fs
+            return 2
+        end
+        return 0 # Unix callers historically finish after the warning.
+    end
     $editor $command_path
+    set -l editor_status $status
+    if builtin -q __fish_native_fs; and test $editor_status -ne 0
+        return 2
+    end
     return 0
 end

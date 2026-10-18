@@ -2,28 +2,49 @@ use super::{
     binding::ReadlineCmd,
     decode::{DisplayBytes, LONG_READ_TIMEOUT, on_byte_read},
 };
+#[cfg(unix)]
 use crate::{
     common::{WSL, is_windows_subsystem_for_linux, shell_modes},
+    fd_readable_set::FdReadableSet,
+    universal_notifier::default_notifier,
+};
+use crate::{
     env::{EnvStack, Environment as _},
-    fd_readable_set::{FdReadableSet, Timeout},
+    fd_readable_set::Timeout,
     flog::{FloggableDebug, flog},
     key::{self, Key, Modifiers, ViewportPosition},
     prelude::*,
     reader::reader_test_and_clear_interrupted,
     text_helpers::char_to_symbol,
-    universal_notifier::default_notifier,
     wutil::{fish_is_pua, fish_wcstol},
 };
+#[cfg(unix)]
 use fish_common::read_blocked;
 use fish_feature_flags::{FeatureFlag, feature_test};
+#[cfg(unix)]
 use nix::errno::Errno;
+#[cfg(unix)]
 use nix::sys::{select::FdSet, signal::SigSet, time::TimeSpec};
+#[cfg(unix)]
+use std::os::fd::{BorrowedFd, RawFd};
 use std::{
     collections::VecDeque,
-    os::fd::{BorrowedFd, RawFd},
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
+#[cfg(windows)]
+type RawFd = i32; // Logical selector only; native transport retains HANDLEs.
+
+pub(super) fn interrupt_key() -> u8 {
+    #[cfg(unix)]
+    {
+        shell_modes().control_chars[libc::VINTR]
+    }
+    #[cfg(windows)]
+    {
+        3
+    } // Logical Ctrl-C key, not a POSIX signal number.
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReadlineCmdEvent {
@@ -180,6 +201,9 @@ pub struct KeyEvent {
     pub shifted_codepoint: char,
     base_layout_codepoint: char,
     pub associated_text: Text,
+    /// Committed console text, distinct from a physical key's binding identity.
+    #[cfg(windows)]
+    pub(crate) native_text: Option<char>,
 }
 
 pub type CharIterator = std::iter::TakeWhile<std::array::IntoIter<char, 4>, fn(&char) -> bool>;
@@ -202,6 +226,8 @@ impl KeyEvent {
             shifted_codepoint: shifted_key.unwrap_or_default(),
             base_layout_codepoint: base_layout_key.unwrap_or_default(),
             associated_text,
+            #[cfg(windows)]
+            native_text: None,
         }
     }
     pub(super) fn from_raw(codepoint: char) -> Self {
@@ -377,6 +403,15 @@ pub struct InputData {
 
     // If set, events will be buffered until the query finishes.
     pub blocking_query: Option<TerminalQuery>,
+
+    #[cfg(windows)]
+    pub(crate) native: super::windows::NativeInput,
+    #[cfg(windows)]
+    pub(crate) native_error: Option<std::io::Error>,
+    #[cfg(windows)]
+    pub(crate) native_cancelled: bool,
+    #[cfg(windows)]
+    pub(crate) native_exit_status: Option<i32>,
 }
 
 impl InputData {
@@ -391,6 +426,14 @@ impl InputData {
             event_storage: Vec::new(),
             blocking_query_timeout,
             blocking_query: None,
+            #[cfg(windows)]
+            native_exit_status: None,
+            #[cfg(windows)]
+            native: super::windows::NativeInput::default(),
+            #[cfg(windows)]
+            native_error: None,
+            #[cfg(windows)]
+            native_cancelled: false,
         }
     }
 
@@ -465,9 +508,76 @@ pub trait InputEventQueuer {
         if self.is_blocked_querying()
             && is_event_blocked_when_querying(self.get_input_data().queue.front()?)
         {
+            #[cfg(windows)]
+            {
+                // A terminal reply must not make us prefetch a later command or
+                // nested reader's input. Finalize the bounded query first; its
+                // owner then consumes this untouched event in normal order.
+                return Some(CharEvent::QueryResult(QueryResultEvent::Interrupted));
+            }
+            #[cfg(unix)]
             return None;
         }
         self.get_input_data_mut().queue.pop_front()
+    }
+
+    fn wait_input_event(&mut self, timeout: Timeout) -> InputEventTrigger {
+        #[cfg(unix)]
+        {
+            next_input_event(self.get_in_fd(), self.get_ioport_fd(), timeout)
+        }
+        #[cfg(windows)]
+        {
+            self.get_input_data_mut()
+                .native
+                .next(timeout, Default::default())
+        }
+    }
+
+    #[cfg(windows)]
+    fn native_jobs_notified(&mut self) {}
+
+    #[cfg(windows)]
+    fn input_error(&mut self, error: std::io::Error) {
+        self.get_input_data_mut().native_error = Some(error);
+    }
+
+    fn service_input_event(&mut self, event: InputEventTrigger) -> Option<CharEvent> {
+        match event {
+            InputEventTrigger::Eof => return Some(CharEvent::Implicit(ImplicitEvent::Eof)),
+            InputEventTrigger::Interrupted => self.select_interrupted(),
+            InputEventTrigger::UvarNotified => self.uvar_change_notified(),
+            InputEventTrigger::IOPortNotified => self.ioport_notified(),
+            InputEventTrigger::Byte(byte) => on_byte_read(self, byte),
+            InputEventTrigger::TimeoutElapsed => {
+                return Some(CharEvent::QueryResult(QueryResultEvent::Timeout));
+            }
+            #[cfg(windows)]
+            InputEventTrigger::Event(event) => {
+                if self.paste_is_buffering() {
+                    if let CharEvent::Key(key) = &event {
+                        if let Some(text) = key.key.native_text {
+                            let mut bytes = [0; 4];
+                            self.get_input_data_mut()
+                                .paste_buffer
+                                .as_mut()
+                                .unwrap()
+                                .extend_from_slice(text.encode_utf8(&mut bytes).as_bytes());
+                            return None;
+                        }
+                    }
+                }
+                super::decode::InputEventQueuerExt::enqueue_event(self, event);
+            }
+            #[cfg(windows)]
+            InputEventTrigger::JobNotified => self.native_jobs_notified(),
+            #[cfg(windows)]
+            InputEventTrigger::Error(error) => {
+                self.input_error(error);
+                return Some(CharEvent::from_check_exit());
+            }
+        }
+        None
     }
 
     /// Read the next event, such as a UTF-8-encoded codepoint.
@@ -486,37 +596,14 @@ pub trait InputEventQueuer {
                 return mevt;
             }
 
-            match next_input_event(
-                self.get_in_fd(),
-                self.get_ioport_fd(),
-                if self.is_blocked_querying() {
-                    Timeout::Duration(self.get_input_data().blocking_query_timeout.unwrap())
-                } else {
-                    Timeout::Forever
-                },
-            ) {
-                InputEventTrigger::Eof => {
-                    return CharEvent::Implicit(ImplicitEvent::Eof);
-                }
-
-                InputEventTrigger::Interrupted => {
-                    self.select_interrupted();
-                }
-
-                InputEventTrigger::UvarNotified => {
-                    self.uvar_change_notified();
-                }
-
-                InputEventTrigger::IOPortNotified => {
-                    self.ioport_notified();
-                }
-
-                InputEventTrigger::Byte(read_byte) => {
-                    on_byte_read(self, read_byte);
-                }
-                InputEventTrigger::TimeoutElapsed => {
-                    return CharEvent::QueryResult(QueryResultEvent::Timeout);
-                }
+            let timeout = if self.is_blocked_querying() {
+                Timeout::Duration(self.get_input_data().blocking_query_timeout.unwrap())
+            } else {
+                Timeout::Forever
+            };
+            let event = self.wait_input_event(timeout);
+            if let Some(event) = self.service_input_event(event) {
+                return event;
             }
         }
     }
@@ -536,6 +623,7 @@ pub trait InputEventQueuer {
     /// Like readch(), except it will wait at most wait_time_ms milliseconds for a
     /// character to be available for reading.
     /// Return None on timeout, the event on success.
+    #[cfg(unix)]
     fn readch_timed(&mut self, wait_time_ms: usize) -> Option<CharEvent> {
         if let Some(evt) = self.try_pop() {
             return Some(evt);
@@ -546,6 +634,37 @@ pub trait InputEventQueuer {
             Duration::from_millis(u64::try_from(wait_time_ms).unwrap()),
         )
         .then(|| self.readch())
+    }
+
+    #[cfg(windows)]
+    fn readch_timed(&mut self, wait_time_ms: usize) -> Option<CharEvent> {
+        let Some(deadline) = std::time::Instant::now()
+            .checked_add(Duration::from_millis(u64::try_from(wait_time_ms).unwrap()))
+        else {
+            self.input_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "native input timeout overflow",
+            ));
+            return Some(CharEvent::from_check_exit());
+        };
+        loop {
+            if let Some(event) = self.try_pop() {
+                return Some(event);
+            }
+            self.prepare_to_select();
+            if let Some(event) = self.try_pop() {
+                return Some(event);
+            }
+            let event = self.wait_input_event(Timeout::Duration(
+                deadline.saturating_duration_since(std::time::Instant::now()),
+            ));
+            if matches!(event, InputEventTrigger::TimeoutElapsed) {
+                return None;
+            }
+            if let Some(event) = self.service_input_event(event) {
+                return Some(event);
+            }
+        }
     }
 
     /// Return the fd from which to read.
@@ -675,7 +794,7 @@ pub trait InputEventQueuer {
     fn select_interrupted(&mut self) {}
 
     fn enqueue_interrupt_key(&mut self) {
-        let vintr = shell_modes().control_chars[libc::VINTR];
+        let vintr = interrupt_key();
         if vintr != 0 {
             let interrupt_evt = CharEvent::from_key(KeyEvent::from_single_byte(vintr));
             if stop_query(self.blocking_query_mut()) {
@@ -704,6 +823,7 @@ pub trait InputEventQueuer {
         self.get_input_data().function_status
     }
 
+    #[cfg(unix)]
     fn read_sequence_byte(&mut self, buffer: &mut Vec<u8>) -> Option<u8> {
         let fd = self.get_in_fd();
         let strict = feature_test(FeatureFlag::OmitTermWorkarounds);
@@ -744,6 +864,47 @@ pub trait InputEventQueuer {
         Some(next)
     }
 
+    #[cfg(windows)]
+    fn read_sequence_byte(&mut self, buffer: &mut Vec<u8>) -> Option<u8> {
+        let duration = if feature_test(FeatureFlag::OmitTermWorkarounds)
+            || self.paste_is_buffering()
+            || self.is_blocked_querying()
+        {
+            LONG_READ_TIMEOUT
+        } else {
+            // Native input has an owned worker admission/completion boundary.
+            // Use the configured escape deadline, not a Unix 1-ms fd probe.
+            Duration::from_millis(WAIT_ON_ESCAPE_MS.load(Ordering::Relaxed) as u64)
+        };
+        let deadline = std::time::Instant::now() + duration;
+        loop {
+            let event = self.wait_input_event(Timeout::Duration(
+                deadline.saturating_duration_since(std::time::Instant::now()),
+            ));
+            match event {
+                InputEventTrigger::Byte(byte) => {
+                    buffer.push(byte);
+                    return Some(byte);
+                }
+                InputEventTrigger::TimeoutElapsed => return None,
+                InputEventTrigger::Interrupted => {
+                    self.select_interrupted();
+                    return None;
+                }
+                InputEventTrigger::Event(event) => {
+                    super::decode::InputEventQueuerExt::enqueue_event(self, event);
+                    return None;
+                }
+                event => {
+                    if let Some(event) = self.service_input_event(event) {
+                        self.push_front(event);
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
     /// Return if we have any lookahead.
     #[cfg(test)]
     fn has_lookahead(&self) -> bool {
@@ -763,7 +924,7 @@ pub trait InputEventQueuer {
 /// This calls select() on three fds: input (e.g. stdin), the ioport notifier fd (for main thread
 /// requests), and the uvar notifier. This returns either the byte which was read, or one of the
 /// special values below.
-pub(super) enum InputEventTrigger {
+pub(crate) enum InputEventTrigger {
     // A byte was successfully read.
     Byte(u8),
 
@@ -781,8 +942,15 @@ pub(super) enum InputEventTrigger {
 
     // No file descriptor was ready within the query timeout.
     TimeoutElapsed,
+    #[cfg(windows)]
+    Event(CharEvent),
+    #[cfg(windows)]
+    JobNotified,
+    #[cfg(windows)]
+    Error(std::io::Error),
 }
 
+#[cfg(unix)]
 pub(super) fn readb(in_fd: RawFd) -> Option<u8> {
     assert!(in_fd >= 0, "Invalid in fd");
     let mut arr: [u8; 1] = [0];
@@ -796,6 +964,7 @@ pub(super) fn readb(in_fd: RawFd) -> Option<u8> {
     Some(c)
 }
 
+#[cfg(unix)]
 pub(super) fn next_input_event(
     in_fd: RawFd,
     ioport_fd: RawFd,
@@ -855,6 +1024,7 @@ pub(super) fn next_input_event(
     }
 }
 
+#[cfg(unix)]
 pub fn check_fd_readable(in_fd: BorrowedFd, timeout: Duration) -> bool {
     // We are not prepared to handle a signal immediately; we only want to know if we get input on
     // our fd before the timeout. Use pselect to block all signals; we will handle signals
@@ -912,9 +1082,31 @@ impl InputEventQueuer for InputEventQueue {
         &mut self.data
     }
 
+    #[cfg(unix)]
     fn select_interrupted(&mut self) {
         if reader_test_and_clear_interrupted() != 0 {
             self.enqueue_interrupt_key();
+        }
+    }
+
+    #[cfg(windows)]
+    fn select_interrupted(&mut self) {
+        let controls = crate::signal::pending_console_controls();
+        self.data.native_cancelled |= controls.ctrl_c != 0 || controls.ctrl_break != 0;
+        if let Err(error) = self.data.native.interrupt() {
+            self.input_error(error);
+            self.push_front(CharEvent::from_check_exit());
+            return;
+        }
+        if controls.close != 0 {
+            crate::reader::native_console_closed();
+        }
+        // This queue has no parser. Its owner services actual handlers and
+        // acknowledges/rearms before resuming, never erasing a receipt here.
+        if stop_query(self.blocking_query_mut()) {
+            self.push_front(CharEvent::QueryResult(QueryResultEvent::Interrupted));
+        } else {
+            self.push_front(CharEvent::from_check_exit());
         }
     }
 }
@@ -922,6 +1114,22 @@ impl InputEventQueuer for InputEventQueue {
 #[cfg(test)]
 mod tests {
     use super::{CharEvent, InputEventQueue, InputEventQueuer as _, ReadlineCmd};
+
+    #[cfg(windows)]
+    #[test]
+    fn native_query_yields_without_consuming_later_reader_input() {
+        use super::{QueryResultEvent, TerminalQuery, stop_query};
+        let mut queue = InputEventQueue::new(0, None);
+        *queue.blocking_query_mut() = Some(TerminalQuery::Initial);
+        queue.push_back(CharEvent::from_char('x'));
+        assert!(matches!(
+            queue.readch(),
+            CharEvent::QueryResult(QueryResultEvent::Interrupted)
+        ));
+        assert!(stop_query(queue.blocking_query_mut()));
+        assert_eq!(queue.readch().get_char(), 'x');
+        assert!(!queue.has_lookahead());
+    }
 
     #[test]
     fn test_push_front_back() {

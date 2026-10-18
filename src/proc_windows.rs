@@ -119,6 +119,9 @@ fn observe_job(job: &Job) -> io::Result<bool> {
                 ));
             }
         }
+        let donation = job.native_terminal.borrow_mut().take();
+        changed |= donation.is_some();
+        drop(donation);
     }
     Ok(changed)
 }
@@ -352,7 +355,7 @@ pub fn job_reap(parser: &mut Parser, interactive: bool, _block_io: Option<&IoCha
     printed
 }
 
-fn interrupt_group(parser: &Parser, current: &Job) {
+fn interrupt_group(parser: &Parser, current: &Job, release_foreground: bool) {
     // This is an explicitly declared native cooperative Ctrl-Break request,
     // prompted by evaluator interruption. A sent request never implies an ACK.
     for job in parser
@@ -380,7 +383,9 @@ fn interrupt_group(parser: &Parser, current: &Job) {
             }
         }
     }
-    current.group().set_is_foreground(false);
+    if release_foreground {
+        current.group().set_is_foreground(false);
+    }
 }
 
 impl Job {
@@ -415,6 +420,12 @@ impl Job {
             parser.libdata_mut().status_count += 1;
             return;
         }
+        let console_owned = self
+            .native_terminal
+            .borrow()
+            .as_ref()
+            .is_some_and(|lease| lease.is_active());
+        let mut cancelled = false;
         loop {
             job_reap(parser, false, block_io);
             // Exit requested by an unrelated job's callback must not wait for
@@ -427,7 +438,30 @@ impl Job {
             }
             if let Err(error) = native_wait_for_change(parser) {
                 if error.kind() == io::ErrorKind::Interrupted {
-                    interrupt_group(parser, self);
+                    interrupt_group(parser, self, !console_owned);
+                    if console_owned {
+                        cancelled = true;
+                        let controls = crate::signal::pending_console_controls();
+                        if controls.close != 0 {
+                            crate::reader::native_console_closed();
+                            crate::tty_handoff::native_begin_shutdown();
+                        }
+                        // Receipt counts survive acknowledgement. Handlers run
+                        // with a fresh token, while this wait retains provenance.
+                        if let Err(error) = crate::signal::rearm_console_controls() {
+                            diagnostic(error);
+                            parser.set_last_statuses(Statuses::just(1));
+                            parser.libdata_mut().status_count += 1;
+                            return;
+                        }
+                        event::fire_delayed(parser);
+                        if parser.libdata().exit_current_script {
+                            return;
+                        }
+                        if controls.close == 0 {
+                            continue;
+                        }
+                    }
                     parser.set_last_statuses(Statuses::just(130));
                 } else {
                     diagnostic(error);
@@ -438,9 +472,21 @@ impl Job {
                 return;
             }
         }
+        if cancelled {
+            parser.set_last_statuses(Statuses::just(130));
+            parser.libdata_mut().status_count += 1;
+            return;
+        }
         if let Some(statuses) = self.statuses() {
             parser.set_last_statuses(statuses);
             parser.libdata_mut().status_count += 1;
+        } else if self.flags().negate {
+            // `set name (substitution)` deliberately preserves the substitution
+            // status. Negation still applies when no process supplies a status,
+            // matching the shared evaluator's Unix short-circuit path.
+            let mut statuses = parser.last_statuses();
+            statuses.status = if statuses.status == 0 { 1 } else { 0 };
+            parser.set_last_statuses(statuses);
         }
     }
 }
@@ -448,6 +494,7 @@ impl Job {
 /// Called after shell-exit handlers, while the console/state/runtime owners are
 /// still alive. Accepted processes survive; only shell-side pumps/waits drain.
 pub fn native_shutdown_jobs(parser: &mut Parser) {
+    crate::tty_handoff::native_begin_shutdown();
     job_reap(parser, false, None);
     let live = parser
         .jobs()

@@ -73,7 +73,113 @@ impl Drop for HeldDescendant<'_> {
     }
 }
 
+fn inherited_descriptors(f: &Fixture) {
+    // This is the same composition used by stream/editor clipboard paste:
+    // nested function substitutions must retain an enclosing error destination,
+    // including through a pipeline, block, eval, or sourced file.
+    let definitions = r#"
+function n3_substitution_diagnostic
+    set -l data (math '1 / 0' | string collect -N)
+    return $status
+end
+function n3_nested_diagnostic
+    set -l data (n3_substitution_diagnostic)
+    return $status
+end
+"#;
+    let source = f.root.join("n3 inherited substitution diagnostic.fish");
+    std::fs::write(&source, format!("{definitions}\nn3_nested_diagnostic\n")).unwrap();
+    let commands = [
+        "n3_nested_diagnostic".to_owned(),
+        "begin; n3_nested_diagnostic; end".to_owned(),
+        "eval n3_nested_diagnostic".to_owned(),
+        format!("source {}", quote(source.to_str().unwrap())),
+    ];
+    for (index, command) in commands.iter().enumerate() {
+        let error_file = f.root.join(format!("n3-inherited-diagnostic-{index}"));
+        let result = f.eval(&format!(
+            "{definitions}\n{command} 2> {}; set -l failed $status; printf '%s' (printf restored); exit $failed",
+            quote(error_file.to_str().unwrap())
+        ));
+        assert_ne!(result.code, 0);
+        assert_eq!(result.out, b"restored");
+        assert!(
+            result.err.is_empty(),
+            "nested diagnostic escaped its redirect"
+        );
+        assert!(
+            !std::fs::read(error_file).unwrap().is_empty(),
+            "real builtin diagnostic must reach the enclosing error file"
+        );
+    }
+    let unredirected = f.eval(&format!("{definitions}\nn3_nested_diagnostic"));
+    assert_ne!(unredirected.code, 0);
+    assert!(unredirected.out.is_empty());
+    assert!(!unredirected.err.is_empty());
+    let closed = f.eval(&format!(
+        "{definitions}\nn3_nested_diagnostic 2>&-; set -l failed $status; printf '%s' (printf restored); exit $failed"
+    ));
+    assert_ne!(closed.code, 0);
+    assert_eq!(closed.out, b"restored");
+    assert!(closed.err.is_empty());
+
+    // Aliases retain the endpoint selected in redirection order. Replacing
+    // substitution stdout must not retarget stderr that already aliases it.
+    let alias_function =
+        "function n3_substitution_alias; set -l data (printf inherited-alias >&2); end";
+    let alias_file = f.root.join("n3-inherited-alias");
+    exact(
+        f.eval(&format!(
+            "{alias_function}; n3_substitution_alias > {} 2>&1; printf restored",
+            quote(alias_file.to_str().unwrap())
+        )),
+        0,
+        b"restored",
+        b"",
+    );
+    assert_eq!(std::fs::read(&alias_file).unwrap(), b"inherited-alias");
+    exact(
+        f.eval(&format!(
+            "{alias_function}; n3_substitution_alias 2>&1 > {}; printf restored",
+            quote(alias_file.to_str().unwrap())
+        )),
+        0,
+        b"inherited-aliasrestored",
+        b"",
+    );
+    assert!(std::fs::read(&alias_file).unwrap().is_empty());
+    exact(
+        f.eval(&format!(
+            "function n3_substitution_extra; set -l data (printf inherited-extra >&9); end; n3_substitution_extra 9> {}; printf restored",
+            quote(alias_file.to_str().unwrap())
+        )),
+        0,
+        b"restored",
+        b"",
+    );
+    assert_eq!(std::fs::read(alias_file).unwrap(), b"inherited-extra");
+
+    // A real external consumer inherits logical stdin and emits binary stderr;
+    // neither endpoint may silently revert to the shell's startup handles.
+    let error_file = f.root.join("n3-inherited-external-error");
+    exact(
+        f.eval(&format!(
+            "function n3_substitution_external; set -l data ({} stream); printf '%s' \"$data\"; end; printf retained-input | n3_substitution_external 2> {}",
+            f.probe(),
+            quote(error_file.to_str().unwrap())
+        )),
+        0,
+        b"probe-out:retained-input",
+        b"",
+    );
+    assert_eq!(
+        std::fs::read(error_file).unwrap(),
+        b"probe-err:\0\n\r\n\xff\x80"
+    );
+}
+
 pub(super) fn exercise(f: &Fixture) {
+    inherited_descriptors(f);
     let probe = f.probe();
     exact(f.eval(r#"
 set n3_none (printf '')

@@ -11,7 +11,6 @@ use crate::{
     parse_constants::ParseErrorList,
     parse_util::{detect_errors_in_argument_list, detect_parse_errors},
 };
-#[cfg(unix)]
 use crate::{
     complete::CompletionRequestOptions,
     operation_context::OperationContext,
@@ -19,9 +18,7 @@ use crate::{
     proc::is_interactive_session,
     reader::{commandline_get_state, completion_apply_to_command_line},
 };
-#[cfg(unix)]
 use fish_common::{UnescapeFlags, UnescapeStringStyle, unescape_string};
-#[cfg(unix)]
 use fish_wcstringutil::string_suffixes_string;
 use fish_widestring::bytes2wcstring;
 
@@ -384,33 +381,13 @@ pub fn complete(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]
                 wrap_targets.push(w.woptarg.unwrap().to_owned());
             }
             'C' => {
-                #[cfg(windows)]
-                {
-                    err_str!("Active completion is unavailable on this platform")
-                        .cmd(cmd)
-                        .finish(streams);
-                    return Err(STATUS_CMD_ERROR);
-                }
-                #[cfg(unix)]
-                {
-                    do_complete = true;
-                    if let Some(s) = w.woptarg {
-                        do_complete_param = Some(s.to_owned());
-                    }
+                do_complete = true;
+                if let Some(s) = w.woptarg {
+                    do_complete_param = Some(s.to_owned());
                 }
             }
             OPT_ESCAPE => {
-                #[cfg(windows)]
-                {
-                    err_str!("Active completion is unavailable on this platform")
-                        .cmd(cmd)
-                        .finish(streams);
-                    return Err(STATUS_CMD_ERROR);
-                }
-                #[cfg(unix)]
-                {
-                    unescape_output = false;
-                }
+                unescape_output = false;
             }
             'h' => {
                 return builtin_print_help(parser, streams, cmd);
@@ -513,99 +490,100 @@ pub fn complete(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]
     }
 
     if do_complete {
-        #[cfg(unix)]
-        {
-            let have_do_complete_param = do_complete_param.is_some();
-            let do_complete_param = match do_complete_param {
-                None => {
-                    // No argument given, try to use the current commandline.
-                    let commandline_state = commandline_get_state(true);
-                    if !parser.interactive_initialized && !is_interactive_session() {
-                        err_str!("Can not get commandline in non-interactive mode")
-                            .cmd(cmd)
-                            .finish(streams);
-                        return Err(STATUS_CMD_ERROR);
-                    }
-                    commandline_state.text
+        let have_do_complete_param = do_complete_param.is_some();
+        let do_complete_param = match do_complete_param {
+            None => {
+                // No argument given, try to use the current commandline.
+                let commandline_state = commandline_get_state(true);
+                if !parser.interactive_initialized && !is_interactive_session() {
+                    err_str!("Can not get commandline in non-interactive mode")
+                        .cmd(cmd)
+                        .finish(streams);
+                    return Err(STATUS_CMD_ERROR);
                 }
-                Some(param) => param,
-            };
+                commandline_state.text
+            }
+            Some(param) => param,
+        };
 
-            let (token, _) = get_token_extent(&do_complete_param, do_complete_param.len());
+        #[cfg(windows)]
+        if let Some(error) = crate::complete::native_completion_request_error(&do_complete_param) {
+            err_raw!(Cow::Borrowed(error)).cmd(cmd).finish(streams);
+            return Err(STATUS_CMD_ERROR);
+        }
 
-            // Create a scoped transient command line, so that builtin_commandline will see our
-            // argument, not the reader buffer.
-            let _remove_transient = parser
-                .libdata()
-                .transient_commandline
-                .scoped_replace(Some(do_complete_param.clone()));
+        let (token, _) = get_token_extent(&do_complete_param, do_complete_param.len());
 
-            // Prevent accidental recursion (see #6171).
-            if !parser.libdata().builtin_complete_current_commandline {
-                if !have_do_complete_param {
-                    parser.libdata_mut().builtin_complete_current_commandline = true;
-                }
+        // Create a scoped transient command line, so that builtin_commandline will see our
+        // argument, not the reader buffer.
+        let _remove_transient = parser
+            .libdata()
+            .transient_commandline
+            .scoped_replace(Some(do_complete_param.clone()));
 
-                let complete_options = CompletionRequestOptions::default();
-                let (mut comp, _needs_load) = crate::complete::complete(
-                    &do_complete_param,
-                    complete_options,
-                    &mut parser.context(),
+        // Prevent accidental recursion (see #6171).
+        if !parser.libdata().builtin_complete_current_commandline {
+            if !have_do_complete_param {
+                parser.libdata_mut().builtin_complete_current_commandline = true;
+            }
+
+            let complete_options = CompletionRequestOptions::default();
+            let (mut comp, _needs_load) = crate::complete::complete(
+                &do_complete_param,
+                complete_options,
+                &mut parser.context(),
+            );
+
+            // Apply the same sort and deduplication treatment as pager completions
+            crate::complete::sort_and_prioritize(&mut comp, complete_options);
+
+            for next in comp {
+                // Make a fake commandline, and then apply the completion to it.
+                let faux_cmdline = &do_complete_param[token.clone()];
+                let mut tmp_cursor = faux_cmdline.len();
+                let mut faux_cmdline_with_completion = completion_apply_to_command_line(
+                    &mut OperationContext::background_interruptible(parser.vars()),
+                    &next.completion,
+                    next.flags,
+                    faux_cmdline,
+                    &mut tmp_cursor,
+                    /*append_only=*/ false,
+                    /*is_unique=*/ false,
                 );
 
-                // Apply the same sort and deduplication treatment as pager completions
-                crate::complete::sort_and_prioritize(&mut comp, complete_options);
-
-                for next in comp {
-                    // Make a fake commandline, and then apply the completion to it.
-                    let faux_cmdline = &do_complete_param[token.clone()];
-                    let mut tmp_cursor = faux_cmdline.len();
-                    let mut faux_cmdline_with_completion = completion_apply_to_command_line(
-                        &mut OperationContext::background_interruptible(parser.vars()),
-                        &next.completion,
-                        next.flags,
-                        faux_cmdline,
-                        &mut tmp_cursor,
-                        /*append_only=*/ false,
-                        /*is_unique=*/ false,
-                    );
-
-                    // completion_apply_to_command_line will append a space unless COMPLETE_NO_SPACE
-                    // is set. We don't want to set COMPLETE_NO_SPACE because that won't close
-                    // quotes. What we want is to close the quote, but not append the space. So we
-                    // just look for the space and clear it.
-                    if next.flags.suffix_type().is_some()
-                        && string_suffixes_string(L!(" "), &faux_cmdline_with_completion)
-                    {
-                        faux_cmdline_with_completion
-                            .truncate(faux_cmdline_with_completion.len() - 1);
-                    }
-
-                    if unescape_output {
-                        // The input data is meant to be something like you would have on the command
-                        // line, e.g. includes backslashes. The output should be raw, i.e. unescaped. So
-                        // we need to unescape the command line. See #1127.
-                        faux_cmdline_with_completion = unescape_string(
-                            &faux_cmdline_with_completion,
-                            UnescapeStringStyle::Script(UnescapeFlags::default()),
-                        )
-                        .expect("Unescaping commandline to complete failed");
-                    }
-
-                    // Append any description.
-                    if !next.description.is_empty() {
-                        faux_cmdline_with_completion.reserve(
-                            faux_cmdline_with_completion.len() + 2 + next.description.len(),
-                        );
-                        faux_cmdline_with_completion.push('\t');
-                        faux_cmdline_with_completion.push_utfstr(&next.description);
-                    }
-                    faux_cmdline_with_completion.push('\n');
-                    streams.out.append(&faux_cmdline_with_completion);
+                // completion_apply_to_command_line will append a space unless COMPLETE_NO_SPACE
+                // is set. We don't want to set COMPLETE_NO_SPACE because that won't close
+                // quotes. What we want is to close the quote, but not append the space. So we
+                // just look for the space and clear it.
+                if next.flags.suffix_type().is_some()
+                    && string_suffixes_string(L!(" "), &faux_cmdline_with_completion)
+                {
+                    faux_cmdline_with_completion.truncate(faux_cmdline_with_completion.len() - 1);
                 }
 
-                parser.libdata_mut().builtin_complete_current_commandline = false;
+                if unescape_output {
+                    // The input data is meant to be something like you would have on the command
+                    // line, e.g. includes backslashes. The output should be raw, i.e. unescaped. So
+                    // we need to unescape the command line. See #1127.
+                    faux_cmdline_with_completion = unescape_string(
+                        &faux_cmdline_with_completion,
+                        UnescapeStringStyle::Script(UnescapeFlags::default()),
+                    )
+                    .expect("Unescaping commandline to complete failed");
+                }
+
+                // Append any description.
+                if !next.description.is_empty() {
+                    faux_cmdline_with_completion
+                        .reserve(faux_cmdline_with_completion.len() + 2 + next.description.len());
+                    faux_cmdline_with_completion.push('\t');
+                    faux_cmdline_with_completion.push_utfstr(&next.description);
+                }
+                faux_cmdline_with_completion.push('\n');
+                streams.out.append(&faux_cmdline_with_completion);
             }
+
+            parser.libdata_mut().builtin_complete_current_commandline = false;
         }
     } else if path.is_empty()
         && gnu_opt.is_empty()

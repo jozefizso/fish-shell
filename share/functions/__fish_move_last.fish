@@ -12,6 +12,17 @@ function __fish_move_last -d "Move the last element of a directory history from 
         return 1
     end
 
+    if builtin -q __fish_native_fs
+        # A removed or denied history directory is a real failed action. Do not
+        # consume history or advertise success when native cd did not happen.
+        set -l previous $PWD
+        set -l source $$src
+        builtin cd $source[$size_src]
+        or return
+        set -g $dest $$dest $previous
+        set -e $src\[$size_src]
+        return 0
+    end
     # Append current dir to the end of the destination
     set -g (echo $dest) $$dest $PWD
 

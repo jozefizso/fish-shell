@@ -79,7 +79,11 @@ bind --preset $argv home beginning-of-line
 bind --preset $argv alt-d \'if test "$(commandline; printf .)" = \n.; __fish_echo dirh; else; commandline -f kill-word; end\'
 bind --preset $argv ctrl-d delete-or-exit
 
-bind --preset $argv alt-s \'for cmd in sudo doas please run0; if command -q $cmd; fish_commandline_prepend $cmd; break; end; end\'
+if builtin -q __fish_native_fs
+    bind --preset $argv alt-s \'set -l cmd; for candidate in sudo doas please run0; if command -q $candidate; set cmd $candidate; break; end; end; if set -q cmd[1]; fish_commandline_prepend $cmd; else; echo "fish: no privilege-prefix tool available" >&2; false; end\'
+else
+    bind --preset $argv alt-s \'for cmd in sudo doas please run0; if command -q $cmd; fish_commandline_prepend $cmd; break; end; end\'
+end
 
  # Allow reading manpages by pressing f1 (many GUI applications) or Alt+h (like in zsh).
 bind --preset $argv f1 __fish_man_page

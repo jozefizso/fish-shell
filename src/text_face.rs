@@ -355,7 +355,7 @@ pub(crate) fn parse_text_face_and_options<'argarray, 'args>(
     parse_text_face_and_options_with_color_support(argv, is_builtin, default_color_support())
 }
 
-fn parse_text_face_and_options_with_color_support<'argarray, 'args>(
+pub(crate) fn parse_text_face_and_options_with_color_support<'argarray, 'args>(
     argv: &'argarray mut [&'args wstr],
     is_builtin: bool,
     support: ColorSupport,

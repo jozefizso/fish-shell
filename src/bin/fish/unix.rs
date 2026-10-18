@@ -380,7 +380,13 @@ fn throwing_main() -> i32 {
     };
 
     #[cfg(feature = "localize-messages")]
-    fish::localization::initialize_localization();
+    if let Err(error) = fish::localization::initialize_localization() {
+        eprintf!(
+            "fish: unable to initialize localization: %s\n",
+            error.to_string()
+        );
+        return 2;
+    }
 
     // Enable debug categories set in FISH_DEBUG.
     // This is in *addition* to the ones given via --debug.

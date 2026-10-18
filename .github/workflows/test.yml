@@ -249,12 +249,12 @@ jobs:
         Get-Volume -DriveLetter $absolute.Substring(0, 1) |
           Select-Object DriveLetter, FileSystemType, HealthStatus |
           Out-String | Tee-Object -Append native-windows-results/filesystem-host.txt
-    - name: Build native fish, formatter and probe profiles
+    - name: Build native fish, formatter, key reader and probe profiles
       run: |
         New-Item -ItemType Directory -Force native-windows-results | Out-Null
-        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin fish_indent --bin windows_native_probe --bin windows_n5_gui_probe 2>&1 | Tee-Object native-windows-results/build-debug.txt
+        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin fish_indent --bin fish_key_reader --bin windows_native_probe --bin windows_n5_gui_probe 2>&1 | Tee-Object native-windows-results/build-debug.txt
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish --bin fish_indent --bin windows_native_probe --bin windows_n5_gui_probe 2>&1 | Tee-Object native-windows-results/build-release.txt
+        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish --bin fish_indent --bin fish_key_reader --bin windows_native_probe --bin windows_n5_gui_probe 2>&1 | Tee-Object native-windows-results/build-release.txt
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Native GOAL leaf, library, initialization and acceptance gates
       run: |
@@ -304,7 +304,23 @@ jobs:
           'proc::native_status::tests::native_exit_codes_keep_raw_bits_and_map_shell_status',
           'proc::native_status::tests::builtin_and_empty_statuses_are_not_native_exit_codes',
           'proc::native_status::tests::io_failure_preserves_native_completion_and_prior_failure_precedence',
-          'exec::native_launch::tests::assignment_quota_rollback_preserves_host'
+          'exec::native_launch::tests::assignment_quota_rollback_preserves_host',
+          'input::windows::tests::unicode_record_commits_and_repeats',
+          'input::windows::tests::modified_physical_keys_remain_bindable',
+          'input::windows::tests::malformed_console_unicode_has_no_replacement_or_cross_epoch_tail',
+          'input::windows::tests::nested_consumers_share_scalar_tails_and_repeat_boundaries',
+          'input::windows::tests::physical_text_controls_cannot_escape_an_active_paste',
+          'input::windows::tests::native_nul_chords_preserve_text_and_legacy_binding_identity',
+          'input::input::tests::native_query_yields_without_consuming_later_reader_input',
+          'native_text::tests::encoded_scalar_boundaries_and_prefixes',
+          'native_text::tests::all_encoded_lengths_and_ordinary_codepoints',
+          'native_text::tests::malformed_escaped_bytes_stay_byte_wise',
+          'editable_line::tests::native_reserved_scalar_backspace_and_delete',
+          'editable_line::tests::native_cursor_admission_and_selection_replacement',
+          'editable_line::tests::native_insertion_admission_and_scalar_coalescing',
+          'editable_line::tests::native_count_tracks_bytes_joining_and_separating_at_splice_seams',
+          'clipboard_windows::tests::private_station_provider_regression',
+          'termsize::tests::test_termsize'
         )) {
           if (@($libraryCases | Where-Object { $_ -eq "$($case): test" }).Count -ne 1) {
             throw "Required native library case missing: $case"
@@ -322,6 +338,9 @@ jobs:
         $env:FISH_NATIVE_TEST_RELEASE_PROBE = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/windows_native_probe.exe').Path
         $env:FISH_NATIVE_N5_GUI_FIXTURE = (Resolve-Path 'target/x86_64-pc-windows-msvc/debug/windows_n5_gui_probe.exe').Path
         $env:FISH_NATIVE_N5_RELEASE_GUI_FIXTURE = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/windows_n5_gui_probe.exe').Path
+        $env:FISH_NATIVE_N6_KEY_READER = (Resolve-Path 'target/x86_64-pc-windows-msvc/debug/fish_key_reader.exe').Path
+        $env:FISH_NATIVE_N6_RELEASE_KEY_READER = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/fish_key_reader.exe').Path
+        $env:FISH_NATIVE_N6_EVIDENCE_ROOT = Join-Path (Get-Location) 'native-windows-results/n6-console'
         Invoke-NativeTests -Name native-acceptance -CargoArgs @('--test', 'windows_native', 'native_required_acceptance_cases') -Required @('native_required_acceptance_cases') -Exact
         $required = @('W2-RUNTIME', 'W3-BYTES', 'W3-ERRORS', 'W3-LIFETIME', 'W3-CONSOLE', 'W4-PATHS', 'W5-LANGUAGE', 'W5-NO-CONFIG', 'W5-REJECT', 'W6-CHILD', 'W6-STREAMS', 'W6-STATUS', 'W6-FAILURE', 'W6-BOUNDARY', 'W6-CLEAN-RUN')
         $passes = @(Get-Content native-windows-results/native-acceptance.txt | Where-Object { $_ -match '^PASS (debug|release) ' })
@@ -334,7 +353,8 @@ jobs:
           @{ Name = 'n2'; Tests = @('N2_STREAM', 'N2_REDIRECT', 'N2_LIFETIME'); Gates = @('N2-STREAM', 'N2-REDIRECT', 'N2-LIFETIME') },
           @{ Name = 'n3'; Tests = @('N3_LANGUAGE', 'N3_CAPTURE', 'N3_SCRIPTS'); Gates = @('N3-LANGUAGE', 'N3-CAPTURE', 'N3-SCRIPTS') },
           @{ Name = 'n4'; Tests = @('N4_STARTUP', 'N4_SHARING', 'N4_RECOVERY'); Gates = @('N4-STARTUP', 'N4-SHARING', 'N4-RECOVERY') },
-          @{ Name = 'n5'; Tests = @('N5_JOBS', 'N5_CANCEL', 'N5_ACCOUNT'); Gates = @('N5-JOBS', 'N5-CANCEL', 'N5-ACCOUNT') }
+          @{ Name = 'n5'; Tests = @('N5_JOBS', 'N5_CANCEL', 'N5_ACCOUNT'); Gates = @('N5-JOBS', 'N5-CANCEL', 'N5-ACCOUNT') },
+          @{ Name = 'n6'; Tests = @('n6_editor', 'n6_child', 'n6_tools'); Gates = @('N6-EDITOR', 'N6-CHILD', 'N6-TOOLS') }
         )) {
           foreach ($profile in @('debug', 'release')) {
             $profileArgs = @()
@@ -422,6 +442,37 @@ jobs:
                 throw "N5 must execute all 25 integration families against both artifacts plus the required private assignment owner case in the $profile harness"
               }
             }
+            if ($phase.Name -eq 'n6') {
+              $cases = @(
+                'N6-EDITOR/utility-free-default-first-prompt',
+                'N6-EDITOR/interactive-startup-order-private-login-profiles',
+                'N6-EDITOR/interactive-noexecute-and-option-errors',
+                'N6-EDITOR/native-record-unicode-repeats-modifiers',
+                'N6-EDITOR/navigation-delete-undo-selection-kill-yank-modes',
+                'N6-EDITOR/multiline-paste-no-execute-single-undo',
+                'N6-EDITOR/viewport-resize-overrides-screen',
+                'N6-EDITOR/typed-native-control-recovery-and-eof',
+                'N6-CHILD/tui-exclusive-input-protocol-mode-reclaim',
+                'N6-CHILD/failed-launch-editor-recovery',
+                'N6-CHILD/ignored-break-keeps-donation-until-release',
+                'N6-CHILD/control-handler-explicit-exit-seven',
+                'N6-CHILD/interactive-background-nul-file-pipe',
+                'N6-TOOLS/key-reader-all-option-aliases-stream-errors',
+                'N6-TOOLS/standalone-console-key-decoding-continuous',
+                'N6-TOOLS/builtin-key-reader-nested-stream-ownership',
+                'N6-TOOLS/interactive-read-silent-nchars-newline-null-cancel',
+                'N6-TOOLS/commandline-buffer-context-binding-errors',
+                'N6-TOOLS/nested-breakpoint-scope-context-restoration',
+                'N6-TOOLS/private-logon-station-editor-clipboard'
+              )
+              $casePasses = @(Get-Content "native-windows-results/$name.txt" | Where-Object { $_ -match '^PASS-CASE (debug|release) N6-' })
+              $expectedCases = @(foreach ($artifact in @('debug', 'release')) {
+                foreach ($case in $cases) { "PASS-CASE $artifact $case" }
+              })
+              if ($casePasses.Count -ne 40 -or @(Compare-Object ($expectedCases | Sort-Object) ($casePasses | Sort-Object)).Count -ne 0) {
+                throw "N6 must execute all 20 native console/tool families against both artifacts in the $profile harness"
+              }
+            }
           }
         }
     - name: Upload native Windows evidence
@@ -434,10 +485,12 @@ jobs:
           native-windows-results/
           target/x86_64-pc-windows-msvc/debug/fish.exe
           target/x86_64-pc-windows-msvc/debug/fish_indent.exe
+          target/x86_64-pc-windows-msvc/debug/fish_key_reader.exe
           target/x86_64-pc-windows-msvc/debug/windows_native_probe.exe
           target/x86_64-pc-windows-msvc/debug/windows_n5_gui_probe.exe
           target/x86_64-pc-windows-msvc/release/fish.exe
           target/x86_64-pc-windows-msvc/release/fish_indent.exe
+          target/x86_64-pc-windows-msvc/release/fish_key_reader.exe
           target/x86_64-pc-windows-msvc/release/windows_native_probe.exe
           target/x86_64-pc-windows-msvc/release/windows_n5_gui_probe.exe
 

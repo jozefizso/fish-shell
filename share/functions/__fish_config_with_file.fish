@@ -3,6 +3,10 @@ function __fish_config_with_file
     set -l path $argv[1]
     set -l cmd $argv[2..]
     if string match -rq -- ^/ $path
+        or begin
+            builtin -q __fish_native_fs
+            and string match -rq '^(?:[A-Za-z]:[\\\\/]|\\\\\\\\)' -- $path
+        end
         $cmd $path
     else
         status get-file $path | $cmd

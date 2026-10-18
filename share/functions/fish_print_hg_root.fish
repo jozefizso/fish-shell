@@ -9,14 +9,21 @@ function fish_print_hg_root
     set -l root
     set -l dir "$(pwd -P 2>/dev/null)"
     or return 1
+    set -l separator /
+    if builtin -q __fish_native_fs
+        set separator '\\'
+    end
 
     while not contains -- "$dir" "" / .
-        if test -f $dir'/.hg/dirstate'
-            echo $dir/.hg
+        if test -f $dir$separator'.hg'$separator'dirstate'
+            echo $dir$separator'.hg'
             return 0
         end
         # Go up one directory
-        set dir (path dirname -- $dir)
+        set -l parent (path dirname -- $dir)
+        # Drive and UNC roots are their own parent on Windows.
+        test "$parent" = "$dir"; and break
+        set dir $parent
     end
 
     return 1

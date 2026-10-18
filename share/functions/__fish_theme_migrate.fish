@@ -3,11 +3,16 @@ function __fish_theme_migrate
     functions -e __fish_theme_migrate
 
     set -l migration_version 4300
+    set -l separator /
+    if builtin -q __fish_native_fs
+        set separator '\\'
+    end
+    set -l conf_dir $__fish_config_dir$separator'conf.d'
 
     # Maybe migrate.
     if not set -q __fish_initialized ||
             test $__fish_initialized -ge $migration_version ||
-            path is $__fish_config_dir/conf.d/fish_frozen_theme.fish $__fish_config_dir/conf.d/fish_frozen_key_bindings.fish
+            path is $conf_dir$separator'fish_frozen_theme.fish' $conf_dir$separator'fish_frozen_key_bindings.fish'
         return
     end
 
@@ -27,8 +32,9 @@ function __fish_theme_migrate
                 set -a theme_data "$(string escape -- $varname $$varname | string join " ")"
             end
             __fish_theme_freeze __fish_theme_migrate $theme_data
+            or return
             set msg_suffix " by default."\n"  Migrated them to global variables set in $(set_color --underline)$(
-                    __fish_unexpand_tilde $__fish_config_dir/conf.d/fish_frozen_theme.fish
+                    __fish_unexpand_tilde $conf_dir$separator'fish_frozen_theme.fish'
                 )$(set_color --reset)"
         end
         set -a msg "* Color variables are no longer set in universal scope$msg_suffix"
@@ -36,10 +42,16 @@ function __fish_theme_migrate
     end
     if set -Uq fish_key_bindings
         set removing_uvars true
-        set -l relative_filename conf.d/fish_frozen_key_bindings.fish
-        set -l filename $__fish_config_dir/$relative_filename
+        set -l relative_filename conf.d$separator'fish_frozen_key_bindings.fish'
+        set -l filename $__fish_config_dir$separator$relative_filename
         __fish_backup_config_files $relative_filename
-        mkdir -p -- (path dirname -- $filename)
+        or return
+        if builtin -q __fish_native_fs
+            __fish_native_fs mkdir (path dirname -- $filename)
+        else
+            mkdir -p -- (path dirname -- $filename)
+        end
+        or return
         echo >$filename "\
 # This file was created by fish when upgrading to version >= 4.3, to migrate
 # the 'fish_key_bindings' variable from its old default scope (universal)
@@ -61,11 +73,13 @@ $(
 # we cannot complete the migration.
 # As a workaround, erase the universal variable at every shell startup.
 set --erase --universal fish_key_bindings"
+        or return
         set -a msg '* The fish_key_bindings variable is no longer set in universal scope by default.'
         set -a msg (echo -s "  Migrated it to a global variable set in  " \
             "$(set_color --underline)$(__fish_unexpand_tilde $filename)" \
             (set_color --reset))
-        source $__fish_config_dir/$relative_filename
+        source $filename
+        or return
     end
     # TODO In a few years, stop setting it.
     set -U __fish_initialized $migration_version
@@ -74,8 +88,12 @@ set --erase --universal fish_key_bindings"
         string join \n -- $msg
         echo 'See also the release notes for 4.3.0 (type `help relnotes`).'
         set -Ue fish_key_bindings $theme_uvars
-        eval "$(__fish_posix_shell) -c 'sleep 7 # Please read above notice about universal variables'" \
-            '</dev/null &>/dev/null &'
+        # The Unix notice delay launches a POSIX shell; it has no native Windows
+        # process contract and is not needed to persist or display the migration.
+        if not builtin -q __fish_native_fs
+            eval "$(__fish_posix_shell) -c 'sleep 7 # Please read above notice about universal variables'" \
+                '</dev/null &>/dev/null &'
+        end
     end
 end
 

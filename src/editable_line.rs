@@ -54,6 +54,41 @@ pub fn apply_edit(target: &mut WString, colors: &mut Vec<HighlightSpec>, edit: &
     );
 }
 
+/// Apply a model edit and maintain the native scalar count across both splice seams.
+/// Three neighboring characters suffice because encoded UTF-8 scalars occupy at most four.
+fn apply_line_edit(
+    target: &mut WString,
+    colors: &mut Vec<HighlightSpec>,
+    edit: &Edit,
+    #[cfg(windows)] scalar_count: &mut usize,
+) {
+    #[cfg(windows)]
+    let (start, end, removed_count) = {
+        use crate::native_text::{ceil_boundary, count_scalars, floor_boundary};
+        let start = floor_boundary(target, edit.range.start.saturating_sub(3));
+        let end = ceil_boundary(target, edit.range.end.saturating_add(3).min(target.len()));
+        (start, end, count_scalars(&target[start..end]))
+    };
+    apply_edit(target, colors, edit);
+    #[cfg(windows)]
+    {
+        let end = end - edit.range.len() + edit.replacement.len();
+        *scalar_count =
+            *scalar_count - removed_count + crate::native_text::count_scalars(&target[start..end]);
+    }
+}
+
+fn is_single_editing_scalar(text: &wstr) -> bool {
+    #[cfg(windows)]
+    {
+        !text.is_empty() && crate::native_text::next_boundary(text, 0) == text.len()
+    }
+    #[cfg(not(windows))]
+    {
+        text.len() == 1
+    }
+}
+
 /// The history of all edits to some command line.
 #[derive(Clone, Default)]
 pub struct UndoHistory {
@@ -94,6 +129,9 @@ impl UndoHistory {
 pub struct EditableLine {
     /// The command line.
     text: WString,
+    /// Number of native editing scalars, maintained locally at each edit's splice seams.
+    #[cfg(windows)]
+    scalar_count: usize,
     /// Syntax highlighting.
     colors: Vec<HighlightSpec>,
     /// The current position of the cursor in the command line.
@@ -127,12 +165,42 @@ impl EditableLine {
     }
     pub fn set_position(&mut self, position: usize) {
         assert!(position <= self.len());
+        #[cfg(windows)]
+        let position = self.native_position(position);
         self.position = position;
     }
 
     // Gets the length of the text.
     pub fn len(&self) -> usize {
         self.text.len()
+    }
+
+    /// Number of editing scalars, not the number of canonical shell-text indices.
+    pub fn char_count(&self) -> usize {
+        #[cfg(windows)]
+        {
+            self.scalar_count
+        }
+        #[cfg(unix)]
+        {
+            self.len()
+        }
+    }
+
+    /// Snap an admitted cursor position in the direction of movement.
+    #[cfg(windows)]
+    fn native_position(&self, position: usize) -> usize {
+        if position < self.position {
+            crate::native_text::floor_boundary(&self.text, position)
+        } else {
+            crate::native_text::ceil_boundary(&self.text, position)
+        }
+    }
+
+    fn set_position_after_edit(&mut self, position: usize) {
+        #[cfg(windows)]
+        let position = crate::native_text::ceil_boundary(&self.text, position);
+        self.set_position(position);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -150,15 +218,35 @@ impl EditableLine {
     /// Modify the commandline according to @edit. Most modifications to the
     /// text should pass through this function.
     pub fn push_edit(&mut self, mut edit: Edit, allow_coalesce: bool) {
+        #[cfg(windows)]
+        {
+            use crate::native_text::{ceil_boundary, floor_boundary};
+            assert!(edit.range.start <= edit.range.end && edit.range.end <= self.len());
+            edit.range = if edit.range.is_empty() {
+                let position = self.native_position(edit.range.start);
+                position..position
+            } else {
+                floor_boundary(&self.text, edit.range.start)
+                    ..ceil_boundary(&self.text, edit.range.end)
+            };
+        }
         let range = &edit.range;
         let is_insertion = range.is_empty();
+        #[cfg(windows)]
+        let allow_coalesce = allow_coalesce && range.start == self.position();
         // Coalescing insertion does not create a new undo entry but adds to the last insertion.
         if allow_coalesce && is_insertion && self.want_to_coalesce_insertion_of(&edit.replacement) {
             assert_eq!(range.start, self.position());
             let last_edit = self.undo_history.edits.last_mut().unwrap();
             last_edit.replacement.push_utfstr(&edit.replacement);
-            apply_edit(&mut self.text, &mut self.colors, &edit);
-            self.set_position(self.position() + edit.replacement.len());
+            apply_line_edit(
+                &mut self.text,
+                &mut self.colors,
+                &edit,
+                #[cfg(windows)]
+                &mut self.scalar_count,
+            );
+            self.set_position_after_edit(self.position() + edit.replacement.len());
 
             assert!(self.undo_history.may_coalesce);
             return;
@@ -182,16 +270,25 @@ impl EditableLine {
                 .edits
                 .truncate(self.undo_history.edits_applied);
         }
-        edit.cursor_position_before_edit = self.pending_position.take().unwrap_or(self.position());
+        let position = self.pending_position.take().unwrap_or(self.position());
+        #[cfg(windows)]
+        let position = self.native_position(position);
+        edit.cursor_position_before_edit = position;
         edit.old = self.text[range.clone()].to_owned();
-        apply_edit(&mut self.text, &mut self.colors, &edit);
-        self.set_position(cursor_position_after_edit(&edit));
+        apply_line_edit(
+            &mut self.text,
+            &mut self.colors,
+            &edit,
+            #[cfg(windows)]
+            &mut self.scalar_count,
+        );
+        self.set_position_after_edit(cursor_position_after_edit(&edit));
         assert_eq!(
             self.undo_history.edits_applied,
             self.undo_history.edits.len()
         );
-        self.undo_history.may_coalesce =
-            is_insertion && (self.undo_history.try_coalesce || edit.replacement.len() == 1);
+        self.undo_history.may_coalesce = is_insertion
+            && (self.undo_history.try_coalesce || is_single_editing_scalar(&edit.replacement));
         self.undo_history.edits_applied += 1;
         self.undo_history.edits.push(edit);
     }
@@ -221,7 +318,13 @@ impl EditableLine {
             );
             inverse.replacement = edit.old.clone();
             let old_position = edit.cursor_position_before_edit;
-            apply_edit(&mut self.text, &mut self.colors, &inverse);
+            apply_line_edit(
+                &mut self.text,
+                &mut self.colors,
+                &inverse,
+                #[cfg(windows)]
+                &mut self.scalar_count,
+            );
             self.set_position(old_position);
             did_undo = true;
         }
@@ -251,7 +354,13 @@ impl EditableLine {
             }
             last_group_id = edit.group_id;
             self.undo_history.edits_applied += 1;
-            apply_edit(&mut self.text, &mut self.colors, edit);
+            apply_line_edit(
+                &mut self.text,
+                &mut self.colors,
+                edit,
+                #[cfg(windows)]
+                &mut self.scalar_count,
+            );
             edit.cursor_position_before_undo
                 .map(|pos| self.set_position(pos));
             did_redo = true;
@@ -302,7 +411,7 @@ impl EditableLine {
             return false;
         }
         // Only consolidate single character inserts.
-        if s.len() != 1 {
+        if !is_single_editing_scalar(s) {
             return false;
         }
         // Make an undo group after every space.
@@ -312,6 +421,11 @@ impl EditableLine {
         let last_edit = self.undo_history.edits.last().unwrap();
         // Don't add to the last edit if it deleted something.
         if !last_edit.range.is_empty() {
+            return false;
+        }
+        #[cfg(windows)]
+        if last_edit.range.start + last_edit.replacement.len() != self.position() {
+            // An insertion away from the cursor must not absorb a later insertion at the cursor.
             return false;
         }
         // Must not have moved the cursor!
@@ -324,6 +438,7 @@ impl EditableLine {
 
 /// Returns the number of characters left of the cursor that are removed by the
 /// deletion in the given edit.
+#[cfg(not(windows))]
 fn chars_deleted_left_of_cursor(edit: &Edit) -> usize {
     if edit.cursor_position_before_edit > edit.range.start {
         return std::cmp::min(
@@ -336,9 +451,23 @@ fn chars_deleted_left_of_cursor(edit: &Edit) -> usize {
 
 /// Compute the position of the cursor after the given edit.
 fn cursor_position_after_edit(edit: &Edit) -> usize {
-    let cursor = edit.cursor_position_before_edit + edit.replacement.len();
-    let removed = chars_deleted_left_of_cursor(edit);
-    cursor.saturating_sub(removed)
+    #[cfg(windows)]
+    {
+        let position = edit.cursor_position_before_edit;
+        return if position < edit.range.start {
+            position
+        } else if position <= edit.range.end {
+            edit.range.start + edit.replacement.len()
+        } else {
+            position - edit.range.len() + edit.replacement.len()
+        };
+    }
+    #[cfg(not(windows))]
+    {
+        let cursor = edit.cursor_position_before_edit + edit.replacement.len();
+        let removed = chars_deleted_left_of_cursor(edit);
+        cursor.saturating_sub(removed)
+    }
 }
 
 pub fn range_of_line_at_cursor(buffer: &wstr, cursor: usize) -> Range<usize> {
@@ -437,5 +566,167 @@ mod tests {
         line.end_edit_group();
         line.undo();
         assert_eq!(line.text(), "a");
+    }
+
+    #[cfg(windows)]
+    fn encoded_bytes(bytes: &[u8]) -> WString {
+        bytes
+            .iter()
+            .copied()
+            .map(fish_widestring::encode_byte_to_char)
+            .collect()
+    }
+
+    #[cfg(windows)]
+    fn reserved_line() -> EditableLine {
+        let mut line = EditableLine::default();
+        let mut text = L!("a").to_owned();
+        text.push_utfstr(&encoded_bytes(&[0xef, 0x98, 0x80])); // U+F600
+        text.push('z');
+        line.push_edit(Edit::new(0..0, text), false);
+        assert_eq!(line.len(), 5);
+        assert_eq!(line.char_count(), 3);
+        line
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_reserved_scalar_backspace_and_delete() {
+        for backwards in [true, false] {
+            let mut line = reserved_line();
+            line.set_position(if backwards { 4 } else { 1 });
+            // Even a caller still supplying a one-index edit cannot split the scalar.
+            let range = if backwards { 3..4 } else { 1..2 };
+            line.push_edit(Edit::new(range, WString::new()), false);
+            assert_eq!(line.text(), L!("az"));
+            assert_eq!(line.position(), 1);
+            assert_eq!(line.char_count(), 2);
+            assert!(line.undo());
+            assert_eq!(line.text(), reserved_line().text());
+            assert_eq!(line.position(), if backwards { 4 } else { 1 });
+            assert_eq!(line.char_count(), 3);
+            assert!(line.redo());
+            assert_eq!(line.text(), L!("az"));
+            assert_eq!(line.position(), 1);
+            assert_eq!(line.char_count(), 2);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cursor_admission_and_selection_replacement() {
+        let mut line = reserved_line();
+        line.set_position(0);
+        line.set_position(2); // rightward movement crosses the whole encoded scalar
+        assert_eq!(line.position(), 4);
+        line.set_position(3); // leftward movement crosses it in the opposite direction
+        assert_eq!(line.position(), 1);
+        line.set_position(4);
+        line.push_edit(Edit::new(2..3, L!("Q").to_owned()), false);
+        assert_eq!(line.text(), L!("aQz"));
+        assert_eq!(line.position(), 2);
+        assert_eq!(line.char_count(), 3);
+        assert!(line.undo());
+        assert_eq!(line.text(), reserved_line().text());
+        assert_eq!(line.position(), 4);
+        assert_eq!(line.char_count(), 3);
+        assert!(line.redo());
+        assert_eq!(line.text(), L!("aQz"));
+        assert_eq!(line.position(), 2);
+
+        // Expanding a selection must not advance a cursor before the selection.
+        let mut line = reserved_line();
+        line.set_position(0);
+        line.push_edit(Edit::new(2..3, L!("Q").to_owned()), false);
+        assert_eq!(line.text(), L!("aQz"));
+        assert_eq!(line.position(), 0);
+        assert!(line.undo());
+        assert_eq!(line.position(), 0);
+        assert!(line.redo());
+        assert_eq!(line.position(), 0);
+
+        // A cursor after the selection tracks the unchanged suffix, not the old indices.
+        let mut line = reserved_line();
+        line.push_edit(Edit::new(2..3, L!("Q").to_owned()), false);
+        assert_eq!(line.text(), L!("aQz"));
+        assert_eq!(line.position(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_insertion_admission_and_scalar_coalescing() {
+        let mut line = reserved_line();
+        line.set_position(1);
+        line.push_edit(Edit::new(2..2, L!("!").to_owned()), true);
+        let mut expected = L!("a").to_owned();
+        expected.push_utfstr(&encoded_bytes(&[0xef, 0x98, 0x80]));
+        expected.push_utfstr(L!("!z"));
+        assert_eq!(line.text(), &expected);
+        assert_eq!(line.position(), 1); // insertion was beyond the cursor
+        assert_eq!(line.char_count(), 4);
+        line.push_edit(Edit::new(1..1, L!("x").to_owned()), true);
+        assert_eq!(line.position(), 2);
+        assert_eq!(line.char_count(), 5);
+        assert!(line.undo());
+        assert_eq!(line.text(), &expected);
+        assert_eq!(line.position(), 1);
+        assert_eq!(line.char_count(), 4);
+        assert!(line.undo());
+        assert_eq!(line.text(), reserved_line().text());
+
+        let mut line = EditableLine::default();
+        line.push_edit(Edit::new(0..0, encoded_bytes(&[0xef, 0x98, 0x80])), true);
+        line.push_edit(Edit::new(3..3, L!("x").to_owned()), true);
+        assert_eq!(line.position(), 4);
+        assert_eq!(line.char_count(), 2);
+        assert!(line.undo());
+        assert!(line.is_empty());
+        assert_eq!(line.char_count(), 0);
+        assert!(line.redo());
+        assert_eq!(line.position(), 4);
+        assert_eq!(line.char_count(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_count_tracks_bytes_joining_and_separating_at_splice_seams() {
+        let mut line = EditableLine::default();
+        for (byte, count) in [(0xef, 1), (0x98, 2), (0x80, 1)] {
+            let pos = line.position();
+            line.push_edit(Edit::new(pos..pos, encoded_bytes(&[byte])), false);
+            assert_eq!(line.char_count(), count);
+        }
+        assert_eq!(line.position(), 3);
+        assert!(line.undo());
+        assert_eq!(line.text(), &encoded_bytes(&[0xef, 0x98]));
+        assert_eq!(line.position(), 2);
+        assert_eq!(line.char_count(), 2);
+        assert!(line.redo());
+        assert_eq!(line.text(), &encoded_bytes(&[0xef, 0x98, 0x80]));
+        assert_eq!(line.position(), 3);
+        assert_eq!(line.char_count(), 1);
+
+        // Deleting ASCII can join previously malformed bytes into a complete scalar.
+        let mut text = encoded_bytes(&[0xef]);
+        text.push('x');
+        text.push_utfstr(&encoded_bytes(&[0x98, 0x80, 0xff]));
+        line.push_edit(Edit::new(0..line.len(), text), false);
+        assert_eq!(line.char_count(), 5);
+        line.set_position(1);
+        line.push_edit(Edit::new(1..2, WString::new()), false);
+        assert_eq!(line.char_count(), 2);
+        assert_eq!(line.position(), 3); // admitted at the end of the newly joined scalar
+        assert!(line.undo());
+        assert_eq!(line.char_count(), 5);
+        assert_eq!(line.position(), 1);
+        assert!(line.redo());
+        assert_eq!(line.char_count(), 2);
+        assert_eq!(line.position(), 3);
+
+        // The remaining invalid escaped byte is still independently deletable.
+        line.set_position(4);
+        line.push_edit(Edit::new(3..4, WString::new()), false);
+        assert_eq!(line.char_count(), 1);
+        assert_eq!(line.position(), 3);
     }
 }

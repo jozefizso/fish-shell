@@ -8,6 +8,10 @@ function __fish_man_page
         printf \a
         return
     end
+    if builtin -q __fish_native_fs; and not type -q man
+        echo "fish: manual lookup requires the optional man command" >&2
+        return 127
+    end
 
     # Skip leading commands and display the manpage of following command
     while set -q args[2]
@@ -18,6 +22,7 @@ function __fish_man_page
     # If there are at least two tokens not starting with "-", the second one might be a subcommand.
     # Try "man first-second" and fall back to "man first" if that doesn't work out.
     set -l maincmd (path basename $args[1])
+    set -l man_status 0
     # HACK: If stderr is not attached to a terminal `less` (the default pager)
     # wouldn't use the alternate screen.
     # But since we don't know what pager it is, and because `man` is totally underspecified,
@@ -27,13 +32,19 @@ function __fish_man_page
         and not string match -q -- '*/*' $args[2]
         and man "$maincmd-$args[2]" &>/dev/null
         man "$maincmd-$args[2]"
+        set man_status $status
     else
         if man "$maincmd" &>/dev/null
             man "$maincmd"
+            set man_status $status
         else
+            set man_status $status
             printf \a
         end
     end
 
     commandline -f repaint
+    if builtin -q __fish_native_fs
+        return $man_status
+    end
 end

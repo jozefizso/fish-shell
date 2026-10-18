@@ -979,7 +979,13 @@ fn throwing_main() -> i32 {
         return 2;
     }
     #[cfg(feature = "localize-messages")]
-    crate::localization::initialize_localization();
+    if let Err(error) = crate::localization::initialize_localization() {
+        streams.err.appendln(&format!(
+            "fish_indent: unable to initialize localization: {error}"
+        ));
+        let _ = streams.err.flush_and_check_error();
+        return 2;
+    }
     #[cfg(unix)]
     env_init(None, false);
     #[cfg(windows)]
@@ -1250,7 +1256,8 @@ fn do_indent(
                 &mut OperationContext::background(vars, EXPANSION_LIMIT_DEFAULT),
                 false,
                 None,
-            );
+            )
+            .expect("uncancellable syntax-only highlighting");
         }
 
         let mut colored_output = vec![];
@@ -1349,7 +1356,8 @@ fn make_pygments_csv(src: &wstr, vars: &dyn crate::env::Environment) -> Vec<u8> 
         &mut OperationContext::background(vars, EXPANSION_LIMIT_DEFAULT),
         false,
         None,
-    );
+    )
+    .expect("uncancellable syntax-only highlighting");
     assert_eq!(
         colors.len(),
         src.len(),

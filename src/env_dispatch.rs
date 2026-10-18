@@ -8,12 +8,15 @@ use crate::input::{update_wait_on_escape_ms, update_wait_on_sequence_key_ms};
 use crate::locale::{invalidate_numeric_locale, set_libc_locales};
 use crate::prelude::*;
 use crate::reader::{
-    reader_change_cursor_end_mode, reader_change_cursor_selection_mode, reader_change_history,
-    reader_current_data, reader_schedule_prompt_repaint, reader_set_autosuggestion_enabled,
-    reader_set_transient_prompt,
+    reader_change_history, reader_current_data, reader_schedule_prompt_repaint,
+    reader_set_autosuggestion_enabled, reader_set_transient_prompt,
 };
 use crate::screen::{IS_DUMB, ONLY_GRAYSCALE, screen_set_midnight_commander_hack};
 use crate::text_face::ColorSupport;
+pub use common::{
+    MIDNIGHT_COMMANDER_SID, handle_fish_cursor_end_mode_change,
+    handle_fish_cursor_selection_mode_change,
+};
 use common::{
     handle_change_ambiguous_width, handle_emoji_width, handle_fish_trace, handle_read_limit_change,
 };
@@ -165,40 +168,6 @@ fn handle_term_size_change(vars: &EnvStack) {
 fn handle_fish_history_change(vars: &EnvStack) {
     let history_id = crate::history::history_id(vars);
     reader_change_history(history_id);
-}
-
-pub fn handle_fish_cursor_selection_mode_change(vars: &EnvStack) {
-    use crate::reader::CursorSelectionMode;
-
-    let inclusive = vars
-        .get(L!("fish_cursor_selection_mode"))
-        .as_ref()
-        .map(|v| v.as_string())
-        .is_some_and(|v| v == "inclusive");
-    let mode = if inclusive {
-        CursorSelectionMode::Inclusive
-    } else {
-        CursorSelectionMode::Exclusive
-    };
-
-    reader_change_cursor_selection_mode(mode);
-}
-
-pub fn handle_fish_cursor_end_mode_change(vars: &EnvStack) {
-    use crate::reader::CursorEndMode;
-
-    let inclusive = vars
-        .get(L!("fish_cursor_end_mode"))
-        .as_ref()
-        .map(|v| v.as_string())
-        .is_some_and(|v| v == "inclusive");
-    let mode = if inclusive {
-        CursorEndMode::Inclusive
-    } else {
-        CursorEndMode::Exclusive
-    };
-
-    reader_change_cursor_end_mode(mode);
 }
 
 fn handle_autosuggestion_change(vars: &EnvStack) {
@@ -371,8 +340,6 @@ fn update_fish_color_support(vars: &EnvStack) {
         term_24bit: supports_24bit,
     });
 }
-
-pub const MIDNIGHT_COMMANDER_SID: &wstr = L!("MC_SID");
 
 // Initialize the terminal subsystem
 fn init_terminal(vars: &EnvStack) {

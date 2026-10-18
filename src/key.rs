@@ -1,10 +1,10 @@
+#[cfg(unix)]
 use nix::sys::termios::SpecialCharacterIndices;
 
+#[cfg(unix)]
+use crate::reader::get_terminal_mode_on_startup;
 use crate::text_helpers::char_to_symbol;
-use crate::{
-    flog::FloggableDebug, localizable_string, reader::get_terminal_mode_on_startup, wgettext_fmt,
-    wutil::fish_wcstoul,
-};
+use crate::{flog::FloggableDebug, localizable_string, wgettext_fmt, wutil::fish_wcstoul};
 use fish_common::{EscapeFlags, EscapeStringStyle, escape_string};
 use fish_widestring::{L, SPECIAL_KEY_ENCODE_BASE, WExt as _, WString, char_offset, wstr};
 
@@ -190,10 +190,15 @@ pub(crate) fn canonicalize_keyed_control_char(c: char) -> char {
     if c == ' ' {
         return SPACE;
     }
+    #[cfg(unix)]
     if let Some(tm) = get_terminal_mode_on_startup() {
         if c == char::from(tm.c_cc[SpecialCharacterIndices::VERASE as usize]) {
             return BACKSPACE;
         }
+    }
+    #[cfg(windows)]
+    if matches!(c, '\x08' | '\x7f') {
+        return BACKSPACE;
     }
     if c == char::from(127) {
         // when it's not backspace

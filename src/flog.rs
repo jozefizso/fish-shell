@@ -214,7 +214,8 @@ default_flog_impls! {
     String, &str, u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, f32, f64, bool, char, std::io::Error, std::backtrace::Backtrace
 }
 #[cfg(not(windows))]
-default_flog_impls! { nix::errno::Errno, crate::key::Key }
+default_flog_impls! { nix::errno::Errno }
+default_flog_impls! { crate::key::Key }
 default_flog_impls_lifetimes! {
     std::path::Display<'a>, std::borrow::Cow<'a, str>
 }

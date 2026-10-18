@@ -13,7 +13,7 @@ pub use settings::{
 #[cfg(feature = "localize-messages")]
 /// This function only exists to provide a way for initializing gettext before an `EnvStack` is
 /// available. Without this, early error messages cannot be localized.
-pub fn initialize_localization() {
+pub fn initialize_localization() -> std::io::Result<()> {
     use crate::env::EnvStack;
     use fish_widestring::L;
 
@@ -23,4 +23,5 @@ pub fn initialize_localization() {
     env_stack_set_from_env!(env, "LC_MESSAGES");
     env_stack_set_from_env!(env, "LANG");
     update_from_env(&env);
+    Ok(())
 }

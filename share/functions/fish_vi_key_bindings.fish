@@ -10,10 +10,21 @@ function fish_vi_arg_digit --description 'Accumulate a digit for the next comman
     set -g __fish_vi_count "$__fish_vi_count$argv[1]"
 end
 
+function __fish_vi_sequence -a first last
+    if not set -q argv[2]
+        set last $first
+        set first 1
+    end
+    while test $first -le $last
+        printf '%s\n' $first
+        set first (math -- $first + 1)
+    end
+end
+
 function fish_vi_run_count --description 'Run a command $__fish_vi_count times'
     set -l count (__fish_vi_consume_count __fish_vi_count)
 
-    for i in (seq $count)
+    for i in (__fish_vi_sequence $count)
         if functions -q -- $argv[1]
             $argv
         else
@@ -50,7 +61,7 @@ function __fish_vi_delete_char
     set -l count (__fish_vi_consume_count __fish_vi_count)
     commandline -f begin-selection
     if test $count -gt 1
-        for i in (seq 1 (math $count - 1))
+        for i in (__fish_vi_sequence 1 (math $count - 1))
             commandline -f forward-char
         end
     end
@@ -66,7 +77,7 @@ function __fish_vi_backward_delete_char
     commandline -f backward-char
     commandline -f begin-selection
     if test $count -gt 1
-        for i in (seq 1 (math $count - 1))
+        for i in (__fish_vi_sequence 1 (math $count - 1))
             commandline -f backward-char
         end
     end
@@ -88,7 +99,7 @@ function fish_vi_exec_motion
 
     set fish_bind_mode default
 
-    set -l seq_total (seq $total)
+    set -l seq_total (__fish_vi_sequence $total)
     if set -ql _flag_linewise
         switch $__fish_vi_operator
             case delete
@@ -243,7 +254,7 @@ function fish_vi_inc_dec --description 'increment or decrement the number below 
     else
         # We didn't find a match below the cursor. Mirror Vim behavior by
         # checking ahead as well.
-        for i in (seq (math -- $cursor + 1) (math -- (string length -- $line) - 1))
+        for i in (__fish_vi_sequence (math -- $cursor + 1) (math -- (string length -- $line) - 1))
             set candidate (string sub --start $i -- $line | string collect)
 
             if set just_found (string match --regex '^-?[0-9]+' -- $candidate)
@@ -343,7 +354,7 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
             commandline -f cancel
         else
             set fish_bind_mode default
-            if test (count (commandline --cut-at-cursor | tail -c2)) != 2
+            if test (commandline --column) -gt 1
                 commandline -f backward-char
             end
             commandline -f repaint-mode
@@ -359,7 +370,7 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
     bind --preset -M default escape 'set -g __fish_vi_count'
     bind --preset -M default ctrl-\[ 'set -g __fish_vi_count'
 
-    for i in (seq 1 9)
+    for i in 1 2 3 4 5 6 7 8 9
         bind --preset -M default $i "fish_vi_arg_digit $i"
     end
     # 0 is special: it is 'beginning-of-line' unless we are already counting (e.g. 10)
@@ -442,7 +453,7 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
     bind --preset -M operator escape fish_vi_operator_cancel
     bind --preset -M operator ctrl-\[ fish_vi_operator_cancel
 
-    for i in (seq 1 9)
+    for i in 1 2 3 4 5 6 7 8 9
         bind --preset -M operator $i "fish_vi_arg_digit $i"
     end
     bind --preset -M operator 0 "if test -n \"\$__fish_vi_count\"; fish_vi_arg_digit 0; else; fish_vi_exec_motion beginning-of-line; end"

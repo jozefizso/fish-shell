@@ -2,11 +2,10 @@ use super::{
     binding::match_key_event_to_key,
     input::{
         CharEvent, ImplicitEvent, InputEventQueuer, InputEventTrigger, KeyEvent, QueryResponse,
-        QueryResultEvent, is_event_blocked_when_querying, next_input_event, stop_query,
+        QueryResultEvent, interrupt_key, is_event_blocked_when_querying, stop_query,
     },
 };
 use crate::{
-    common::shell_modes,
     fd_readable_set::Timeout,
     flog::{FloggableDisplay, flog},
     key::{
@@ -58,12 +57,10 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
             }
         };
         let (decoded_buffer, mut is_err) = match decode_utf8_at_least_one(&mut buffer, |buffer| {
-            buffer.push(
-                match next_input_event(self.get_in_fd(), self.get_ioport_fd(), Timeout::Forever) {
-                    InputEventTrigger::Byte(b) => b,
-                    _ => 0,
-                },
-            );
+            buffer.push(match self.wait_input_event(Timeout::Forever) {
+                InputEventTrigger::Byte(b) => b,
+                _ => 0,
+            });
         }) {
             Ok(decoded) => (decoded, false),
             Err(evt) => {
@@ -87,6 +84,20 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
             .unwrap_or_else(|| {
                 let codepoint = decoded_buffer.chars().next_back().unwrap();
                 let key_evt = KeyEvent::from_raw(codepoint);
+                #[cfg(windows)]
+                let mut key_evt = key_evt;
+                #[cfg(windows)]
+                if decoded_buffer.chars().any(fish_reserved_codepoint)
+                    || key_evt.codepoint_text().is_none()
+                {
+                    for (slot, character) in key_evt
+                        .associated_text
+                        .iter_mut()
+                        .zip(decoded_buffer.chars())
+                    {
+                        *slot = character;
+                    }
+                }
                 CharEvent::from_key_seq(key_evt, decoded_buffer)
             })
         });
@@ -124,7 +135,7 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
             self.push_front(evt);
             return;
         }
-        let vintr = shell_modes().control_chars[libc::VINTR];
+        let vintr = interrupt_key();
         if vintr != 0
             && evt.get_key().is_some_and(|key_evt| {
                 match_key_event_to_key(&key_evt.key, &Key::from_single_byte(vintr)).is_some()
@@ -708,7 +719,7 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
 
 fn decode_utf8_at_least_one(
     buffer: &mut Vec<u8>,
-    on_incomplete: impl Fn(&mut Vec<u8>),
+    mut on_incomplete: impl FnMut(&mut Vec<u8>),
 ) -> Result<WString, CharEvent> {
     let mut decoded_input = WString::new();
     loop {
@@ -786,6 +797,16 @@ pub(crate) fn decode_utf8(
             for c in parsed_str.chars() {
                 if !fish_reserved_codepoint(c) {
                     out_seq.push(c);
+                } else {
+                    #[cfg(windows)]
+                    {
+                        // Match N1 interpreter text: literal reserved Unicode
+                        // must round-trip without becoming a parser/key sentinel.
+                        let mut bytes = [0; 4];
+                        for &byte in c.encode_utf8(&mut bytes).as_bytes() {
+                            out_seq.push(encode_byte_to_char(byte));
+                        }
+                    }
                 }
             }
             Complete

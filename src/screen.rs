@@ -7,7 +7,9 @@
 //! The current implementation is less smart than ncurses allows and can not for example move blocks
 //! of text around to handle text insertion.
 
-use crate::common::{get_omitted_newline_str, has_working_tty_timestamps, shell_modes};
+use crate::common::get_omitted_newline_str;
+#[cfg(unix)]
+use crate::common::{has_working_tty_timestamps, shell_modes};
 use crate::editable_line::line_at_cursor;
 use crate::env::Environment;
 use crate::flog::{flog, flogf};
@@ -24,20 +26,24 @@ use crate::terminal::TerminalCommand::{
 use crate::terminal::{BufferedOutputter, CardinalDirection, Outputter};
 use crate::termsize::Termsize;
 use crate::text_helpers::escape_code_length;
+#[cfg(unix)]
 use crate::wutil::fstat;
-use fish_common::write_loop;
 use fish_fallback::{fish_wcswidth_canonicalizing, fish_wcwidth};
 use fish_wcstringutil::{fish_wcwidth_visible, string_prefixes_string};
-use fish_widestring::{ELLIPSIS_CHAR, wcs2bytes};
+use fish_widestring::ELLIPSIS_CHAR;
+#[cfg(unix)]
 use libc::{STDERR_FILENO, STDOUT_FILENO};
+#[cfg(unix)]
 use nix::sys::termios;
 use std::cell::RefCell;
 use std::collections::LinkedList;
+#[cfg(unix)]
 use std::io::Write as _;
 use std::num::NonZeroU16;
 use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU32;
+#[cfg(unix)]
 use std::time::SystemTime;
 
 #[derive(Copy, Clone, Default)]
@@ -245,7 +251,13 @@ pub struct Screen {
     actual_lines_before_reset: usize,
     /// Modification times to check if any output has occurred other than from fish's
     /// main loop, in which case we need to redraw.
+    #[cfg(unix)]
     mtime_stdout_stderr: (Option<SystemTime>, Option<SystemTime>),
+    /// Native consoles expose cursor/window/mode state, not write timestamps.
+    #[cfg(windows)]
+    native_console_state: Option<crate::terminal::NativeConsoleState>,
+    #[cfg(windows)]
+    native_output_generation: u32,
 }
 
 impl Default for Screen {
@@ -263,7 +275,12 @@ impl Default for Screen {
             need_clear_lines: Default::default(),
             need_clear_screen: Default::default(),
             actual_lines_before_reset: Default::default(),
+            #[cfg(unix)]
             mtime_stdout_stderr: Default::default(),
+            #[cfg(windows)]
+            native_console_state: None,
+            #[cfg(windows)]
+            native_output_generation: 0,
         }
     }
 }
@@ -320,12 +337,11 @@ impl Screen {
         // If we are using a dumb terminal, don't try any fancy stuff, just print out the text.
         // right_prompt not supported.
         if is_dumb() {
-            let prompt_narrow = wcs2bytes(left_prompt);
-
-            _ = write_loop(&STDOUT_FILENO, b"\r");
-            _ = write_loop(&STDOUT_FILENO, &prompt_narrow);
-            _ = write_loop(&STDOUT_FILENO, &wcs2bytes(explicit_before_suggestion));
-            _ = write_loop(&STDOUT_FILENO, &wcs2bytes(explicit_after_suggestion));
+            let mut out = BufferedOutputter::new(self.outp);
+            out.push(b'\r');
+            write_screen_text(&mut out, left_prompt);
+            write_screen_text(&mut out, explicit_before_suggestion);
+            write_screen_text(&mut out, explicit_after_suggestion);
 
             return;
         }
@@ -552,7 +568,7 @@ impl Screen {
         self.need_clear_lines = true;
 
         // This should prevent resetting the cursor position during the next repaint.
-        _ = write_loop(&STDOUT_FILENO, b"\r");
+        self.outp.borrow_mut().push(b'\r');
         self.actual.cursor.x = 0;
 
         self.save_status();
@@ -672,7 +688,9 @@ impl Screen {
         self.actual_left_prompt = None;
         self.need_clear_lines = true;
 
-        _ = write_loop(&STDOUT_FILENO, &abandon_line_string(screen_width));
+        self.outp
+            .borrow_mut()
+            .write_bytes(&abandon_line_string(screen_width));
         self.actual.cursor.x = 0;
 
         self.save_status();
@@ -726,10 +744,25 @@ fn abandon_line_string(screen_width: Option<usize>) -> Vec<u8> {
 }
 
 impl Screen {
-    /// Stat stdout and stderr and save result as the current timestamp.
-    /// This is used to avoid reacting to changes that we ourselves made to the screen.
+    /// Remember the native output state after our own writes, so they do not
+    /// trigger an external-output repaint.
     pub fn save_status(&mut self) {
-        self.mtime_stdout_stderr = mtime_stdout_stderr();
+        #[cfg(unix)]
+        {
+            self.mtime_stdout_stderr = mtime_stdout_stderr();
+        }
+        #[cfg(windows)]
+        {
+            self.native_output_generation =
+                NATIVE_OUTPUT_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+            self.native_console_state = match self.outp.borrow().console_state() {
+                Ok(state) => state,
+                Err(error) => {
+                    flog!(screen, "Unable to read native console state:", error);
+                    None
+                }
+            };
+        }
     }
 
     /// Return whether we believe the cursor is wrapped onto the last line, and that line is
@@ -830,6 +863,7 @@ impl Screen {
 
     /// Stat stdout and stderr and compare result to previous result in reader_save_status. Repaint
     /// if modification time has changed.
+    #[cfg(unix)]
     fn check_status(&mut self) {
         _ = std::io::stdout().flush();
         _ = std::io::stderr().flush();
@@ -848,6 +882,31 @@ impl Screen {
             let prev_line = self.actual.cursor.y;
             self.reset_line(true /* repaint prompt */);
             self.actual.cursor.y = prev_line;
+        }
+    }
+
+    /// Native console snapshots catch movement, scrolling, mode changes and
+    /// viewport changes. They cannot catch a writer which restores the cursor,
+    /// so job/output transitions also advance NATIVE_OUTPUT_GENERATION.
+    #[cfg(windows)]
+    fn check_status(&mut self) {
+        let generation = NATIVE_OUTPUT_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+        let state = self.outp.borrow().console_state();
+        let changed = match state {
+            Ok(state) => state != self.native_console_state,
+            Err(error) => {
+                flog!(screen, "Unable to read native console state:", error);
+                true
+            }
+        };
+        if changed || generation != self.native_output_generation {
+            // There is no pty timestamp or cursor-relative origin to recover.
+            // Start a complete prompt at the actual current console row rather
+            // than issuing relative moves into a stale multiline display.
+            self.viewport_y = None;
+            self.soft_wrap_location = None;
+            self.actual_lines_before_reset = 0;
+            self.reset_abandoning_line(None);
         }
     }
 
@@ -876,7 +935,10 @@ impl Screen {
             if new_y <= self.actual.cursor.y {
                 self.outp.borrow_mut().push(b'\r');
             } else {
+                #[cfg(unix)]
                 self.outp.borrow_mut().push(b'\n');
+                #[cfg(windows)]
+                self.outp.borrow_mut().write_bytes(b"\r\n");
                 self.actual.cursor.y += 1;
             }
             // Either way we're not in the first column.
@@ -890,10 +952,15 @@ impl Screen {
         let s = if y_steps < 0 {
             Some(CursorUp)
         } else if y_steps > 0 {
-            if shell_modes()
+            #[cfg(unix)]
+            let returns_to_column_zero = shell_modes()
                 .output_flags
-                .contains(termios::OutputFlags::ONLCR)
-            {
+                .contains(termios::OutputFlags::ONLCR);
+            // Native CursorDown emits CRLF explicitly; the byte sink performs
+            // no implicit newline conversion.
+            #[cfg(windows)]
+            let returns_to_column_zero = true;
+            if returns_to_column_zero {
                 // See GitHub issue #4505.
                 // Most consoles use a simple newline as the cursor down escape.
                 // If ONLCR is enabled (which it normally is) this will of course
@@ -968,7 +1035,7 @@ impl Screen {
 
     /// Convert a wide string to a multibyte string and append it to the buffer.
     fn write_str(&mut self, s: &wstr) {
-        self.outp.borrow_mut().write_wstr(s);
+        write_screen_text(&mut self.outp.borrow_mut(), s);
     }
 
     /// Update the cursor as if soft wrapping had been performed.
@@ -1339,10 +1406,46 @@ impl Screen {
 }
 
 /// Helper to get the mtime of stdout and stderr.
+#[cfg(unix)]
 pub fn mtime_stdout_stderr() -> (Option<SystemTime>, Option<SystemTime>) {
     let mtime_out = fstat(STDOUT_FILENO).and_then(|md| md.modified()).ok();
     let mtime_err = fstat(STDERR_FILENO).and_then(|md| md.modified()).ok();
     (mtime_out, mtime_err)
+}
+
+#[cfg(windows)]
+static NATIVE_OUTPUT_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Mark the shared screen model stale after output which did not go through
+/// Screen. Call on foreground handoff/reclaim and on background job/output
+/// notifications, then schedule the normal reader repaint. Console metadata
+/// alone cannot detect text overwritten with a restored cursor position.
+#[cfg(windows)]
+pub fn invalidate_native_screen() {
+    NATIVE_OUTPUT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Layout treats LF as the start of a new display line. Unix applies the
+/// configured output flags; native console output has no termios/CRT ONLCR.
+/// Make that editor motion explicit without changing Outputter's byte/text
+/// encoding or the contents of arbitrary native output streams.
+fn write_screen_text(out: &mut Outputter, text: &wstr) {
+    #[cfg(unix)]
+    out.write_wstr(text);
+    #[cfg(windows)]
+    {
+        let mut start = 0;
+        let mut previous = None;
+        for (index, ch) in text.chars().enumerate() {
+            if ch == '\n' && previous != Some('\r') {
+                out.write_wstr(&text[start..index]);
+                out.write_bytes(b"\r\n");
+                start = index + 1;
+            }
+            previous = Some(ch);
+        }
+        out.write_wstr(&text[start..]);
+    }
 }
 
 /// Issues an immediate clr_eos.
@@ -1385,6 +1488,10 @@ pub struct LayoutCache {
 
 // Singleton of the cached escape sequences seen in prompts and similar strings.
 static LAYOUT_CACHE_SHARED: Mutex<LayoutCache> = Mutex::new(LayoutCache::new());
+
+pub(crate) fn screen_clear_layout_cache() {
+    LAYOUT_CACHE_SHARED.lock().unwrap().clear();
+}
 
 impl LayoutCache {
     pub const fn new() -> Self {
@@ -1964,6 +2071,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_escape_code_length() {
+        #[cfg(unix)]
         test_init();
         let mut lc = LayoutCache::new();
         assert_eq!(lc.escape_code_length(L!("")), 0);
@@ -2001,6 +2109,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_layout_cache() {
+        #[cfg(unix)]
         test_init();
         let mut seqs = LayoutCache::new();
 
@@ -2073,6 +2182,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_prompt_truncation() {
+        #[cfg(unix)]
         test_init();
         let mut cache = LayoutCache::new();
         let mut trunc = WString::new();

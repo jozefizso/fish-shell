@@ -1,11 +1,9 @@
 use crate::common::CancelChecker;
-#[cfg(unix)]
 use crate::env::EnvDyn;
 use crate::env::{EnvStack, Environment};
 use crate::parser::Parser;
 use crate::proc::JobGroupRef;
 
-#[cfg(unix)]
 use crate::reader::read_generation_count;
 use crate::signal::signal_check_cancel;
 
@@ -156,7 +154,6 @@ impl<'a> OperationContext<'a> {
 /// Return an operation context for a background operation..
 /// Crucially the operation context itself does not contain a parser.
 /// It is the caller's responsibility to ensure the environment lives as long as the result.
-#[cfg(unix)]
 pub fn get_bg_context(env: &EnvDyn, generation_count: u32) -> OperationContext<'_> {
     let cancel_checker = move || {
         // Cancel if the generation count changed.

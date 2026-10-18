@@ -113,6 +113,12 @@ unsafe extern "system" {
 
 #[link(name = "advapi32")]
 unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text: *const u16,
+        revision: u32,
+        descriptor: *mut *mut c_void,
+        size: *mut u32,
+    ) -> i32;
     fn GetSecurityInfo(
         handle: RawHandle,
         kind: u32,
@@ -131,6 +137,34 @@ unsafe extern "system" {
 struct StagingSecurity(*mut c_void);
 
 impl StagingSecurity {
+    fn for_editor_directory() -> io::Result<Self> {
+        // Protected, inheritable owner/SYSTEM-only access. OWNER RIGHTS refers to
+        // the object's real native owner, not a guessed account name or Unix uid.
+        const TEXT: [u16; 36] = {
+            let bytes = b"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)\0";
+            let mut wide = [0; 36];
+            let mut index = 0;
+            while index < bytes.len() {
+                wide[index] = bytes[index] as u16;
+                index += 1;
+            }
+            wide
+        };
+        let mut descriptor = Self(std::ptr::null_mut());
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                TEXT.as_ptr(),
+                1,
+                &mut descriptor.0,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(descriptor)
+    }
+
     fn for_target(file: &File) -> io::Result<Self> {
         let mut descriptor = Self(std::ptr::null_mut());
         let error = unsafe {
@@ -207,6 +241,30 @@ struct ParentLock {
     path: PathBuf,
 }
 
+fn pin_directory_ancestors(parent: &Path) -> io::Result<Vec<File>> {
+    let mut ancestors = Vec::new();
+    // Resolve aliases first, then pin from the root down. No subsequent path
+    // operation can traverse an ancestor exchanged for a junction or rename.
+    let mut prefixes: Vec<_> = parent.ancestors().collect();
+    prefixes.reverse();
+    for prefix in prefixes {
+        let file = OpenOptions::new()
+            .access_mode(READ_ATTRIBUTES)
+            .share_mode(1 | 2)
+            .custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS)
+            .open(prefix)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() || metadata.file_attributes() & REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native parent changed or is a reparse point",
+            ));
+        }
+        ancestors.push(file);
+    }
+    Ok(ancestors)
+}
+
 impl ParentLock {
     fn new(path: &wstr, exclusive: bool) -> io::Result<(Self, PathBuf)> {
         let absolute = match native_absolute_path(path) {
@@ -225,26 +283,7 @@ impl ParentLock {
             ));
         }
         let parent = native_absolute_path(&native_realpath(wdirname(&absolute))?)?;
-        let mut ancestors = Vec::new();
-        // Opening from the root down closes the parent-replacement race before the next name is
-        // traversed. The canonical parent has an extended path, including for UNC shares.
-        let mut prefixes: Vec<_> = parent.ancestors().collect();
-        prefixes.reverse();
-        for prefix in prefixes {
-            let file = OpenOptions::new()
-                .access_mode(READ_ATTRIBUTES)
-                .share_mode(1 | 2)
-                .custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS)
-                .open(prefix)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_dir() || metadata.file_attributes() & REPARSE_POINT != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "native state parent changed or is a reparse point",
-                ));
-            }
-            ancestors.push(file);
-        }
+        let ancestors = pin_directory_ancestors(&parent)?;
         // Use the guarded object's physical spelling, never the caller's possibly aliased one.
         let parent = native_absolute_path(&native_final_path(ancestors.last().unwrap())?)?;
         let lock_file = OpenOptions::new()
@@ -655,4 +694,285 @@ where
         old_id
     };
     Ok((id, update))
+}
+
+/// The directory handle is the cleanup capability. Keep it and its physical
+/// ancestors open without delete sharing until explicit successful cleanup.
+/// This protects against path replacement, not the owner or privileged principals
+/// deliberately modifying their own files or security descriptors.
+struct EditorDirectory {
+    directory: File,
+    identity: NativeFileIdentity,
+    _ancestors: Vec<File>,
+}
+
+static EDITOR_DIRECTORIES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, EditorDirectory>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+struct UnpublishedEditorDirectory {
+    directory: File,
+    _ancestors: Vec<File>,
+}
+
+// If name/identity initialization and exact-handle cleanup both fail, retain
+// the creation capability as well. Shutdown may retry deletion of that handle,
+// but must never infer a path or recursively sweep an unregistered directory.
+static UNPUBLISHED_EDITOR_DIRECTORIES: std::sync::Mutex<Vec<UnpublishedEditorDirectory>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[repr(C)]
+struct EditorUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct EditorObjectAttributes {
+    length: u32,
+    root: RawHandle,
+    name: *mut EditorUnicodeString,
+    attributes: u32,
+    security: *mut c_void,
+    quality_of_service: *mut c_void,
+}
+
+#[repr(C)]
+struct EditorIoStatus {
+    status: usize,
+    information: usize,
+}
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        file: *mut RawHandle,
+        access: u32,
+        attributes: *const EditorObjectAttributes,
+        status: *mut EditorIoStatus,
+        allocation: *const i64,
+        file_attributes: u32,
+        sharing: u32,
+        disposition: u32,
+        options: u32,
+        ea: *const c_void,
+        ea_length: u32,
+    ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
+}
+
+fn create_editor_directory(parent: &File, security: &StagingSecurity) -> io::Result<File> {
+    loop {
+        let name = random_filename(OsString::from("fish_editor_"));
+        let mut name: Vec<u16> = name.encode_wide().collect();
+        let mut name = EditorUnicodeString {
+            length: (name.len() * 2) as u16,
+            maximum_length: (name.len() * 2) as u16,
+            buffer: name.as_mut_ptr(),
+        };
+        let attributes = EditorObjectAttributes {
+            length: std::mem::size_of::<EditorObjectAttributes>() as u32,
+            root: parent.as_raw_handle(),
+            name: &mut name,
+            attributes: 0,
+            security: security.0,
+            quality_of_service: std::ptr::null_mut(),
+        };
+        let mut status = EditorIoStatus {
+            status: 0,
+            information: 0,
+        };
+        let mut handle = std::ptr::null_mut();
+        // NtCreateFile FILE_CREATE atomically creates a new directory and gives
+        // us its no-delete-sharing handle. There is no CreateDirectory/open gap
+        // where another process could substitute a different object.
+        // https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
+        let result = unsafe {
+            NtCreateFile(
+                &mut handle,
+                READ_ATTRIBUTES | DELETE | 0x0010_0000, // SYNCHRONIZE
+                &attributes,
+                &mut status,
+                std::ptr::null(),
+                0x80,                          // FILE_ATTRIBUTE_NORMAL
+                1 | 2,                         // Share read/write, never delete.
+                2,                             // FILE_CREATE: never open/reuse an existing name.
+                1 | 0x20 | OPEN_REPARSE_POINT, // DIRECTORY, synchronous nonalert, no links
+                std::ptr::null(),
+                0,
+            )
+        };
+        if result >= 0 {
+            return Ok(unsafe { File::from_raw_handle(handle) });
+        }
+        let error = io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) as i32 });
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+    }
+}
+
+/// Allocate a private workspace for the external command-buffer editor.
+/// It remains registered until remove_editor_directory succeeds; no path-only
+/// recursive-delete Drop is used, including on a cleanup error.
+pub fn make_editor_directory() -> io::Result<WString> {
+    let base = native_path_text(&std::env::temp_dir())?;
+    let base = native_absolute_path(&native_realpath(&base)?)?;
+    let ancestors = pin_directory_ancestors(&base)?;
+    let parent = ancestors
+        .last()
+        .ok_or_else(|| io::Error::other("temporary directory has no physical root"))?;
+    let security = StagingSecurity::for_editor_directory()?;
+    let directory = create_editor_directory(parent, &security)?;
+    let identity_and_path = (|| {
+        let identity = native_identity_for_file(&directory)?;
+        let path = native_absolute_path(&native_final_path(&directory)?)?;
+        let text = native_path_text(&path)?;
+        Ok::<_, io::Error>((identity, path, text))
+    })();
+    let (identity, path, text) = match identity_and_path {
+        Ok(result) => result,
+        Err(error) => {
+            // The handle was atomically created by us and is still unpublished.
+            // Even initialization failure cleans only that exact empty object.
+            if let Err(cleanup) = delete_editor_entry(&directory) {
+                UNPUBLISHED_EDITOR_DIRECTORIES
+                    .lock()
+                    .unwrap()
+                    .push(UnpublishedEditorDirectory {
+                        directory,
+                        _ancestors: ancestors,
+                    });
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("{error}; editor workspace cleanup also failed: {cleanup}"),
+                ));
+            }
+            return Err(error);
+        }
+    };
+    EDITOR_DIRECTORIES.lock().unwrap().insert(
+        path,
+        EditorDirectory {
+            directory,
+            identity,
+            _ancestors: ancestors,
+        },
+    );
+    Ok(text)
+}
+
+fn delete_editor_entry(file: &File) -> io::Result<()> {
+    // FILE_DISPOSITION_INFO deletes the object opened by this handle, never a
+    // subsequently substituted path. The handle was opened with DELETE access.
+    let delete: u8 = 1;
+    if unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            4,
+            (&delete as *const u8).cast(),
+            std::mem::size_of_val(&delete) as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn clear_editor_directory(path: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let path = entry?.path();
+        let file = OpenOptions::new()
+            .access_mode(READ_ATTRIBUTES | DELETE)
+            .share_mode(1)
+            .custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS)
+            .open(&path)?;
+        let metadata = file.metadata()?;
+        // Pin each real child before traversing it. Reparse points are removed
+        // as links, including directory junctions; their targets are never opened.
+        if metadata.is_dir() && metadata.file_attributes() & REPARSE_POINT == 0 {
+            clear_editor_directory(&path)?;
+        }
+        delete_editor_entry(&file)?;
+    }
+    Ok(())
+}
+
+/// Cleanup only a workspace capability created by this process. Aliases and
+/// arbitrary directories are rejected, even if their names share our prefix.
+/// Sharing/access failures retain the capability for an explicit retry.
+pub fn remove_editor_directory(path: &Path) -> io::Result<()> {
+    let mut directories = EDITOR_DIRECTORIES.lock().unwrap();
+    let owner = directories.get(path).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "not an owned editor workspace",
+        )
+    })?;
+    // Deny new writers while inspecting/traversing the root. Existing writers
+    // fail this open instead of racing a conversion into a directory junction.
+    // Delete sharing here permits our already-retained DELETE-capable owner;
+    // that original handle still prevents anyone else from renaming the root.
+    let guard = OpenOptions::new()
+        .access_mode(READ_ATTRIBUTES)
+        .share_mode(1 | 4)
+        .custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS)
+        .open(path)?;
+    let metadata = guard.metadata()?;
+    if !metadata.is_dir()
+        || metadata.file_attributes() & REPARSE_POINT != 0
+        || native_identity_for_file(&guard)? != owner.identity
+    {
+        return Err(io::Error::other("editor workspace changed before cleanup"));
+    }
+    if native_identity_for_file(&owner.directory)? != owner.identity {
+        return Err(io::Error::other("editor workspace identity changed"));
+    }
+    clear_editor_directory(path)?;
+    delete_editor_entry(&owner.directory)?;
+    drop(guard);
+    // Closing the retained root handle completes its pending deletion.
+    directories.remove(path);
+    Ok(())
+}
+
+/// Finalize canceled editor actions on orderly native shutdown. Continue after
+/// individual failures, retaining every failed capability for a possible retry.
+pub fn cleanup_editor_directories() -> io::Result<()> {
+    let paths: Vec<_> = EDITOR_DIRECTORIES.lock().unwrap().keys().cloned().collect();
+    let mut first_error = None;
+    for path in paths {
+        if let Err(error) = remove_editor_directory(&path) {
+            if first_error.is_none() {
+                first_error = Some(io::Error::new(
+                    error.kind(),
+                    format!("editor workspace {}: {error}", path.display()),
+                ));
+            }
+        }
+    }
+    let mut unpublished = UNPUBLISHED_EDITOR_DIRECTORIES.lock().unwrap();
+    let mut index = 0;
+    while index < unpublished.len() {
+        match delete_editor_entry(&unpublished[index].directory) {
+            Ok(()) => {
+                unpublished.swap_remove(index);
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(io::Error::new(
+                        error.kind(),
+                        format!("unpublished editor workspace cleanup: {error}"),
+                    ));
+                }
+                index += 1;
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }

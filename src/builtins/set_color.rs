@@ -4,21 +4,34 @@ use super::prelude::*;
 use crate::{
     builtins::Error,
     err_fmt,
+    text_face::{self, PrintColorsArgs, TextFace, TextStyling},
+};
+#[cfg(windows)]
+use crate::{
+    highlight::ansi::AnsiBuffer as Outputter,
+    text_face::{color_support_from_env, parse_text_face_and_options_with_color_support},
+};
+#[cfg(unix)]
+use crate::{
     screen::{is_dumb, only_grayscale},
     terminal::Outputter,
-    text_face::{self, PrintColorsArgs, TextFace, TextStyling, parse_text_face_and_options},
+    text_face::parse_text_face_and_options,
 };
 use fish_color::Color;
 use fish_widestring::bytes2wcstring;
 
 fn print_colors(
+    _parser: &Parser,
     streams: &mut IoStreams,
     args: &[&wstr],
     style: TextStyling,
     bg: Option<Color>,
     underline_color: Option<Color>,
 ) {
+    #[cfg(unix)]
     let outp = &mut Outputter::new_buffering();
+    #[cfg(windows)]
+    let outp = &mut Outputter::new(color_support_from_env(_parser.vars()));
 
     // Rebind args to named_colors if there are no args.
     let named_colors;
@@ -69,7 +82,15 @@ pub fn set_color(
 
     use text_face::ParseError::*;
     use text_face::ParsedArgs::*;
-    let specified_face = match parse_text_face_and_options(argv, /*is_builtin=*/ true) {
+    #[cfg(unix)]
+    let parsed = parse_text_face_and_options(argv, /*is_builtin=*/ true);
+    #[cfg(windows)]
+    let parsed = parse_text_face_and_options_with_color_support(
+        argv,
+        /*is_builtin=*/ true,
+        color_support_from_env(parser.vars()),
+    );
+    let specified_face = match parsed {
         Ok(SetFace(face)) => face,
         Ok(PrintColors(PrintColorsArgs {
             fg_args,
@@ -77,7 +98,7 @@ pub fn set_color(
             underline_color,
             style,
         })) => {
-            print_colors(streams, fg_args, style, bg, underline_color);
+            print_colors(parser, streams, fg_args, style, bg, underline_color);
             return Ok(SUCCESS);
         }
         Ok(PrintHelp) => {
@@ -121,7 +142,10 @@ pub fn set_color(
         }
     };
 
+    #[cfg(unix)]
     let mut outp = Outputter::new_buffering_no_assume_normal();
+    #[cfg(windows)]
+    let mut outp = Outputter::new_no_assume_normal(color_support_from_env(parser.vars()));
 
     // Note that for historical reasons "set_color normal" reset all colors/attributes. So does
     // "set_color reset" (undocumented).
@@ -136,6 +160,7 @@ pub fn set_color(
     );
 
     if specified_face.fg.is_some() && outp.contents().is_empty() {
+        #[cfg(unix)]
         assert!(is_dumb() || only_grayscale());
         // We need to do *something* or the lack of any output messes up
         // when the cartesian product here would make "foo" disappear:

@@ -1,5 +1,9 @@
 use crate::tty_handoff::{XTVERSION, konsole_version};
 // Generic output functions.
+#[cfg(windows)]
+use crate::fds::standard_handle;
+#[cfg(windows)]
+use crate::io::NativeOutput;
 use crate::{flog, prelude::*, should_flog};
 use crate::{
     screen::{is_dumb, only_grayscale},
@@ -7,14 +11,21 @@ use crate::{
     threads::MainThread,
 };
 use fish_color::{Color, Color24};
-use fish_common::{EscapeStringStyle, escape_string, write_loop};
+#[cfg(unix)]
+use fish_common::write_loop;
+use fish_common::{EscapeStringStyle, escape_string};
 use fish_feature_flags::FeatureFlag;
 use fish_widestring::{wcs2bytes, wcs2bytes_appending};
+#[cfg(windows)]
+use std::io::{self, Write as _};
+#[cfg(unix)]
+use std::os::fd::RawFd;
+#[cfg(windows)]
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, OwnedHandle, RawHandle};
 use std::sync::{LazyLock, Mutex};
 use std::{
     cell::{RefCell, RefMut},
     ops::{Deref, DerefMut},
-    os::{fd::RawFd, unix::ffi::OsStrExt as _},
 };
 
 static COLOR_SUPPORT: Mutex<ColorSupport> = Mutex::new(ColorSupport {
@@ -158,7 +169,7 @@ fn query_kitty_progressive_enhancements(out: &mut Outputter) -> bool {
     #[allow(unused_parens)]
     if (
         // TODO(term-workaround)
-        std::env::var_os("TERM").is_some_and(|term| term.as_os_str().as_bytes() == b"st-256color")
+        std::env::var_os("TERM").is_some_and(|term| term == "st-256color")
     ) {
         return false;
     }
@@ -238,7 +249,15 @@ pub struct Outputter {
     buffer_count: u32,
 
     /// fd to output to, or -1 for none.
+    #[cfg(unix)]
     fd: RawFd,
+
+    /// Retained native sink; absent for string-only outputters.
+    #[cfg(windows)]
+    native_output: Option<OwnedHandle>,
+    /// First native write failure. Automatic writes stop until the caller exits the editor.
+    #[cfg(windows)]
+    output_error: Option<io::Error>,
 
     /// Assume this corresponds to the current state of the terminal.
     /// This assumption holds if we start from the default state. Currently, builtin set_color
@@ -247,8 +266,19 @@ pub struct Outputter {
 }
 
 impl Outputter {
+    #[cfg(windows)]
+    fn new_native_stdout() -> Self {
+        let mut outputter = Self::new_buffering();
+        match standard_handle(-11i32 as u32).and_then(|handle| handle.try_clone_to_owned()) {
+            Ok(handle) => outputter.native_output = Some(handle),
+            Err(error) => outputter.output_error = Some(error),
+        }
+        outputter
+    }
+
     /// Construct an outputter which outputs to a given fd.
     /// If the fd is negative, the outputter will buffer its output.
+    #[cfg(unix)]
     const fn new_from_fd(fd: RawFd) -> Self {
         Self {
             contents: Vec::new(),
@@ -260,7 +290,20 @@ impl Outputter {
 
     /// Construct an outputter which outputs to its string buffer.
     pub fn new_buffering() -> Self {
-        Self::new_from_fd(-1)
+        #[cfg(unix)]
+        {
+            Self::new_from_fd(-1)
+        }
+        #[cfg(windows)]
+        {
+            Self {
+                contents: Vec::new(),
+                buffer_count: 0,
+                native_output: None,
+                output_error: None,
+                last: TextFace::terminal_default(),
+            }
+        }
     }
 
     pub fn new_buffering_no_assume_normal() -> Self {
@@ -291,7 +334,15 @@ impl Outputter {
             ClearToEndOfLine => write(self, b"\x1b[K"),
             ClearToEndOfScreen => write(self, b"\x1b[J"),
             CursorUp => write(self, b"\x1b[A"),
-            CursorDown => write(self, b"\n"),
+            CursorDown => {
+                // Native output never performs CRT newline translation. Make this cursor
+                // motion's return-to-column-zero explicit rather than inventing ONLCR.
+                #[cfg(windows)]
+                let sequence: &[u8] = b"\r\n";
+                #[cfg(unix)]
+                let sequence: &[u8] = b"\n";
+                write(self, sequence)
+            }
             CursorLeft => write(self, b"\x08"),
             CursorRight => write(self, b"\x1b[C"),
             CursorMove(direction, steps) => cursor_move(self, direction, steps),
@@ -327,9 +378,15 @@ impl Outputter {
     }
 
     fn maybe_flush(&mut self) {
-        if self.fd >= 0 && self.buffer_count == 0 {
+        if self.buffer_count != 0 {
+            return;
+        }
+        #[cfg(unix)]
+        if self.fd >= 0 {
             self.flush_to(self.fd);
         }
+        #[cfg(windows)]
+        self.flush_native();
     }
 
     pub fn style_writer(&mut self) -> OutputterStyleWriter<'_> {
@@ -543,10 +600,60 @@ impl Outputter {
     }
 
     /// Output any buffered data to the given `fd`.
+    #[cfg(unix)]
     fn flush_to(&mut self, fd: RawFd) {
         if fd >= 0 && !self.contents.is_empty() {
             _ = write_loop(&fd, &self.contents);
             self.contents.clear();
+        }
+    }
+
+    #[cfg(windows)]
+    fn flush_native(&mut self) {
+        if self.output_error.is_some() || self.contents.is_empty() {
+            return;
+        }
+        let Some(handle) = &self.native_output else {
+            return;
+        };
+        let mut sink = NativeOutput::borrowed(handle.as_handle());
+        let mut written = 0;
+        while written < self.contents.len() {
+            match sink.write(&self.contents[written..]) {
+                Ok(0) => {
+                    self.output_error = Some(io::ErrorKind::WriteZero.into());
+                    break;
+                }
+                Ok(count) => written += count,
+                Err(error) => {
+                    self.output_error = Some(error);
+                    break;
+                }
+            }
+        }
+        self.contents.drain(..written);
+    }
+
+    /// Flush native editor output and report the first transport error, including an
+    /// error from an earlier automatic flush. Failures are sticky: retrying a partially
+    /// written terminal command could corrupt the screen or duplicate output.
+    #[cfg(windows)]
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.flush_native();
+        match &self.output_error {
+            None => Ok(()),
+            Some(error) => Err(match error.raw_os_error() {
+                Some(code) => io::Error::from_raw_os_error(code),
+                None => io::Error::new(error.kind(), error.to_string()),
+            }),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn console_state(&self) -> io::Result<Option<NativeConsoleState>> {
+        match &self.native_output {
+            Some(handle) => native_console_state(handle.as_handle()),
+            None => Ok(None),
         }
     }
 
@@ -572,10 +679,63 @@ impl Outputter {
     /// Access the outputter for stdout.
     /// This should only be used from the main thread.
     pub fn stdoutput() -> &'static RefCell<Outputter> {
+        #[cfg(unix)]
         static STDOUTPUT: MainThread<RefCell<Outputter>> =
             MainThread::new(RefCell::new(Outputter::new_from_fd(libc::STDOUT_FILENO)));
-        STDOUTPUT.get()
+        #[cfg(windows)]
+        static STDOUTPUT: LazyLock<MainThread<RefCell<Outputter>>> =
+            LazyLock::new(|| MainThread::new(RefCell::new(Outputter::new_native_stdout())));
+        let outputter = &STDOUTPUT;
+        outputter.get()
     }
+}
+
+/// Real console metadata used to notice cursor movement, scrolling, resizing and
+/// mode changes. A console has no Unix-style "last written" timestamp.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NativeConsoleBufferInfo {
+    pub size: [i16; 2],
+    pub cursor: [i16; 2],
+    pub attributes: u16,
+    pub window: [i16; 4],
+    pub maximum_size: [i16; 2],
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeConsoleState {
+    pub info: NativeConsoleBufferInfo,
+    pub output_mode: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetConsoleMode(handle: RawHandle, mode: *mut u32) -> i32;
+    fn GetConsoleScreenBufferInfo(handle: RawHandle, info: *mut NativeConsoleBufferInfo) -> i32;
+}
+
+#[cfg(windows)]
+pub(crate) fn native_console_state(
+    handle: BorrowedHandle<'_>,
+) -> io::Result<Option<NativeConsoleState>> {
+    let mut output_mode = 0;
+    if unsafe { GetConsoleMode(handle.as_raw_handle(), &mut output_mode) } == 0 {
+        let error = io::Error::last_os_error();
+        // Pipes and files have no console metadata. Other failures must not be
+        // mistaken for valid console state.
+        if error.raw_os_error() == Some(6) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    let mut info = NativeConsoleBufferInfo::default();
+    if unsafe { GetConsoleScreenBufferInfo(handle.as_raw_handle(), &mut info) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(NativeConsoleState { info, output_mode }))
 }
 
 pub struct BufferedOutputter<'a>(RefMut<'a, Outputter>);

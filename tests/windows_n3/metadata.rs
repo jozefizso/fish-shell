@@ -158,9 +158,6 @@ pub(super) fn exercise(f: &Fixture) {
         ("complete -c tool -x -F", 2),
         ("complete -c tool -n 'if true'", 1),
         ("complete -c tool -a '('", 1),
-        ("complete -C tool", 1),
-        ("complete --do-complete=tool", 1),
-        ("complete --escape", 1),
     ] {
         let result = f.eval(command);
         assert_eq!(
@@ -175,6 +172,12 @@ pub(super) fn exercise(f: &Fixture) {
             "{command}: invalid declarations must diagnose their failure"
         );
     }
+    exact(
+        f.eval("complete -c n6_metadata -f -a \"alpha 'space value'\"; complete -C 'n6_metadata a'; complete --do-complete='n6_metadata a'; complete --escape -C 'n6_metadata space'"),
+        0,
+        b"alpha\nalpha\nspace\\ value\n",
+        b"",
+    );
     exact(f.eval("abbr -q missing"), 1, b"", b"");
     exact(f.eval("abbr -e missing"), 4, b"", b"");
     let deprecated = f.eval("abbr --global long_global replacement; abbr -U short_universal replacement; abbr --universal long_universal replacement; for name in long_global short_universal long_universal; abbr --query $name; echo $status; end");

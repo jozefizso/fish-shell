@@ -135,6 +135,11 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
     },
     #[cfg(windows)]
     BuiltinData {
+        name: L!("__fish_clipboard"),
+        func: native_clipboard::native_clipboard,
+    },
+    #[cfg(windows)]
+    BuiltinData {
         name: L!("__fish_native_fs"),
         func: native_fs::native_fs,
     },
@@ -159,7 +164,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("bg"),
         func: bg::bg,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("bind"),
         func: bind::bind,
@@ -172,7 +176,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("break"),
         func: r#break::r#break,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("breakpoint"),
         func: breakpoint::breakpoint,
@@ -193,7 +196,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("command"),
         func: command::command,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("commandline"),
         func: commandline::commandline,
@@ -260,7 +262,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("fish_indent"),
         func: fish_indent::fish_indent,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("fish_key_reader"),
         func: fish_key_reader::fish_key_reader,
@@ -333,7 +334,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("set"),
         func: set::set,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("set_color"),
         func: set_color::set_color,
@@ -389,18 +389,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
 /// Names reserved by fish which must never fall through to native executable lookup.
 #[cfg(windows)]
 pub fn builtin_is_unsupported(name: &wstr) -> bool {
-    [
-        L!("bg"),
-        L!("bind"),
-        L!("breakpoint"),
-        L!("commandline"),
-        L!("exec"),
-        L!("fg"),
-        L!("fish_key_reader"),
-        L!("set_color"),
-        L!("ulimit"),
-    ]
-    .contains(&name)
+    [L!("bg"), L!("exec"), L!("fg"), L!("ulimit")].contains(&name)
 }
 assert_sorted_by_name!(BUILTIN_DATAS);
 

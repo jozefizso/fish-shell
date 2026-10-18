@@ -8,10 +8,14 @@ function __fish_config_files
     set -l suffix $argv[2]
     set -e argv[1..2]
     set -l paths
+    set -l separator /
+    if builtin -q __fish_native_fs
+        set separator '\\'
+    end
     if not set -q argv[1]
-        set paths $_flag_user_dir/*$suffix
+        set paths $_flag_user_dir$separator*$suffix
     else
-        set paths (path filter $_flag_user_dir/$argv$suffix)
+        set paths (path filter $_flag_user_dir$separator$argv$suffix)
     end
     if not set -q argv[1]
         set -a paths (status list-files $prefix)

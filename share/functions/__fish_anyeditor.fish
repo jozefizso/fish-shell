@@ -11,6 +11,16 @@ function __fish_anyeditor
             (_ 'Please set VISUAL or EDITOR to your preferred editor.')
         return 1
     end
+    if builtin -q __fish_native_fs
+        if not set -q editor[1]; or test -z "$editor[1]"
+            echo "fish: EDITOR or VISUAL names no editor command" >&2
+            return 1
+        end
+        if not type -q -- $editor[1]
+            echo "fish: editor command is unavailable: $editor[1]" >&2
+            return 127
+        end
+    end
     string join \n -- $editor
     return 0
 end

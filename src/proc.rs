@@ -690,6 +690,8 @@ pub struct Job {
     #[cfg(windows)]
     pub(crate) native_group: RefCell<Option<crate::exec::NativeLaunchGroup>>,
     #[cfg(windows)]
+    pub(crate) native_terminal: RefCell<Option<crate::tty_handoff::NativeChildDonation>>,
+    #[cfg(windows)]
     pub(crate) native_failure: Cell<Option<i32>>,
 }
 

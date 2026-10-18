@@ -4,7 +4,7 @@ function prompt_login --description "display user name for the prompt"
         set -g __fish_machine
         set -l debian_chroot $debian_chroot
 
-        if test -r /etc/debian_chroot
+        if not builtin -q __fish_native_fs; and test -r /etc/debian_chroot
             set debian_chroot (command cat /etc/debian_chroot)
         end
 

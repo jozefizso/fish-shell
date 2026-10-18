@@ -118,7 +118,7 @@ fn no_config(f: &Fixture) {
     let result = run(&mut f.command(&[OsStr::new("-N"), OsStr::new("-i")]), b"");
     assert!(
         result.out.is_empty(),
-        "unsupported interactive mode emitted output"
+        "nonterminal interactive startup emitted output"
     );
     rejected(result);
     exact(

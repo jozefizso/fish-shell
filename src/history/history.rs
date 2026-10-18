@@ -2045,7 +2045,12 @@ pub fn expand_and_detect_paths<P: IntoIterator<Item = WString>>(
     vars: &dyn Environment,
 ) -> Vec<WString> {
     assert_is_background_thread();
+    #[cfg(unix)]
     let working_directory = vars.get_pwd_slash();
+    #[cfg(windows)]
+    let Ok(working_directory) = vars.get_working_directory() else {
+        return Vec::new();
+    };
     let ctx = &mut OperationContext::background(vars, EXPANSION_LIMIT_BACKGROUND);
     let mut result = Vec::new();
     for path in paths {
@@ -2071,7 +2076,15 @@ pub fn expand_and_detect_paths<P: IntoIterator<Item = WString>>(
 /// Returns `true` if `paths` is empty or every path is valid.
 pub fn all_paths_are_valid(paths: &[WString], ctx: &mut OperationContext<'_>) -> bool {
     assert_is_background_thread();
+    if paths.is_empty() {
+        return true;
+    }
+    #[cfg(unix)]
     let working_directory = ctx.vars().get_pwd_slash();
+    #[cfg(windows)]
+    let Ok(working_directory) = ctx.vars().get_working_directory() else {
+        return false;
+    };
     let mut path = WString::new();
     for unexpanded_path in paths {
         path.clone_from(unexpanded_path);

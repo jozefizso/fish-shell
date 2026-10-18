@@ -472,15 +472,19 @@ fn errors_and_boundaries(f: &Fixture) {
         "job-control all",
         "-j interactive",
         "--job-control all",
-        "is-breakpoint",
-        "terminal",
-        "terminal-os",
-        "test-terminal-feature scroll-content-up",
         "language",
     ] {
         let result = f.eval(&format!("status {query}"));
         assert_ne!(result.code, 0, "{query}");
         assert!(!result.err.is_empty(), "{query}");
+    }
+    for query in [
+        "is-breakpoint",
+        "terminal",
+        "terminal-os",
+        "test-terminal-feature scroll-content-up",
+    ] {
+        exact(f.eval(&format!("status {query}")), 1, b"", b"");
     }
     for builtin in [
         "argparse", "builtin", "contains", "random", "return", "math", "status", "set", "break",

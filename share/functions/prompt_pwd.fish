@@ -28,9 +28,21 @@ function prompt_pwd --description 'short CWD for the prompt'
     for path in $argv
         # Strip control characters to avoid injecting terminal escape sequences into the prompt.
         set -l tmp (__fish_unexpand_tilde $path | string replace -ra '[[:cntrl:]]' '')
+        set -l native_root ''
+        if builtin -q __fish_native_fs
+            # Display native separators consistently, but keep the complete drive
+            # or UNC root. Shortening C: or a server/share changes its identity.
+            set tmp (string replace -a '\\' / -- $tmp)
+            set native_root (string match -r '^(?:[A-Za-z]:/|//[?]/UNC/[^/]+/[^/]+/?|//[?]/[A-Za-z]:/|//[^/]+/[^/]+/?)' -- $tmp)
+            set tmp (string sub --start (math (string length -- "$native_root") + 1) -- $tmp)
+            if test -n "$native_root"; and test -z "$tmp"
+                echo $native_root
+                continue
+            end
+        end
 
         if test "$fish_prompt_pwd_dir_length" -eq 0
-            echo $tmp
+            echo "$native_root$tmp"
         else
             # Shorten to at most $fish_prompt_pwd_dir_length characters per directory
             # with full-length-dirs components left at full length.
@@ -41,11 +53,11 @@ function prompt_pwd --description 'short CWD for the prompt'
                 set full $all[2..]
             else if test $fish_prompt_pwd_full_dirs -eq 0
                 # 0 means not even the last component is kept
-                string replace -ar '(\.?[^/]{'"$fish_prompt_pwd_dir_length"'})[^/]*' '$1' $tmp
+                printf '%s%s\n' "$native_root" (string replace -ar '(\.?[^/]{'"$fish_prompt_pwd_dir_length"'})[^/]*' '$1' $tmp)
                 continue
             end
 
-            string join / -- (string replace -ar -- '(\.?[^/]{'"$fish_prompt_pwd_dir_length"'})[^/]*/' '$1/' $tmp) $full
+            printf '%s%s\n' "$native_root" (string join / -- (string replace -ar -- '(\.?[^/]{'"$fish_prompt_pwd_dir_length"'})[^/]*/' '$1/' $tmp) $full)
         end
     end
 end

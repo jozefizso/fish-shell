@@ -2,15 +2,19 @@
 // to support highlighting.
 // Because this may perform blocking I/O, we compute results in a separate thread,
 // and provide them optimistically.
-#[cfg(windows)]
-use crate::wutil::AccessFlags;
 use crate::{
     expand::{ExpandFlags, expand_one, expand_tilde},
     operation_context::OperationContext,
-    path::path_apply_working_directory,
     redirection::RedirectionMode,
     threads::assert_is_background_thread,
-    wutil::{dir_iter::DirIter, fish_wcstoi, normalize_path, waccess, wbasename, wdirname, wstat},
+    wutil::{dir_iter::DirIter, fish_wcstoi, waccess, wbasename, wdirname, wstat},
+};
+#[cfg(unix)]
+use crate::{path::path_apply_working_directory, wutil::normalize_path};
+#[cfg(windows)]
+use crate::{
+    path::{native_path_text, native_resolve_path},
+    wutil::AccessFlags,
 };
 use fish_common::{UnescapeFlags, UnescapeStringStyle, unescape_string};
 use fish_wcstringutil::{string_prefixes_string, string_prefixes_string_case_insensitive};
@@ -37,6 +41,7 @@ struct PathFlags {
     // Expand any leading tilde in the path.
     expand_tilde: bool,
     // Normalize directories before resolving, as "cd".
+    #[cfg(unix)]
     for_cd: bool,
 }
 
@@ -114,6 +119,10 @@ impl<'src, 'wd, 'opctx> FileTester<'src, 'wd, 'opctx> {
     // Test if the string is a prefix of a valid path we could cd into
     // If is_prefix is true, we test if the string is a prefix of a valid path we could cd into.
     pub fn test_cd_path(&mut self, token: &wstr, is_prefix: bool) -> FileTestResult {
+        #[cfg(windows)]
+        if self.ctx.check_cancel() {
+            return Err(IsErr);
+        }
         let mut param = token.to_owned();
         if !expand_one(&mut param, ExpandFlags::FAIL_ON_CMDSUBST, self.ctx, None) {
             // Failed expansion (e.g. may contain a command substitution). Ignore it.
@@ -144,6 +153,10 @@ impl<'src, 'wd, 'opctx> FileTester<'src, 'wd, 'opctx> {
         target: &wstr,
         mode: RedirectionMode,
     ) -> FileTestResult {
+        #[cfg(windows)]
+        if self.ctx.check_cancel() {
+            return Err(IsErr);
+        }
         // Skip targets exceeding PATH_MAX. See #7837.
         #[cfg(unix)]
         if target.len() > (PATH_MAX as usize) {
@@ -157,7 +170,23 @@ impl<'src, 'wd, 'opctx> FileTester<'src, 'wd, 'opctx> {
         // Ok, we successfully expanded our target. Now verify that it works with this
         // redirection. We will probably need it as a path (but not in the case of fd
         // redirections). Note that the target is now unescaped.
+        #[cfg(unix)]
         let target_path = path_apply_working_directory(&target, self.working_directory);
+        #[cfg(windows)]
+        let target_path = if mode == RedirectionMode::Fd {
+            // File descriptor syntax is not a filesystem name.
+            WString::new()
+        } else {
+            if self.ctx.check_cancel() {
+                return Err(IsErr);
+            }
+            match native_resolve_path(&target, self.working_directory)
+                .and_then(|path| native_path_text(&path))
+            {
+                Ok(path) => path,
+                Err(_) => return Err(IsErr),
+            }
+        };
         match mode {
             RedirectionMode::Fd => {
                 if target == "-" {
@@ -311,8 +340,19 @@ fn is_potential_path(
         if ctx.check_cancel() {
             return false;
         }
+        #[cfg(unix)]
         let mut abs_path = path_apply_working_directory(&path_fragment, wd);
+        #[cfg(windows)]
+        let abs_path = match native_resolve_path(&path_fragment, wd)
+            .and_then(|path| native_path_text(&path))
+        {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
         let must_be_full_dir = has_trailing_separator(&abs_path);
+        // Native CDPATH resolution already applies N1's leading-dot policy; collapsing
+        // internal missing/.. or reparse components here would accept a different path.
+        #[cfg(unix)]
         if flags.for_cd {
             abs_path = normalize_path(&abs_path, /*allow_leading_double_slashes=*/ true);
         }
@@ -349,6 +389,7 @@ fn is_potential_path(
             // We do not end with a slash; it does not have to be a directory.
             let dir_name = wdirname(abs_path);
             let filename_fragment = wbasename(abs_path);
+            #[cfg(unix)]
             if dir_name == "/" && filename_fragment == "/" {
                 // cd ///.... No autosuggestion.
                 return true;
@@ -459,7 +500,6 @@ fn is_potential_cd_path(
     };
     flags.expand_tilde = false;
     flags.require_dir = true;
-    flags.for_cd = true;
     crate::path::path_apply_cdpath(path, working_directory, ctx.vars())
         .iter()
         .any(|candidate| is_potential_path(candidate, at_cursor, &[working_directory], ctx, flags))

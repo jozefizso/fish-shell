@@ -307,6 +307,11 @@ pub struct LibraryData {
     #[cfg(windows)]
     pub(crate) native_capture_limit_generation: u64,
 
+    /// Enclosing native evaluation descriptors, restored when recursive evaluation
+    /// returns. Substitutions replace stdout without losing stderr/stdin/extra fds.
+    #[cfg(windows)]
+    pub(crate) native_block_io: ScopedRefCell<IoChain>,
+
     /// Last reader run count.
     pub last_exec_run_counter: u64,
 
@@ -727,6 +732,11 @@ impl Parser {
 
         // Restore the current pipeline node.
         let restore_current_node = self.current_node.scoped_replace(None);
+        #[cfg(windows)]
+        let _restore_native_io = self
+            .libdata()
+            .native_block_io
+            .scoped_replace(block_io.clone());
 
         let op_ctx = &mut self.context();
         // Propagate our job group.
@@ -736,7 +746,7 @@ impl Parser {
         op_ctx.cancel_checker = cancel_checker;
 
         // Create a new execution context.
-        let mut execution_ctx = ExecutionContext::new(node.parsed_source_ref(), block_io.clone());
+        let mut execution_ctx = ExecutionContext::new(node.parsed_source_ref(), block_io);
 
         // Check the exec count so we know if anything got executed.
         let exec_counts = |ctx: &mut OperationContext<'_>| {

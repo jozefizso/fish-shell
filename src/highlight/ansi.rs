@@ -4,14 +4,14 @@ use fish_color::Color;
 use fish_widestring::{wcs2bytes_appending, wstr};
 use std::io::Write as _;
 
-pub(super) struct AnsiBuffer {
+pub(crate) struct AnsiBuffer {
     contents: Vec<u8>,
     last: TextFace,
     support: ColorSupport,
 }
 
 impl AnsiBuffer {
-    pub(super) fn new(support: ColorSupport) -> Self {
+    pub(crate) fn new(support: ColorSupport) -> Self {
         Self {
             contents: Vec::new(),
             last: TextFace::terminal_default(),
@@ -19,7 +19,7 @@ impl AnsiBuffer {
         }
     }
 
-    pub(super) fn set_text_face(&mut self, mut face: TextFace) {
+    pub(crate) fn set_text_face(&mut self, mut face: TextFace) {
         let quantize = |color: Color| {
             if color.is_rgb() && !self.support.term_24bit {
                 Color::Named {
@@ -108,7 +108,34 @@ impl AnsiBuffer {
         );
     }
 
-    pub(super) fn writech(&mut self, ch: char) {
+    pub(crate) fn new_no_assume_normal(support: ColorSupport) -> Self {
+        Self {
+            last: TextFace::unknown(),
+            ..Self::new(support)
+        }
+    }
+
+    pub(crate) fn set_text_face_no_magic(&mut self, face: TextFace, with_reset: bool) {
+        if with_reset {
+            self.reset_text_face();
+        }
+        self.set_text_face(face);
+    }
+
+    pub(crate) fn reset_text_face(&mut self) {
+        self.contents.extend_from_slice(b"\x1b[0m");
+        self.last = TextFace::terminal_default();
+    }
+
+    pub(crate) fn write_wstr(&mut self, text: &wstr) {
+        wcs2bytes_appending(&mut self.contents, text);
+    }
+
+    pub(crate) fn contents(&self) -> &[u8] {
+        &self.contents
+    }
+
+    pub(crate) fn writech(&mut self, ch: char) {
         wcs2bytes_appending(&mut self.contents, wstr::from_char_slice(&[ch]));
     }
 
