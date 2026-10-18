@@ -1,6 +1,16 @@
 # Binaries and shipped fish assets
 
-## Scope and evidence
+## Verified N3 implementation
+
+`bin/fish/windows.rs` now runs repeated command strings, scripts and stdin through the shared
+noninteractive evaluator with `-N`, explicit argv/`--`, parse-only/features/version and real
+debug/category/trace/profile output. Retired `-D` is a nonzero diagnostic, not ignored success.
+Standalone and builtin `fish_indent` share real non-help stream/file/check/write/ANSI/HTML/token modes.
+Normal utility-free startup/autoload/save remains N4, key-reader/console editing N6 and help/assets N9.
+Only `_validate_int` is exposed from embedded core functions during N3; no complete asset audit is implied.
+See [N3's executable option mapping and artifacts](coverage.md#n3-verified-evidence-record).
+
+## Historical scope and evidence
 
 This source audit covers all `share/` and `etc/` **asset families**, including executable helpers rather than just static option tables. The [coverage ledger](coverage.md) inventories individual files. Source examples below establish dependencies and behavior; they are not claims that every third-party command variant has been executed. Native Windows means no assumed WSL, Cygwin, MSYS, coreutils or `/bin/sh` installation.
 
@@ -96,4 +106,4 @@ The complete sample-prompt family has different dependency classes; source snipp
 - Do not indiscriminately remove Unix completions: dormant static tables are different from active Linux probes. Keep cross-platform/native definitions and audit/gate executable providers at their actual call sites.
 - No `/etc/shells` registration, login-shell installation assumption, privileged symlink requirement or compatibility-environment path translation is needed merely to distribute the native binaries and embedded data. Actual installation layout is covered in [15](15-build-packaging-documentation.md).
 - Proposed Win32 APIs describe capabilities, not CLI replacements. Open decisions include POSIX job/signal exposure, FIFO `psub` consumer compatibility, native account/permission semantics, man rendering, executable-extension policy, native Python discovery/version floor, and which third-party utilities are intentionally optional dependencies.
-- This audit used source inventory and targeted reads/searches across every asset family. It did **not** run binaries, completions, Python tools, builds or tests; third-party output/localization/version behavior and all scenarios above remain unverified at runtime.
+- The original audit used source inventory and targeted reads across asset families, without executing its proposed scenarios. The N3 overlay records implemented executable consumers; third-party tools, normal bootstrap, help and the complete shipped asset inventory still require their named phases.

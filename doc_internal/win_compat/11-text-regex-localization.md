@@ -1,6 +1,16 @@
 # Text, regex, numeric parsing, and localization
 
-## Evidence and scope
+## Verified N3 implementation
+
+Native MSVC builds now use fish's existing UTF-32 PCRE2 dependency and every string subcommand.
+Groups, supplementary-character offsets, named captures, replacement/case-folding errors and
+malformed-pattern behavior are exercised against the real linked engine, not a Win32/.NET substitute.
+Reserved private-use Unicode retains fish's canonical encoded-byte representation (and its existing
+Unix internal-count limitation), while literal Unicode and raw redirected bytes remain distinct.
+Fixed-C/minimal message fallback is real; locale/catalog selection remains N9.
+See [N3 verification](coverage.md#n3-verified-evidence-record).
+
+## Historical evidence and scope
 
 This is a source audit, not a report of a successful native build or terminal run. The components below distinguish algorithms from OS boundaries and build-host tooling. Workspace dependency portability is covered separately in [14](14-workspace-crates.md); a pure algorithm can still depend on a crate that currently imports Unix APIs.
 
@@ -30,4 +40,4 @@ This is a source audit, not a report of a successful native build or terminal ru
 
 ## Tooling limits and classification
 
-No compile, test, locale installation, external PCRE2 dependency inspection, or ConPTY rendering check was executed for this audit. The scenarios above are acceptance work, not passing results. Text/numeric/localization algorithms generally need **no Win32 replacement**; native OS-string conversion, locale policy and build-host paths/tools need explicit adaptation. Preserve UTF-8 conventions for fish source and terminal text without assuming all redirected data is valid UTF-8, and keep code pages out of native filesystem calls.
+The original audit did not execute native builds, PCRE2 or terminal checks; its candidate API mappings are not evidence. N1/N3 verification above now establishes the checked text boundary and batch regex/formatting consumers, not a complete locale or renderer port. Native locale/catalog deployment and active terminal rendering remain their N9 and N6/N7 owners.

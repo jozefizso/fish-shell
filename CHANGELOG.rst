@@ -26,7 +26,12 @@ Scripting improvements
 - The experimental native Windows backend now supports streaming native/builtin pipelines,
   ordered redirections, bounded capture infrastructure and retained asynchronous process/I/O ownership.
   Extra numbered descriptors are supported only between instances of the identical fish executable.
-  This does not yet enable the complete batch language, interactive reader or POSIX job-control contracts.
+  Portable native batch scripts now support functions, while/switch, nested substitutions,
+  mixed function/block pipelines, noninteractive read, portable builtins and UTF-32 PCRE2.
+  Native standalone/builtin fish_indent and debug/profile output are implemented.
+  Configuration still requires ``-N`` until persistent startup lands; interactive editing,
+  user-visible native jobs and help remain separate phases. Faithful fork, same-PID exec
+  and POSIX fg/bg remain excluded.
 
 Regression fixes:
 -----------------

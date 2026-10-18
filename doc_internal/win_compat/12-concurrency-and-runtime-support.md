@@ -23,6 +23,12 @@ See [N2 evidence](coverage.md#n2-verified-evidence-record).
 N4 watchers, N5 user-visible control/job events and N7 editor background work must reuse these
 services. N2 does not implement those consumers or Unix signal masks/atfork on Windows.
 
+N3 now consumes these services for actual nested capture, source/read and mixed function/block
+pipelines. Main-thread generic/variable event dispatch, wildcard-selected debug categories,
+native file sinks, argv trace hooks and real evaluation profiles are exercised; none claims
+N5 control delivery or N6/N7 editor readiness. [N3 evidence](coverage.md#n3-verified-evidence-record)
+records the tested consumers separately from N2's runtime foundations.
+
 ## Scope
 
 `threads/`, `common.rs`, `global_safety.rs`, `operation_context.rs`, `portable_atomic.rs`, `stdx.rs`, `trace.rs`, `flog.rs`, `panic.rs`, `nix.rs`, `prelude.rs`, `print_help.rs`, `lib.rs`, and `src/tests/` supply worker pools, cancellation, debounce, global invariants, logging, panic handling, common platform probes, and crate organization. `fd_monitor` and `topic_monitor` are analyzed with I/O and signals but participate in this runtime.

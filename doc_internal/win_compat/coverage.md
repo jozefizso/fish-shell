@@ -2,18 +2,17 @@
 
 ## Scope, state vocabulary and ownership
 
-The **current source ledger** records N1 filesystem delivery and N2 streaming/runtime delivery
-on their `platform/windows/` phase branches. It inventories native/runtime modules, all 21
-workspace crate directories, assets, executable CLI options and builtin subcommands/options.
-The [N1 evidence](#n1-verified-evidence-record) and [N2 evidence](#n2-verified-evidence-record)
-distinguish exercised behavior from future owners. Compiling Unix code out is not command support.
+The **current source ledger** records N1 filesystem, N2 streaming/runtime and N3 batch-language
+delivery on their `platform/windows/` phase branches. It inventories native/runtime modules,
+all 21 workspace crate directories, assets, executable CLI options and builtin options.
+The N1, N2 and N3 evidence records distinguish exercised behavior from future owners.
+Compiling Unix code out is not command support.
 
 States used throughout the current ledger:
 
-- **S — supported source path:** enabled in the native registry/parser, subject to the stated
-  prototype limitations. This does not assert newly executed debug/release evidence.
-- **I — implemented N1/N2 path:** enabled and exercised for the host/filesystem/feature matrix below.
-  This does not enable the explicitly deferred consumers or certify other Windows hosts/volumes.
+- **S — supported source path:** enabled in the native registry/parser, subject to stated boundaries.
+- **I — implemented N1/N2/N3 path:** enabled and exercised for the recorded host/feature matrix.
+  This does not enable explicitly deferred consumers or certify other Windows hosts/volumes.
 - **R — rejected:** the native entrypoint/option gate explicitly diagnoses unsupported use.
 - **U — unavailable:** the service is compiled out, absent or not connected to a native entrypoint.
   A reserved builtin can be both R at dispatch and U at implementation.
@@ -37,7 +36,7 @@ Wiring evidence is [`lib.rs`](../../src/lib.rs), [`builtins/mod.rs`](../../src/b
 | Current source files | State and implementation owner | Required native semantics / boundary |
 |---|---|---|
 | `lib.rs`, `prelude.rs`, `common.rs`, `global_safety.rs`, `portable_atomic.rs`, `stdx.rs`, `panic.rs`, `operation_context.rs` | S shared/prototype subset; N1 identity boundaries, N2 runtime ownership, N3 batch consumers | Preserve shared data/algorithms, checked text boundaries, cancellation and main-thread ownership; inclusion is not complete downstream service support. |
-| `ast.rs`, `tokenizer.rs`, `parse_constants.rs`, `parse_tree.rs`, `parser_keywords.rs`, `parse_util.rs`, `parser.rs`, `parse_execution.rs` | S restricted evaluator; N3 full language, N1 filesystem callers | Existing if/for/begin/boolean batch paths; functions/while/switch/substitution and other deferred forms remain rejected. N1 restores paths/globs without enabling unrelated syntax. |
+| `ast.rs`, `tokenizer.rs`, `parse_constants.rs`, `parse_tree.rs`, `parser_keywords.rs`, `parse_util.rs`, `parser.rs`, `parse_execution.rs` | I N3 batch language; N1 filesystem callers | Functions, recursion, while/switch, blocks, substitutions, scopes and generic/variable events execute through shared fish semantics; background/jobs N5, interactive N6, exec permanently excluded. |
 | `expand.rs`, `wildcard.rs`, `complete.rs` | I N1 paths, discovery and real traversal; U active completion N7 (declarative metadata N3) | Shared fish matching, hidden/no-match rules, cancellation/result limits, directory case policy and identity-based cycles. Completion types compiling is not active editor completion. |
 | `path/windows.rs` | I N1; providers beyond native `.exe` R/U N8 | Namespace-aware paths, CDPATH/implicit cd, authoritative cwd, explicit PATH order and classification shared with launch/predicates; no implicit Win32 cwd search or script fallback. No discovery cache to invalidate. |
 | `path.rs` | U Unix backend on native; N1 equivalent path/discovery, N4 state roots, N8 providers | Not the selected Windows module. Known-folder/config/cache policy cannot be inferred from Unix XDG code. |
@@ -45,7 +44,7 @@ Wiring evidence is [`lib.rs`](../../src/lib.rs), [`builtins/mod.rs`](../../src/b
 | `wutil/mod.rs`, `wutil/errors.rs`, `wutil/hex_float.rs`, `wutil/printf.rs`, `wutil/wcstod.rs`, `wutil/wcstoi.rs` | S shared numeric/output subset, I native filesystem dispatch N1; N2 full streams, N3 formatting | Keep numeric grammar/widths and byte provenance; route native filesystem operations to the Windows backend, not Unix fd/errno conventions. |
 | `wutil/dir_iter.rs` | U Unix enumeration; N1 native counterpart above | `DIR*`, inode/mode and `fstatat` implementation is not native traversal support. |
 | `fs.rs` | U native; N4 persistence (N1 path/identity prerequisites) | Stable locking, security, temporary replacement, flush/sharing and recovery protocol; Unix directory flock is not implemented by compiling this file out. |
-| `env/mod.rs`, `env/environment.rs`, `env/var.rs`, `env/impl/mod.rs`, `env/impl/environment.rs`, `env/impl/var.rs`, `env/native.rs` | S native import/export/scoped subset; I N1 cwd integration; N3 full local/function semantics, N4 persistence | Case-sensitive fish locals, checked native case-collision/export rules and PATH lists. `NativeCwd` Arc and PWD are updated together and cloned into snapshots; physical cwd queries use the owned directory. |
+| `env/mod.rs`, `env/environment.rs`, `env/var.rs`, `env/impl/mod.rs`, `env/impl/environment.rs`, `env/impl/var.rs`, `env/native.rs` | I N1 cwd and N3 scoped/function/list/import/export semantics; N4 persistence | Case-sensitive fish locals and checked native collision/export/PATH rules; PWD and owned NativeCwd snapshots remain consistent. Universal persistence is not replaced by globals. |
 | `env/config_paths.rs`, `env_universal_common.rs`, `env_dispatch.rs` | U Unix implementations; N4 | Native known-folder roots, locale/TZ/export effects, startup and durable universal state must be implemented, not silently replaced with globals. |
 | `env_dispatch/windows.rs` | S limited native dispatch; N4 full variable effects | Existing read-limit dispatch is not history, locale, terminal, autoload or watcher support. |
 | `exec_windows.rs`, `exec/windows_launch.rs`, `proc_status_windows.rs`, `proc.rs`, `job_group.rs`, `wait_handle.rs` | I N1 resolver/cwd and N2 prepared native pipeline launch/retained ownership; N5 user supervision | Explicit pinned application/argv/env/cwd, suspended creation/owned rollback, exact inheritance allowlists and retained raw DWORD completion. No POSIX pgroup/stopped-state claims. |
@@ -55,20 +54,20 @@ Wiring evidence is [`lib.rs`](../../src/lib.rs), [`builtins/mod.rs`](../../src/b
 | `io.rs`, `fds.rs`, `fd_monitor.rs`, `fd_readable_set.rs` | U Unix implementations on native; I N2 native counterparts above | Native services do not reinterpret Unix fds, sockets or arbitrary handles as a universal readiness namespace. |
 | `threads/windows.rs`, `threads/windows_workers.rs` | I N2 scalable waits/completion queue, workers/debounce | Main-thread dispatch, monotonic source identity, reset/post synchronization, cancellation/drain, retained child handles and abandoned-result suppression. |
 | `threads/mod.rs`, `threads/threads.rs`, `threads/debounce.rs` | U Unix-selected implementation on native; I N2 native counterpart | Preserve shared scheduling semantics without Unix masks/atfork. |
-| `signal_windows.rs`, `event.rs` | S native status/event data subset; U event delivery N3/N5; native control/cancellation N5 | No fabricated Unix signal delivery; language/variable handlers N3, process/job/shell/control events N5. |
+| `signal_windows.rs`, `event.rs` | I N3 generic/variable events and blocking; N5 native control/lifecycle events | In-memory language handlers and queued dispatch work; no fabricated Unix signal delivery. Process/job/shell/control events remain N5. |
 | `signal.rs`, `topic_monitor.rs`, `timer.rs` | U native services; N2 wakeups, N5 cancellation/events/accounting | Actual native completion/timing/counters; do not report unavailable measurements as zero. |
-| `function.rs` | S shared metadata only; U in-memory definitions/events N3, autoload N4 | Native function execution is unavailable despite shared types compiling. |
+| `function.rs` | I N3 in-memory definitions/execution/metadata/events; N4 disk autoload | Ordinary functions execute, copy and retain scope/metadata. Only embedded `_validate_int` autoload is enabled; general disk discovery remains N4. |
 | `autoload.rs`, `history/mod.rs`, `history/file.rs`, `history/history.rs`, `history/yaml_backend.rs`, `universal_notifier/mod.rs`, `universal_notifier/inotify.rs`, `universal_notifier/kqueue.rs`, `universal_notifier/notifyd.rs`, `universal_notifier/test_helpers.rs` | U native; N4 | Real disk discovery, state formats/locking/replacement and notifications; Unix watchers are not Windows backends. |
-| `reader/mod.rs`, `reader/input.rs`, `reader/reader.rs`, `reader/iothreads.rs`, `reader/history_search.rs`, `reader/word_motion.rs` | U native; N3 noninteractive reader seam, N6 reader, N7 suggestions/search/completion | Full batch source/stdin must not wait for interactive initialization; editor has exclusive console input ownership and cancellation-safe workers. |
+| `reader/mod.rs`, `reader/input.rs`, `reader/reader.rs`, `reader/iothreads.rs`, `reader/history_search.rs`, `reader/word_motion.rs` | I N3 native noninteractive reader seam; U interactive reader N6, suggestions/search/completion N7 | Batch source/stdin and ordinary buffered read do not initialize an editor; exclusive console input and cancellation-safe editor workers remain future work. |
 | `input/mod.rs`, `input/input.rs`, `input/decode.rs`, `input/binding.rs`, `key.rs`, `editable_line.rs`, `kill.rs` | U native; N6 core input/editing, N7 advanced modes | Preserve logical keys, Unicode characters and editing models, not UTF-16-unit cursor offsets or echo-only tests. |
 | `terminal.rs`, `termsize.rs`, `screen.rs`, `tty_handoff.rs`, `text_face.rs`, `pager.rs` | U native; N6 transport/first reader, N7 full renderer/pager | Real console/VT modes, viewport, capability negotiation and foreground-child input donation; no POSIX fg/bg. |
-| `abbrs.rs`, `highlight/mod.rs`, `highlight/highlight.rs`, `highlight/file_tester.rs` | U native; N3 declarative metadata, N7 active abbreviation/highlighting | Reuse N1 predicates; definition storage is not evaluated completion/editor parity. |
-| `tinyexpr.rs`, `flog.rs`, `trace.rs`, `locale.rs`, `localization/mod.rs`, `localization/gettext.rs`, `localization/settings.rs` | S arithmetic/fixed-C-locale/diagnostic subset; N3 debug/profile/formatting, N9 locale/catalogs | Keep shared numeric parsing and real byte sinks; fixed prototype locale is not catalog discovery or working CLI debug/profile support. |
-| `re.rs` | U native PCRE2 consumer; N3 | Same UTF-32 PCRE2 regex semantics, captures/replacements and error cases; Unix-only dependency registration does not provide native regex. |
+| `abbrs.rs`, `highlight/mod.rs`, `highlight/highlight.rs`, `highlight/file_tester.rs` | I N3 declarative metadata and highlighted batch display; N7 active editor consumers | Complete/abbr registration, serialization and erase work; function/type and formatter batch highlighting work with configured styles. No active completion or abbreviation expansion is claimed. |
+| `tinyexpr.rs`, `flog.rs`, `trace.rs`, `locale.rs`, `localization/mod.rs`, `localization/gettext.rs`, `localization/settings.rs` | I N3 arithmetic, fixed-C/minimal fallback, real debug/profile/formatting; N9 locale/catalogs | Real diagnostic/profile sinks and byte output; `_` supplies fallback needed by `_validate_int`, not full native catalog selection. |
+| `re.rs` | I N3 UTF-32 PCRE2 | Shared regex captures/replacements, named variables, offsets and error behavior; not Win32/.NET regex. |
 | `nix.rs` | U Unix glue; N2/N5/N8 replace consumers at their owners | No blanket Win32 errno, fd, identity or signal emulation. |
 | `print_help.rs` | U native help; N9 | Installed/embedded help and native viewer/error policy; existing script-based help is not available. |
-| `builtins/mod.rs`, `builtins/shared/mod.rs`, `builtins/shared/error.rs`, `builtins/shared/misc.rs`; every `builtins/*.rs` and `builtins/string/*.rs` enumerated in the option ledger and historical source table | S restricted native registry, I N1 additions; R/U deferred families | Option-level states below override module inclusion. `return.rs` is compiled for exit-value parsing, not registered native `return`. |
-| `bin/fish.rs`, `bin/fish/unix.rs`, `bin/fish/windows.rs`, `bin/fish_indent.rs`, `bin/fish_key_reader.rs` | S restricted fish batch CLI; R native formatter/key reader | Complete executable option ledger below; standalone tool files exist but their Windows entrypoints exit unsupported. |
+| `builtins/mod.rs`, `builtins/shared/mod.rs`, `builtins/shared/error.rs`, `builtins/shared/misc.rs`; every `builtins/*.rs` and `builtins/string/*.rs` enumerated below | I N1/N3 native registry; R/U deferred families | Option-level boundaries below override module inclusion; native `return` is registered and executes function return semantics. |
+| `bin/fish.rs`, `bin/fish/unix.rs`, `bin/fish/windows.rs`, `bin/fish_indent.rs`, `bin/fish_key_reader.rs` | I N3 batch fish and standalone/builtin formatter; R key reader N6 | Native invocation, script/stdin, syntax-only, debug/profile and formatting are enabled; normal startup N4, interactive N6, help N9 remain rejected. |
 | `tests/mod.rs`, `tests/prelude.rs` | U root Unix unit harness on native; each owning phase retains applicable cases | Native integration suites do not establish that all shared unit tests were discovered/executed. |
 
 ## Current workspace crate inventory
@@ -82,7 +81,7 @@ compiled in isolation.
 | Crate(s), including current added sources | State / implementation owners | Required native behavior |
 |---|---|---|
 | `common`, `widestring` (`src/lib.rs`, `src/word_char.rs`), `util`, `wcstringutil` | S shared/prototype; I N1 identity codec; N3 full consumers | Checked OS-string/native UTF-16 versus fish text/byte provenance, Unicode/private-use handling and rejection without replacement aliases. |
-| `tempfile` (including `tests/runtime.rs`) | S native create-new/temp helper source; execution evidence pending; N1 paths, N4 state/temp consumers, N8 psub, N10 distribution | Real exclusive native temp files, security/lifetime/cleanup at consumers; helper presence alone proves neither private ACLs nor passed cleanup tests. |
+| `tempfile` (including `tests/runtime.rs`) | I native helper N1/N3 gate evidence; N4 durable state, N8 psub, N10 distribution | Four leaf tests and two integrations passed; helper coverage does not certify private ACLs or every future consumer. |
 | `fallback`, `wgetopt`, `feature-flags` | S shared subset; N3 complete option/feature consumers, N6/N7 widths | Native boundaries without Unix-only fallback calls; complete flags and text widths at their actual consumers. |
 | `printf` (all `src/fmt_fp/` and locale/tests) | S fixed-locale formatting subset; N3 full streams, N9 locale | Exact formats, errors, binary output and locale invalidation. |
 | `color`, `widecharwidth` | Shared libraries present; U active native renderer; N6/N7 | Capability-aware styles and actual terminal-cell widths, not UTF-16 length. |
@@ -106,8 +105,9 @@ forms. Earlier phases own assets required for their own working behavior now, no
 | `share/help_sections`, `doc_src/`, embedded/generated manpage resources | U installed native help; N9, package N10 | Native help/viewer/browser resolution, all executable/builtin help entries, no competing fish on PATH capturing internal dispatch. |
 | `share/tools/` (Python/web/static assets), user editor/browser/clipboard/extraction helpers in functions | U native family, optional dependency behavior unverified; N6/N7 required clipboard actions, N9 user tools | Correct argv/Unicode/newlines/temp lifetime; native services or declared/tested dependencies present and absent. Python/Sphinx/gettext are not mandatory shell-startup dependencies. |
 | `localization/fluent/`, `localization/po/`, generated catalogs | Native localization evidence pending; N9, N10 packaging | Actual language/environment precedence, catalog fallback and deployed data; fixed C numeric parsing remains separate. |
-| `tests/windows_native.rs`, `tests/windows_native/{probe,fixture,transport,runtime,provenance,conpty}.rs` | S retained prototype regressions, rerun at N1 | The exact 15-case registry ran against both artifacts; independent runtime/provenance cases also ran. Probe is a real test helper, not another shipped CLI. |
+| `tests/windows_native.rs`, `tests/windows_native/{probe,fixture,transport,runtime,provenance,conpty}.rs` | I retained prototype regressions rerun through N3 | Exact 15-case registry ran against both artifacts (30 PASS); runtime/provenance ran in both harness profiles. Probe is a test helper, not another shipped CLI. |
 | `tests/windows_n1.rs`, `tests/windows_n1/{native,paths,discovery,glob}.rs` | I N1; three required gates verified | Native debug/release harnesses each ran all three gates against both artifacts. Required fixture absence hard-fails rather than skips. |
+| `tests/windows_n2.rs`, `tests/windows_n3.rs`, `tests/windows_n3/{language,builtins,strings,metadata,capture,read,scripts,formatter}.rs` | I N2/N3; three gates per phase | Both harness profiles exercise both executable artifacts; N3 requires all eight families, 16 PASS-CASE records per harness. |
 | Other `tests/` checks/fixtures/interactive drivers, `benchmarks/` | Native migration/coverage unavailable as a complete family; owning phases N1–N10, N11 reconciliation/stress | Keep applicable Unix suites; translate host RUN/pty assumptions without deleting portable behavioral coverage. |
 | `.github/`, `.builds/`, `docker/`, `vagrants/` | Native gate/release matrix pending; N10 CI/packaging, N11 closure; N1 owns its gate integration | Required IDs/cases must be discovered, nonempty and nonignored; label native, Unix/MSYS and cross-build evidence distinctly. |
 | `build_tools/`, `cmake/`, root make/build/package metadata, `contrib/`, `osx/`, `updatecli.d/`, licenses/security/project metadata | Native release unavailable as a whole; N10, final quality N11 | Keep Unix/macOS-specific packaging separate from native x64 ZIP; supported build-host tools must actually execute. No unsigned artifact presented as signed. |
@@ -118,23 +118,23 @@ Source authority: [`bin/fish/windows.rs`](../../src/bin/fish/windows.rs) versus
 [`bin/fish/unix.rs`](../../src/bin/fish/unix.rs), and
 [`builtins/fish_indent.rs`](../../src/builtins/fish_indent.rs) /
 [`builtins/fish_key_reader.rs`](../../src/builtins/fish_key_reader.rs). Unix option declarations
-below are inventory, not Windows support. Before `-c`, native fish accepts only `-N/--no-config`
-and `-c/--command`; after the first command string every remaining argument is `$argv`, even if
-it resembles a flag. Combined Unix short flags and general option permutation are not implied.
+below inventory every spelling. Native fish uses the shared getopt grammar (including combined
+short flags and repeated commands), stopping at the first operand or `--`. Batch execution
+requires `-N`; it does not silently enable startup, autoload or persistent state.
 
 | Executable / spelling or entry mode | State / owner | Required native semantics |
 |---|---|---|
-| fish `-c ARG`, `--command ARG` | S one command string; N3 full contract | Checked native source/argv, status, repeated commands in order; repeated `-c` is currently argv after the first, not multiple commands. |
-| fish `-N`, `--no-config` | S required before command; N4 | Skip config without pretending normal startup; preserve init-command semantics/private history when N4 lands. |
-| fish script file, stdin execution, option terminator `--` | R as entry modes; N3 | Native source reads, argv/filename/line/EOF and unambiguous `--` boundaries; not a successful empty shell. |
-| fish `-n`, `--no-execute` | R; N3 | Parse/diagnose without startup/evaluation/argument side effects. |
-| fish `-f ARG`, `--features ARG` | R; N3 | Existing feature-flag grammar, ordering and errors. |
-| fish `-v`, `--version` | R; N3 | Stable real build/version output/status. |
-| fish `-d ARG`, `--debug ARG` | R; N3 | Real category selection, not a recognized-but-ignored flag. |
-| fish `-o ARG`, `--debug-output ARG` | R; N3 | Native diagnostic file sink and write errors without corrupting stdout/status. |
-| fish `--print-debug-categories` | R; N3 | Actual available category enumeration. |
-| fish `-D ARG`, `--debug-stack-frames ARG` | R; N3 | Explicit retirement/unavailability or genuinely implemented behavior; upstream ignored handling is not working stack debugging. |
-| fish `-p ARG`, `--profile ARG` | R; N3 | Actual evaluation profiling and native sink errors. |
+| fish `-c ARG`, `--command ARG` | I N3 | Repeated command strings execute in order; remaining operands supply `$argv`, with explicit `--` boundaries. |
+| fish `-N`, `--no-config` | I N3 batch boundary; normal startup N4 | Required for batch evaluation; config/startup are not enabled. |
+| fish script file, stdin execution, option terminator `--` | I N3 | Native source reads, Unicode/space paths, UTF-8 BOM/CRLF, argv, filename/line/EOF and `--` boundaries. |
+| fish `-n`, `--no-execute` | I N3 | Parse/diagnose without evaluation/argument side effects. |
+| fish `-f ARG`, `--features ARG` | I N3 | Shared feature-flag grammar and ordering. |
+| fish `-v`, `--version` | I N3 | Real build/version output and status. |
+| fish `-d ARG`, `--debug ARG` | I N3 | Real category selection. |
+| fish `-o ARG`, `--debug-output ARG` | I N3 | Native diagnostic file sink and errors. |
+| fish `--print-debug-categories` | I N3 | Actual available category enumeration. |
+| fish `-D ARG`, `--debug-stack-frames ARG` | R N3 retirement | Explicit retired diagnostic with nonzero status; not accepted/ignored stack debugging. |
+| fish `-p ARG`, `--profile ARG` | I N3 | Actual evaluation profiling and native sink errors. |
 | fish `-C ARG`, `--init-command ARG` | R; N4 | Repeated init commands in command-line order after config and before execution; `-N` must not suppress them. |
 | fish `-l`, `--login` | R; N4 | Native startup/login state and config order, not POSIX login-shell installation. |
 | fish `-P`, `--private` | R; N4 | Private history/session persistence policy without dropping universal semantics. |
@@ -142,13 +142,13 @@ it resembles a flag. Combined Unix short flags and general option permutation ar
 | fish `--print-rusage-self` | R; N5 | Truthful native shell counters/units; unavailable POSIX fields explicit. |
 | fish `-i`, `--interactive`; implicit interactivity | R/U; N6 | Actual native reader/terminal selection and mode restoration; not captured echo. |
 | fish `-h`, `--help` | R; N9 | Installed native help and dependency/viewer errors. |
-| fish_indent default stdin/file operands | R standalone and builtin; N3 | Reuse formatter with checked native paths, input/error/status behavior. Windows entrypoint currently exits 2 without parsing any flags. |
-| fish_indent `--dump-parse-tree` (long-only; internal `P` tag is not a registered short `-P`) | R; N3 | Real parse-tree diagnostic output. |
-| fish_indent `-i`, `--no-indent`; `--only-indent`; `--only-unindent` | R; N3 | Correct shared formatting transformations. |
-| fish_indent `-w`, `--write` | R; N3 | Actual overwrite, denied/locked/write-error diagnostics and file lifetime. |
-| fish_indent `-c`, `--check` | R; N3 | No unwanted rewrite; correct differences/status across operands. |
-| fish_indent `--html`, `--ansi`, `--pygments` | R; N3 | Actual selected format/escaping/token output, not flag recognition. |
-| fish_indent `-v`, `--version`; `--` | R; N3 | Real version and option/file boundary. |
+| fish_indent default stdin/file operands | I standalone and builtin N3 | Shared formatter with checked native paths, input/error/status behavior. |
+| fish_indent `--dump-parse-tree` (long-only; no short `-P`) | I N3 | Real parse-tree diagnostic output. |
+| fish_indent `-i`, `--no-indent`; `--only-indent`; `--only-unindent` | I N3 | Shared formatting transformations. |
+| fish_indent `-w`, `--write` | I N3 | Actual overwrite and file/write errors. |
+| fish_indent `-c`, `--check` | I N3 | No rewrite; differences/status across operands. |
+| fish_indent `--html`, `--ansi`, `--pygments` | I N3 | Selected escaping/token output; ANSI honors configured styles without requiring console capability. |
+| fish_indent `-v`, `--version`; `--` | I N3 | Real version and option/file boundary. |
 | fish_indent `-h`, `--help` | R; N9 | Native formatter help matching installed tool. |
 | fish_key_reader default console input | R standalone and builtin; N6 | Exclusive input ownership, key decoding, invalid/nonterminal errors and mode restoration. Windows entrypoint currently exits 2 before parsing. |
 | fish_key_reader `-c`, `--continuous` | R; N6 | Actual continued key capture and exit/EOF/control policy. |
@@ -158,12 +158,10 @@ it resembles a flag. Combined Unix short flags and general option permutation ar
 
 ## Builtin option and subcommand ledger
 
-Authority is the native/Unix registries and the individual parsers under
-[`src/builtins/`](../../src/builtins). All currently native-registered spellings are
-`[`, `cd`, `command`, `echo`, `exit`, `false`, `math`, `path`, `printf`, `pwd`,
-`realpath`, `set`, `test`, `true`, `type`. Other registered Unix spellings are reserved and
-rejected on native dispatch, not delegated to unrelated executables. Parser keywords have the
-separate syntax disposition below. Compiled `return.rs` does not add a native `return` builtin.
+Authority is the native registry and individual parsers under [`src/builtins/`](../../src/builtins).
+The N1 commands remain enabled; N3 additionally enables portable builtins, functions/return,
+events, string/PCRE2, declarative metadata, ordinary read, status and formatter paths inventoried
+below. Reserved later-phase spellings reject rather than falling through to unrelated executables.
 
 ### Help, flag conventions and argument-only commands
 
@@ -174,8 +172,8 @@ This includes `-h/--help` for `abbr`, `argparse`, `bg`, `bind`, `block`, `break`
 `function`, `functions`, `history`, `jobs`, `math`, `pwd`, `random`, `read`,
 `realpath`, `return`, `set`, `set_color`, `source`/`.`, `status`, `ulimit`, `wait`;
 also `path -h/--help`, `path SUBCOMMAND -h/--help`, `string -h/--help` and
-`string SUBCOMMAND -h/--help`. Native echo/printf additionally reject leading help-shaped
-arguments through the prototype option guard; upstream echo/printf do not parse help options.
+`string SUBCOMMAND -h/--help`. Echo/printf use their ordinary shared operand parsers,
+not a prototype leading-help guard; upstream echo/printf do not parse help options.
 `count`, `_`, `test`/`[`, `true`/`:` and `false` have no separate help parser;
 do not invent help support or reinterpret test expression strings as GNU options.
 
@@ -186,29 +184,29 @@ actual parser recognizes it, not a new option for argument-only commands.
 
 | Builtin / complete non-help option or operand surface | State / owner | Required native semantics |
 |---|---|---|
-| `echo`: `-n`, `-s`, `-e`, `-E`; text/escape operands | S prototype; N3 complete streams | No newline/no spaces, escape enable/disable and exact bytes; help guard above. |
-| `exit`: optional status; shared return-value parser `--` | S prototype; N3 value/error semantics, N5 job shutdown, N6 console cleanup | Current batch exit request is not full interactive/job shutdown. |
-| `true`, `false`: no parsed options | S no operands; R additional operands; N3 | Preserve success/failure; close prototype guard difference from Unix's ignored operands. `:` alias is R/U N3. |
-| `printf`: FORMAT and operands; no getopt flags | S fixed-C-locale prototype; N3, locale N9 | Existing conversion/width/precision/escape grammar, binary/NUL output and numeric errors. A leading `--` is a format operand, not a claimed terminator. |
-| `math`: expression operands | S argv expressions; N3 | Shared tinyexpr arithmetic/errors; full pipe/stream selection remains N2/N3. |
-| `math`: `-s/--scale ARG`, `-b/--base ARG`, `-m/--scale-mode ARG` | R prototype option guard; N3 | Actual base/precision/rounding semantics; compiling parser branches does not enable flags. |
-| `set`: `-l/--local`, `-g/--global`, `-x/--export`, `-u/--unexport`, `-q/--query`, `-e/--erase`; assignment/list/slice operands and `--` | S restricted prototype; N3 scope/list behavior, N1 native PATH/export/cwd boundaries | Native export collision/identity validation; complete Unix list/assignment behavior is not claimed from this subset. |
-| `set`: `-f/--function`, `-n/--names`, `-L/--long`, `-S/--show`, `-a/--append`, `-p/--prepend`, `--path`, `--unpath`, `--no-event` | R; N3 (N1 native path/export boundary remains required) | Real scope, inspection, list/path-variable and event semantics, not accepted no-ops. |
+| `echo`: `-n`, `-s`, `-e`, `-E`; text/escape operands | I N3 | Exact newline/spacing/escape and byte semantics. |
+| `exit`: optional status; shared return-value parser `--` | I N3 batch; N5 job shutdown, N6 console cleanup | Real batch exit/status; no interactive/job shutdown claim. |
+| `true`, `false`, `:`: no parsed options | I N3 | Shared success/failure and ignored-operand behavior. |
+| `printf`: FORMAT and operands; no getopt flags | I N3 fixed-C; locale N9 | Shared conversions, widths, precision, escapes, binary/NUL output and numeric errors; leading `--` is a format operand. |
+| `math`: expression operands | I N3 | Shared arithmetic/errors and argv/stream selection. |
+| `math`: `-s/--scale ARG`, `-b/--base ARG`, `-m/--scale-mode ARG` | I N3 | Shared base/precision/rounding semantics. |
+| `set`: `-l/--local`, `-g/--global`, `-x/--export`, `-u/--unexport`, `-q/--query`, `-e/--erase`; assignment/list/slice operands and `--` | I N3; N1 native boundaries | Shared scopes/lists/slices/status, checked native PATH/export/cwd identities. |
+| `set`: `-f/--function`, `-n/--names`, `-L/--long`, `-S/--show`, `-a/--append`, `-p/--prepend`, `--path`, `--unpath`, `--no-event` | I N3 | Function scope, inspection, list/path-variable behavior and event suppression. |
 | `set`: `-U/--universal` | R; N4 | Durable cross-process universal storage, never silent global assignment. |
-| `argparse`: `-s/--stop-nonopt`, `-i/--ignore-unknown`, `-u/--move-unknown`, `-U/--unknown-arguments ARG`, `-n/--name ARG`, `-x/--exclusive ARG`, `-S/--strict-longopts`, `-N/--min-args ARG`, `-X/--max-args ARG`; option specifications/validation commands | R/U; N3 | Existing dynamic option grammar and evaluator validation, exact `_flag_*` scopes and argv boundaries. |
-| `builtin`: `-n/--names`, `-q/--query`; execution decoration | R/U; N3 | Actual native registry/query/decorator behavior, not Unix-only names. |
-| `contains`: `-i/--index`; needle/list | R/U; N3 | Exact membership/index/status and empty/Unicode values. |
-| `count`: argv plus newline-terminated stdin records; no parsed options | R/U; N3 | Preserve newline count versus incomplete last record and zero status. |
-| `random`: seed/range/step operands and `choice` mode; no non-help flags | R/U; N3 | Real OS entropy plus existing seeded/range/choice semantics. |
-| `break`, `continue`, `return`: no non-help flags; return optional status | R/U; N3 | Loop/function scope and value/error restoration; not merely linked exit-value helpers. |
-| `eval`, `emit`, `source`/`.`: no non-help flags; source filename/stdin `-` and argv, emit event/arguments, eval source operands | R/U; N3 | Same-shell evaluator/noninteractive reader, exact scope/filename/line/status; generic/variable events are not OS signals. |
-| `block`: `-e/--erase`, `-l/--local`, `-g/--global` | R/U; N3 | Real language-event blocking/queued dispatch at scope boundaries. |
-| `function`: `-d/--description ARG`, `-e/--on-event ARG`, `-v/--on-variable ARG`, `-a/--argument-names ARG`, `-S/--no-scope-shadowing`, `-V/--inherit-variable ARG`, `-w/--wraps ARG` | R/U; N3 | Actual in-memory definitions/scopes/events and declarative wrapping metadata; disk autoload N4, active completion N7. |
+| `argparse`: `-s/--stop-nonopt`, `-i/--ignore-unknown`, `-u/--move-unknown`, `-U/--unknown-arguments ARG`, `-n/--name ARG`, `-x/--exclusive ARG`, `-S/--strict-longopts`, `-N/--min-args ARG`, `-X/--max-args ARG`; specifications/validation | I N3 | Shared dynamic option grammar, `_flag_*` scopes, argv boundaries and embedded `_validate_int` validation. |
+| `builtin`: `-n/--names`, `-q/--query`; execution decoration | I N3 | Actual native registry/query/decorator behavior. |
+| `contains`: `-i/--index`; needle/list | I N3 | Exact membership/index/status and empty/Unicode values. |
+| `count`: argv plus newline-terminated stdin records; no parsed options | I N3 | Newline count versus incomplete last record and zero status. |
+| `random`: seed/range/step operands and `choice` mode; no non-help flags | I N3 | OS entropy and shared seeded/range/choice semantics. |
+| `break`, `continue`, `return`: no non-help flags; return optional status | I N3 | Loop/function scope and value/error restoration. |
+| `eval`, `emit`, `source`/`.`: no non-help flags; filename/stdin `-`, argv, event/arguments, source operands | I N3 | Same-shell evaluator/reader, scope/filename/line/status; generic/variable events are not OS signals. |
+| `block`: `-e/--erase`, `-l/--local`, `-g/--global` | I N3 | Language-event blocking and queued dispatch at scope boundaries. |
+| `function`: `-d/--description ARG`, `-e/--on-event ARG`, `-v/--on-variable ARG`, `-a/--argument-names ARG`, `-S/--no-scope-shadowing`, `-V/--inherit-variable ARG`, `-w/--wraps ARG` | I N3 | In-memory definitions/scopes/events and wrapping metadata; general disk autoload N4, active completion N7. |
 | `function`: `-s/--on-signal ARG`, `-j/--on-job-exit ARG`, `-p/--on-process-exit ARG` (including caller/self forms) | R/U; N5 | Real native lifecycle/control policy; no fictional Unix signal/pgroup handlers. |
-| `functions`: `-e/--erase`, `-d/--description ARG`, `-n/--names`, `-a/--all`, `-q/--query`, `-c/--copy`, `-D/--details`, `--no-details`, `-v/--verbose`, `-H/--handlers`, `-t/--handlers-type ARG`, `--color ARG`; definition/name operands | R/U; N3 in-memory, N4 disk autoload, N5 process handlers, N7 highlighted display | Preserve function metadata/copy/tombstones/handler ownership; querying an autoloadable definition must use the real loader. |
-| `complete`: `-x/--exclusive`, `-f/--no-files`, `-F/--force-files`, `-r/--require-parameter`, `-p/--path ARG`, `-c/--command ARG`, `-s/--short-option ARG`, `-l/--long-option ARG`, `-o/--old-option ARG`, `-d/--description ARG`, `-a/--arguments ARG`, `-e/--erase`, `-u/--unauthoritative`, `-A/--authoritative`, `-n/--condition ARG`, `-w/--wraps ARG`, `-k/--keep-order` | R/U; N3 declarative registration, N7 evaluated consumers | Preserve existing definitions, option aliases and registration semantics; do not equate metadata with working completion. |
-| `complete`: `-C/--do-complete[=ARG]`, `--escape`, `--color ARG` | R/U; N7 | Real evaluated completion, native discovery, wrappers/cancellation/ranking and output escaping/color policy. |
-| `abbr`: `-a/--add`, `-c/--command ARG`, `--position ARG`, `-r/--regex ARG`, `--set-cursor[=ARG]`, `--description[=ARG]`, `-f/--function ARG`, `--rename`, `-e/--erase`, `-q/--query`, `-s/--show`, `--list`, `-g/--global`, `-U/--universal`, `--color ARG` | R/U; N3 declarative metadata, N7 expansion/display; N4 legacy universal-state interaction | Preserve current accepted/deprecated option diagnostics (no invented short aliases for long-only spellings), regex/function expansion and cursor semantics; registration alone is not editor support. |
+| `functions`: `-e/--erase`, `-d/--description ARG`, `-n/--names`, `-a/--all`, `-q/--query`, `-c/--copy`, `-D/--details`, `--no-details`, `-v/--verbose`, `-H/--handlers`, `-t/--handlers-type ARG`, `--color ARG`; names/definitions | I N3 in-memory and highlighted batch display; disk autoload N4, process handlers N5 | Metadata/copy/tombstones and generic/variable handlers; embedded `_validate_int` is the sole autoload exception. |
+| `complete`: `-x/--exclusive`, `-f/--no-files`, `-F/--force-files`, `-r/--require-parameter`, `-p/--path ARG`, `-c/--command ARG`, `-s/--short-option ARG`, `-l/--long-option ARG`, `-o/--old-option ARG`, `-d/--description ARG`, `-a/--arguments ARG`, `-e/--erase`, `-u/--unauthoritative`, `-A/--authoritative`, `-n/--condition ARG`, `-w/--wraps ARG`, `-k/--keep-order` | I N3 declarative metadata | Definitions, erase, wrappers and replay; authority aliases retain shared compatibility behavior, not new authority functionality. Active evaluation remains N7. |
+| `complete`: `-C/--do-complete[=ARG]`, `--escape`; `--color ARG` | R/U N7 active completion; I N3 metadata display color | Evaluated completion remains rejected; metadata serialization/display color is available without an editor. |
+| `abbr`: `-a/--add`, `-c/--command ARG`, `--position ARG`, `-r/--regex ARG`, `--set-cursor[=ARG]`, `--description[=ARG]`, `-f/--function ARG`, `--rename`, `-e/--erase`, `-q/--query`, `-s/--show`, `--list`, `-g/--global`, `-U/--universal`, `--color ARG` | I N3 declarative storage/display and shared deprecated-option diagnostics; durable universals N4, active expansion N7 | Regex/function/cursor metadata serialize and replay; registration is not editor expansion or universal persistence. |
 | `history`: `search`, `delete`, `clear`, `merge`, `save`, `clear-session`, `append`; option aliases `--search`, `--delete`, `--clear`, `--merge`, `--save` | R/U; N4 storage/session behavior, N7 active search UI | Actual private/session/cross-process history and durable merge/recovery. |
 | `history`: `-p/--prefix`, `-c/--contains`, `-e/--exact`, `-t/--show-time[=ARG]`, `-n/--max ARG`, `-z/--null`, `-C/--case-sensitive`, `-R/--reverse`, `--color ARG` | R/U; N4 command behavior, N7 interactive consumer, N9 localized presentation | Real filtering/order/timestamps/byte output and storage errors. |
 | `jobs`: `-c/--command`, `-g/--group`, `-l/--last`, `-p/--pid`, `-q/--quiet/--query`; targets | R/U; N5 | Real tracked jobs/PIDs/counters; group output must have declared native meaning, never fake POSIX pgroups. |
@@ -219,14 +217,14 @@ actual parser recognizes it, not a new option for argument-only commands.
 | `time` decorator: no builtin option parser | R; N5 | Actual elapsed/CPU/resource accounting for commands/pipelines/shell; no fake zero POSIX measurements. |
 | `bind`: `-a/--all`, `-e/--erase`, `-f/--function-names`, `-k/--key`, `-K/--key-names`, `-L/--list-modes`, `-M/--mode ARG`, `--preset`, `-m/--sets-mode ARG`, `-s/--silent`, `--user`, `--color ARG`; key/action operands | R/U; N6 core binding dispatch, N7 full modes/actions | Same logical key identity as reader, correct preset/user tables and mode transitions; every advertised action must work. |
 | `breakpoint`: no non-help flags | R/U; N6 | Real nested reader and outer scope/input/mode restoration. |
-| `read`: `-a/--array/--list`, `-d/--delimiter ARG`, `-x/--export`, `-f/--function`, `-g/--global`, `-L/--line`, `-l/--local`, `-n/--nchars ARG`, `-z/--null`, `-t/--tokenize`, `--tokenize-raw`, `-u/--unexport`; variable operands | R/U; N3 noninteractive | N2 buffered input without overread or pipe seeks; delimiters/NUL/limits/EOF and assignments preserve fish semantics. |
+| `read`: `-a/--array/--list`, `-d/--delimiter ARG`, `-x/--export`, `-f/--function`, `-g/--global`, `-L/--line`, `-l/--local`, `-n/--nchars ARG`, `-z/--null`, `-t/--tokenize`, `--tokenize-raw`, `-u/--unexport`; variables | I N3 noninteractive | Buffered shared cursor without overread/pipe seeks; delimiters/NUL/limits/EOF and assignment scopes. |
 | `read`: `-U/--universal` | R/U; N4 | Real durable universal assignment. |
 | `read`: `-c/--command ARG`, `-p/--prompt ARG`, `-P/--prompt-str ARG`, `-R/--right-prompt ARG`, `-S/--shell`, `-s/--silent`; terminal use of ordinary flags | R/U; N6 | Actual interactive reader, no competing input owner and restoration after EOF/errors. |
 | `commandline`: `-a/--append`, `-i/--insert`, `--insert-smart`, `-r/--replace`, `-b/--current-buffer`, `-j/--current-job`, `-p/--current-process`, `-s/--current-selection`, `-t/--current-token`, `-c/--cut-at-cursor`, `-f/--function`, `-x/--tokens-expanded`, `--tokens-raw`, `-o/--tokenize`, `-I/--input ARG`, `-C/--cursor`, `-B/--selection-start`, `-E/--selection-end`, `-L/--line`, `--column`, `--is-valid`, `--forward-jump ARG`, `--backward-jump ARG`, `--forward-jump-till ARG`, `--backward-jump-till ARG` | R/U; N6 | Real reader buffer/scopes/actions, character offsets and outside-reader errors. `--input` remains an inventoried legacy override, not a promised new public API. |
 | `commandline`: `-S/--search-mode`, `-P/--paging-mode`, `--paging-full-mode`, `--search-field`, `--showing-suggestion` | R/U; N7 | Actual search/pager/suggestion state. `--paging-full-mode` is long-only in the current short-option string despite its internal `F` tag. |
 | `set_color`: `-f/--foreground ARG`, `-b/--background ARG`, `--underline-color ARG`, `-o/--bold`, `-u/--underline[=ARG]`, `-i/--italics[=ARG]`, `-d/--dim`, `-r/--reverse[=ARG]`, `-s/--strikethrough[=ARG]`, `--theme ARG`, `--reset`, `-c/--print-colors`; color/reset operands | R/U; N6 basic styles, N7 full capabilities/themes | Existing shared text-face parser, real VT/console capability policy and redirected-byte behavior; no terminal-only probe on ordinary redirected output. |
-| `fish_indent`, `fish_key_reader` builtin spellings | R/U; N3 formatter, N6 key reader; help N9 | All options individually inventoried in the executable ledger apply to the shared implementation too. |
-| `_` (gettext): string operands, no parsed options | R/U; N9 | Real catalogs/fallback; no registered `gettext` alias. |
+| `fish_indent`, `fish_key_reader` builtin spellings | I N3 formatter; R/U N6 key reader; help N9 | Executable ledger options apply to the shared implementation. |
+| `_` (gettext): string operands, no parsed options | I N3 fixed-C/minimal fallback; full catalogs N9 | Real fallback needed by `_validate_int`; no registered `gettext` alias or full locale/catalog selection claim. |
 
 ### N1 filesystem/discovery options
 
@@ -244,7 +242,7 @@ additional script/platform providers. Help stays N9. Source: [`path.rs`](../../s
 | `pwd`: `-L/--logical`, `-P/--physical` | I; N1 | Logical spelling versus actual owned-directory name/identity; errors for unnameable/deleted physical cwd. |
 | `realpath`: default physical; `-s/--no-symlinks`; `--` | I; N1 | Native lexical versus physical resolution, reparse/long/UNC handling and missing final component versus missing parent. No nonexistent `-L/-P` options invented. |
 | `command`: `-a/--all`, `-q/--query/--quiet`, `-s/--search`, short-only `-v`; execution decoration | I; N1 | One ordered native provider resolver, no cwd injection, explicit-path bypass, denied/missing diagnostics and agreement with actual launch. `-v` aliases `-s`, not `--version`. |
-| `type`: `-a/--all`, `-s/--short`, `-f/--no-functions`, `-t/--type`, `-p/--path`, `-P/--force-path`, `-q/--query/--quiet`, `--color ARG` | I native builtin/external lookup N1; U function/autoload/highlight portions N3/N4/N7 | Resolver and registry match actual execution. Color parses but native function-definition highlighting is compiled out; do not claim a working native highlighted function display. |
+| `type`: `-a/--all`, `-s/--short`, `-f/--no-functions`, `-t/--type`, `-p/--path`, `-P/--force-path`, `-q/--query/--quiet`, `--color ARG` | I N1 lookup and N3 native functions/highlighted batch display; disk autoload N4 | Registry/resolver match execution; actual in-memory function definitions and configured highlighted output are enabled, not active editor completion. |
 | Every `path` subcommand below: `-q/--quiet`, `-z/--null-in`, `-Z/--null-out`; source also accepts `--key ARG` through common parsing | I; N1 | Common newline/NUL/argv separation and statuses. Only `sort` consumes `--key`; accepted-but-unused `--key` elsewhere is not a working sort/key feature. |
 | `path basename`: `-E/--no-extension` plus common flags | I; N1 | Root-aware basename and lexical extension removal, no file open required. |
 | `path dirname`: common flags | I; N1 | Preserve drive/UNC/share/extended roots and separator rules. |
@@ -264,9 +262,9 @@ additional script/platform providers. Help stays N9. Source: [`path.rs`](../../s
 
 ### String subcommands and options
 
-Every row is **R/U, N3**: `string` is reserved but its module and PCRE2 consumer are Unix-only.
-The requirement is the existing shared fish implementation with native buffered input/output,
-Unicode character/cell semantics and PCRE2-32, not Win32/.NET string/regex substitutions.
+Every row is **I, N3**, through the shared implementation and native buffered byte streams,
+Unicode character/cell semantics and UTF-32 PCRE2. Reserved PUA preserves shared fish encoded-byte
+representation and literal/raw-byte distinction; this is not a new Unicode counting convention.
 Each subcommand's leading `-h/--help` is separately R/U N9 as above. Authority:
 [`string.rs`](../../src/builtins/string.rs) and each enumerated `builtins/string/` child.
 
@@ -289,9 +287,9 @@ Each subcommand's leading `-h/--help` is separately R/U N9 as above. Authority:
 
 ### Status subcommands/options and platform limits
 
-All `status` rows are **R/U**: the builtin is not native-registered. The following is the complete
-`StatusCmd` and option-parser surface from [`status.rs`](../../src/builtins/status.rs), not a
-claim that compiling parser/proc metadata provides the command.
+`status` is native-registered. The N3 rows below are **I** for batch parser/build context;
+later-owner rows retain their explicit unavailable policy or truthful noninteractive context,
+not a claim of enabled startup, job control, terminal negotiation or installed resources.
 
 | Status operation / option aliases | Owner | Required native semantics |
 |---|---|---|
@@ -316,12 +314,11 @@ establish every POSIX soft/hard/per-user category. N5 accounting is not quota en
 
 ### Parser-owned registered spellings
 
-`!`/`not`, `and`, `or`, `begin`/`end`, `for`, `if`/`else` are S restricted batch syntax;
-their complete language/error/side-effect behavior remains N3. `while`, `switch`/`case` and
-`function` are R deferred N3, with function event options owned above. `time` is R N5 and
-`exec` X/R permanently. These are grammar/decorator forms, not independently executable generic
-builtin functions. Shared parser helpers can compile while affected jobs remain rejected before
-forbidden expansion/launch. POSIX fork has no executable CLI/builtin option to enable.
+`!`/`not`, `and`, `or`, `begin`/`end`, `for`, `if`/`else`, `while`, `switch`/`case`
+and `function` are I N3 batch syntax, including scope/error/side-effect behavior and substitutions.
+Function event options follow the split above. Background syntax/jobs and `time` remain R N5;
+`exec` is X/R permanently. Rejection precedes forbidden expansion/launch. POSIX fork has no
+executable CLI/builtin option to enable.
 
 ## Declared prerequisites and observed host matrix
 
@@ -847,3 +844,97 @@ commit ID. `--version` remains an N3 CLI delivery, not a supported N2 query.
 N3 inherits capture/input/deferred-output contracts, not already-enabled substitutions or functions.
 N4 inherits actual workers/debounce/wakeups; N5 inherits process/registration lifetimes, not
 already-enabled background jobs/control events. POSIX fork, same-PID exec and fg/bg remain excluded.
+
+## N3 verified evidence record
+
+Source revision: **`861a9bdc6`**, branch **`platform/windows/batch-parity`**. Historical N1/N2
+records are unchanged phase evidence, including their then-deferred N3 boundaries; they do not
+override this ledger. Artifacts were built before this source commit and report
+`fish, version 4.9.3-152-g9b66558e8-dirty`, not an embedded `861a9bdc6`.
+The actual current `.github/workflows/test.yml` native gate body (lines 261–360) ran locally,
+exit 0, with explicit SDK 10.0.26100.0, MSVC 14.51.36231 and Rust 1.95.0.
+This is local execution, not a remote CI or future-phase claim.
+
+### Option/subcommand-to-family evidence map
+
+Each mapping includes **every non-help option, short/long alias and operand/subcommand listed
+in its referenced ledger row**, not merely the three aggregate gate names. The source suites
+are `tests/windows_n3/<file>.rs`. Compatibility/ineffective options remain identified above;
+mapping an option to a family does not turn legacy no-ops into features. Help stays N9.
+
+| Required gate / behavioral family | Source suite | Mapped portable surface |
+|---|---|---|
+| `N3_LANGUAGE` / `control-functions-events` | `language.rs` | All grammar forms above; `function` N3 options; `functions` in-memory query/list/erase/copy/description/details/handlers/color; `block`, `emit`, loop control/return, local/function/global scope and variable events. Process/signal handlers excluded N5. |
+| `N3_LANGUAGE` / `portable-builtins` | `builtins.rs` | Every listed `argparse`, `builtin`, `contains`, `count`, `random`, `echo`, `printf`, `math`, `set` non-universal option/operand; `true`/`false`/`:`, `exit`, portable test expressions, `type` functions/highlighted display, status parser/build/features aliases. `_` fallback and embedded `_validate_int` validation/override/tombstone; no general disk autoload. |
+| `N3_LANGUAGE` / `string-regex` | `strings.rs` | All rows and aliases for `collect`, `escape`, `unescape`, `join`, `join0`, `length`, `lower`, `upper`, `match`, `pad`, `repeat`, `replace`, `shorten`, `split`, `split0`, `sub`, `trim`; UTF-32 regex captures/replacements/named scopes, streams, binary provenance and invalid inputs. |
+| `N3_LANGUAGE` / `declarative-metadata` | `metadata.rs` | Every declarative `complete` option/alias, wrappers and metadata `--color`; every `abbr` declaration/query/list/show/rename/erase/display option, regex/function/cursor/command metadata and compatibility diagnostics. Serialize/erase/replay and independent storage, not active completion/expansion. |
+| `N3_CAPTURE` / `capture-pipelines` | `capture.rs` | Quoted/unquoted/nested substitutions, functions/blocks in pipelines, explicit empty and NUL separation, shared cursor/redirects, statuses, bounded byte/element retention and held-descendant completion. Genuine capture fault aborts enclosing substitution by provenance; real child status 122 and later captures are not falsely classified. |
+| `N3_CAPTURE` / `buffered-read` | `read.rs` | Every ordinary `read` option/alias above: arrays/lists, delimiters/line/NUL, character limits, tokenization/raw tokens, scopes/export/unexport, EOF/status/errors and shared cursor. Universal N4 and terminal/prompt modes N6 excluded. |
+| `N3_SCRIPTS` / `invocation-source-profile` | `scripts.rs` | Fish `-N`, repeated `-c`, script/stdin/`--`, `-n`, `-f`, `-v`, `-d`, `-o`, `-p` and all long aliases, category enumeration and nonzero retired `-D`; `source`/`.` and `eval` scope/argv/filename/line behavior. Startup N4, resources N5, interactive N6 and help N9 excluded. |
+| `N3_SCRIPTS` / `formatter` | `formatter.rs` | Standalone and builtin fish_indent stdin/files, all non-help formatting/check/write/version/terminator options, parse-tree, HTML/ANSI/Pygments; configured ANSI styles do not depend on console detection. |
+
+Both native debug/release harnesses discovered and passed exactly `N3_LANGUAGE`, `N3_CAPTURE`,
+`N3_SCRIPTS`: three tests each, zero ignored, all required IDs and **16 family/artifact
+PASS-CASE records per harness** enforced by CI. N1/N2 likewise each passed three tests in each
+harness. Prototype registry: 15 cases against both artifacts, **30 PASS**.
+Runtime initialization and text provenance each passed one test in both harness profiles.
+Native leaf/library suites passed with zero ignored: widestring **25**, tempfile **4**,
+common **5**, util **1**, fish **52**; tempfile integration **2** and W2 codec filter **5** passed.
+Retained Unix evidence: **184** library tests plus **11/11** portable files passed, zero skips.
+
+Additional real debug/release isolated-root smokes executed a Unicode/space-path UTF-8-BOM/CRLF
+script with functions/switch, block pipeline to `string upper`, UTF-32 named capture and Unicode
+argv. Actual profiling produced 884 bytes; both standalone formatters produced correct nested
+indentation. N3 exercised only `-N`, not startup, persistent state, jobs, interactive mode or help.
+Minimum Rust 1.85 fish/formatter/probe builds succeeded. With minimum fish selected as the
+debug artifact against stable release, N1/N2/N3 each passed three tests, zero failed/ignored/
+filtered, with all 18 root artifact PASS records and all 16 N3 family PASS-CASE records.
+
+### Reproduction commands and exercised artifacts
+
+Use the x64 SDK developer environment and fixture policy recorded above; select SDK `10.0.26100.0`.
+Native PCRE2 is built with `PCRE2_SYS_STATIC=1`. The target remains `x86_64-pc-windows-msvc`,
+development profile `--no-default-features`; no default-feature release/install certification is implied.
+
+```powershell
+$env:PCRE2_SYS_STATIC = '1'
+cargo +stable build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin fish_indent --bin windows_native_probe
+cargo +stable build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish --bin fish_indent
+$env:FISH_NATIVE_TEST_BIN = (Resolve-Path target/x86_64-pc-windows-msvc/debug/fish.exe).Path
+$env:FISH_NATIVE_TEST_RELEASE_BIN = (Resolve-Path target/x86_64-pc-windows-msvc/release/fish.exe).Path
+cargo +stable test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n3 -- --list
+cargo +stable test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n3 -- --nocapture
+cargo +stable test --locked --target x86_64-pc-windows-msvc --no-default-features --release --test windows_n3 -- --nocapture
+$env:RUSTFLAGS = '-C debuginfo=1'
+cargo +1.85.0 build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin fish_indent --bin windows_native_probe --target-dir target/windows-msrv185
+Remove-Item Env:RUSTFLAGS
+$env:FISH_NATIVE_TEST_BIN = (Resolve-Path target/windows-msrv185/x86_64-pc-windows-msvc/debug/fish.exe).Path
+cargo +stable test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n1 --test windows_n2 --test windows_n3 -- --nocapture
+```
+
+The minimum-executable inherited N1 tests also require `FISH_NATIVE_N1_UNC_ROOT` and the native
+filesystem fixtures documented above. CI evidence was written under `target/n3-gate-results/`
+locally using the workflow's gate logic. Those development logs are not packaged shell assets.
+Retained Unix checks used Ubuntu/Rust `1.92.0`, target directory
+`/tmp/fish-windows-goals-unix-target`, `cargo test --locked --no-default-features --lib`, and
+`python3 tests/test_driver.py --max-concurrency 4 <binary-directory>` with:
+`functions`, `function-definition`, `function`, `function-capture`, `string`, `string-advanced`,
+`math`, `argparse`, `read`, `invocation`, `eval` under `tests/checks/*.fish`.
+
+| Exercised development artifact | SHA-256 |
+|---|---|
+| `target/x86_64-pc-windows-msvc/debug/fish.exe` | `92bff77867557cb3f4383e04b1630c9daf107f60ef2701c116cef92c963bd89c` |
+| `target/x86_64-pc-windows-msvc/debug/fish_indent.exe` | `808365f060b0befa7e905887ed6270fa3f4a190031e1a2e5dfcd1b928b0f7b3d` |
+| `target/x86_64-pc-windows-msvc/release/fish.exe` | `00dd614df551a35a326bb869692523ba999fb324f484d13c3c53989e7cea9f34` |
+| `target/x86_64-pc-windows-msvc/release/fish_indent.exe` | `4a9b152b86cd0a7bb5277fc54080b6bb211df581c8c196a267124008fb94c006` |
+| `target/windows-msrv185/x86_64-pc-windows-msvc/debug/fish.exe` | `c67549bc8b13213c127e9b649299c2f4de29e08d2786b5a62045ed2b0fa6c13c` |
+| `target/windows-msrv185/x86_64-pc-windows-msvc/debug/fish_indent.exe` | `f6b42a063dba836f61696eadf352c42f669ca65261ba38b21b96d661ab809609` |
+
+The isolated batch-context smoke also checked `status current-command`/`current-commandline`
+against shared noninteractive behavior: program name `fish` and an empty interactive commandline.
+It does not pretend that noninteractive evaluation supplies N6 reader command tracking.
+
+Remaining ownership is precise: durable universal variables, disk autoload, startup/history N4;
+background/jobs/native lifecycle and control N5; interactive reader/input N6; active completion,
+abbreviation expansion, suggestions and editor UI N7; additional providers/platform categories N8;
+installed help and full locale/catalog selection N9. POSIX fork, same-PID exec and fg/bg stay excluded.

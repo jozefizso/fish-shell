@@ -2,18 +2,18 @@
 
 ## Current native registry and option ownership
 
-The native source registry currently enables `[`, `cd`, `command`, `path`, `pwd`, `realpath`,
-`test`, `type` alongside prototype `echo`, `exit`, `false`, `math`, `printf`, `set`, `true`.
-N1 additions are implemented and exercised for the recorded native development matrix. Source
-inclusion alone does not establish other capabilities: remaining reserved spellings are rejected, and many
-implementation modules remain Unix-only. `return.rs` is compiled for shared exit-value parsing
-without registering native `return`. Functions/autoload/highlight/help are not implied by `type`.
+N1 filesystem/discovery builtins and N3 portable batch families are implemented at source
+commit `861a9bdc6`: all string subcommands, argparse, function/control-flow helpers, in-memory
+functions/events, declarative complete/abbr, buffered noninteractive read, status/type,
+math options and local/global/function-scoped set operations use shared algorithms.
+Function definitions and batch syntax colorization work; active editor operations do not.
+Source inclusion alone does not establish later state, job, terminal, platform or help services.
 
 The authoritative [option/subcommand ledger](coverage.md#builtin-option-and-subcommand-ledger)
 enumerates each builtin flag/alias/subcommand, its current supported/rejected/unavailable
 state, required semantics and owner. The [executable CLI ledger](coverage.md#executable-cli-option-ledger)
 also covers every fish, fish_indent and fish_key_reader option, including their builtin tool
-spellings. The native formatter/key-reader executable stubs still reject all use.
+spellings. Native standalone/builtin formatter modes are delivered; key-reader remains N6 and help N9.
 
 Ordinary filesystem namespaces, metadata, timestamps/same-file and native permission options are
 N1; Unix-only identity/mode/device options and quotas are N8; help is N9. Portable batch/string/
@@ -22,12 +22,14 @@ to N6 and evaluated completion/advanced editing to N7. POSIX `exec`, `fg`, `bg` 
 unsupported with reserved-name rejection and no external fallback. Faithful POSIX fork is excluded.
 N11 reconciles these owners' completed behavior, not a new destination for missing options.
 
-Prototype option restrictions remain material: math flags are rejected despite the parser code;
-set accepts only its local/global/export/unexport/query/erase subset; true/false reject additional
-operands; help tooling is unavailable. N1 `path/test` ordinary types/access use the shared native
-metadata/classification services, while Unix-only type/ownership/mode predicates explicitly fail
-instead of silently succeeding through compiled-out branches. See the
-[N1 option table](coverage.md#n1-filesystemdiscovery-options) for every operand/flag category.
+Prototype math/set/boolean restrictions are removed: math options and stdin operate, set retains
+list/slice/path/event semantics, and true/false/colon follow shared ignored-operand behavior.
+Universal state remains nonzero unsupported until N4; ordinary read is not an interactive prompt.
+The `_` gettext helper supplies the real fixed-C/minimal fallback used by the embedded validator,
+not full N9 catalog selection. N1 ordinary path/test metadata works while Unix-only type/identity
+categories remain explicit N8 errors. [N3 mapping/evidence](coverage.md#n3-verified-evidence-record)
+records exact behavioral families; the [N1 option table](coverage.md#n1-filesystemdiscovery-options)
+retains every filesystem operand/flag category.
 
 The [N1 evidence record](coverage.md#n1-verified-evidence-record) records passing debug/release
 gates, minimum-Rust executable verification, native/Unix regressions and actual runtime smokes.

@@ -1,6 +1,15 @@
 # Expansion, command discovery, completion, and highlighting
 
-## Scope and evidence
+## Verified N3 implementation
+
+Native command substitution now follows the shared expansion order and separated-element rules,
+including nested functions/blocks and bounded output. Genuine deferred-buffer retention faults
+abort the affected expansion without mistaking native exit 122 for an I/O failure.
+Declarative completion/abbreviation storage and batch syntax colorization are implemented.
+This is not active Tab completion, suggestions or editor abbreviation expansion: those remain N7.
+See [N3 evidence and option mapping](coverage.md#n3-verified-evidence-record).
+
+## Historical scope and evidence
 
 Source-grounded component mappings follow; none is a claim of an exercised Windows port. The [coverage ledger](coverage.md) inventories source files; [07](07-filesystem-paths-wildcards.md) covers underlying path/directory operations, [09](09-history-functions-autoload.md) covers autoload state, and [13](13-binaries-and-assets.md) covers the executable fish-script/Python assets that the engine loads.
 
@@ -42,4 +51,4 @@ Source-grounded component mappings follow; none is a claim of an exercised Windo
 
 ## Classification and limits
 
-Matching, ranking and syntax/color roles are **portable logic**. Accounts, executable search, filesystem traversal/identity, permissions and process-backed completion are **POSIX-backed boundaries**. The entire shipped completion/helper layer needs the [asset audit](13-binaries-and-assets.md), not merely a replacement `readdir`. Proposed API mappings do not demonstrate matching Windows behavior; every scenario above remains to be exercised by a port.
+Matching, ranking and syntax/color roles are **portable logic**. Accounts, executable search, filesystem traversal/identity, permissions and process-backed completion cross **host-backed boundaries**. The original proposed scenarios were not execution evidence; the N1/N3 records delimit actual support. Full programmable editor completion and shipped helper breadth remain N7/N9, not implied by stored declarations or batch highlighting.

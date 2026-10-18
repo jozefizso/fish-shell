@@ -4,7 +4,7 @@ This directory maps fish components to their Linux/POSIX dependencies and native
 
 ## Current status and planning entry points
 
-A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/cwd/discovery/globs and N2 streaming I/O/runtime ownership are verified for the recorded host/volume/feature matrix.** It retains the existing evaluator and real native streams/environment/children; it is not yet a full interactive Windows shell. See the explicit SMB glob capability limit below.
+A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/cwd/discovery/globs, N2 streaming I/O/runtime ownership and N3 portable batch language are verified for the recorded host/volume/feature matrix.** It retains fish's existing evaluator and real native streams/environment/children; it is not yet an interactive Windows shell. See the explicit SMB glob capability limit below.
 
 - [GOAL.md](GOAL.md) records the completed prototype contract and its historical native/Unix verification evidence; that record is not rewritten by the N1 integration.
 - [ROADMAP.md](ROADMAP.md) defines the eleven dependency-ordered phases, semantic decisions and mandatory acceptance gates.
@@ -12,6 +12,7 @@ A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/
 - The [current coverage/ownership ledger](coverage.md#scope-state-vocabulary-and-ownership) enumerates native/runtime modules, all existing workspace crates, asset families and **every executable CLI/builtin subcommand/option** with a source-based state, owning phase and required native semantics. Registry inclusion is not passing evidence; compiled-out Unix code is unavailable, not supported.
 - The [N1 evidence record](coverage.md#n1-verified-evidence-record) is the stable place to add integration revision, exact commands/counts, native debug/release artifacts, applicable Unix results and actual smoke observations after the gates.
 - The [N2 evidence record](coverage.md#n2-verified-evidence-record) records streaming/ordered-redirection/capture/runtime verification and the handoff to batch-language and job consumers.
+- The [N3 evidence record](coverage.md#n3-verified-evidence-record) maps portable options to eight behavioral families and records full batch-language, scripts, UTF-32 PCRE2, buffered read and formatter verification at source commit `861a9bdc6`.
 
 The component analyses and old file counts describe the original pre-prototype audit. Current-source overlays in [filesystem analysis](07-filesystem-paths-wildcards.md) and [builtin analysis](10-builtins.md) distinguish integrating implementations from historical candidate APIs. Historical counts never establish current support, and proposed future scenarios are not passing tests.
 
@@ -19,16 +20,23 @@ Extend the existing owning Windows backends while retaining shared fish language
 
 ## Current native boundary and host evidence
 
-The current native registry contains `[`, `cd`, `command`, `path`, `pwd`, `realpath`, `test`,
-`type` plus prototype `echo`, `exit`, `false`, `math`, `printf`, `set`, `true`. The N1 additions
-are implemented with option-specific restrictions; this does not enable deferred Unix options,
-function/autoload/highlight consumers or help. Deferred reserved commands remain rejected rather
-than falling through to unrelated executables. The native executable currently requires
-`fish -N -c <code> [argv...]`; normal config/script/stdin/interactive modes and standalone
-formatter/key-reader behavior are not made available by their Unix parsers.
+The native registry now includes the portable batch families: functions/control-flow helpers,
+generic/variable events, `argparse`, every `string` subcommand, local/global/function-scoped
+variables, in-memory `abbr`/declarative `complete`, noninteractive `read`, status/type queries and
+standalone/builtin `fish_indent`, alongside N1 filesystem/discovery builtins.
+The [option ledger](coverage.md#builtin-option-and-subcommand-ledger) distinguishes every supported
+option from its later owner. Deferred reserved commands remain rejected instead of falling through
+to unrelated executables.
 
-Ordinary namespace, metadata and native permission options belong to N1. Full portable batch
-language/builtins and formatter flags belong to N3; startup/persistence to N4; jobs/accounting to
+Run command strings, scripts or redirected stdin with `fish -N`; `-c` may be repeated and
+`--` preserves option/argv boundaries. Source/eval, functions, while/switch, nested substitution
+and mixed native/builtin/function/block pipelines use the shared evaluator. Syntax-only, feature,
+version, debug/category/trace/profile options and non-help formatter modes are implemented.
+Normal config/startup, durable universal/history state, user-visible jobs, interactive/key-reader
+operation, evaluated completion and help still require their later phases.
+
+Ordinary namespace, metadata and native permission options were delivered by N1. Full portable batch
+language/builtins and formatter flags are N3; startup/persistence belongs to N4; jobs/accounting to
 N5; interactive/key-reader flags to N6; advanced editor UX to N7; platform-only identity/device/
 quota options and additional script providers to N8; help/assets/localization to N9; release to
 N10. N11 reconciles completed behavior, not forgotten implementation.
@@ -49,15 +57,18 @@ Ordered input/try-input/output/append/noclobber, dup/close and block redirection
 logical endpoint graphs. Native/builtin pipeline combinations stream or use bounded deferred
 internal scheduling; same-image fish children can receive extra logical descriptors through a
 private bridge. Arbitrary native children cannot inherit fish-numbered extra fds.
-Capture and worker/wakeup/process ownership infrastructure is implemented; command substitution,
-function/block mixed pipelines remain N3 and user-visible job/control events remain N5.
-`cd -` belongs to shipped directory-history functions; loader/helper integration remains N4/N9.
+Capture, substitutions, nested functions/blocks and buffered noninteractive reads use the same owned
+I/O infrastructure. Capture completion cancels/drains one available-byte snapshot instead of waiting
+for descendant EOF. User-visible job/control events remain N5. `cd -` belongs to shipped directory-history
+functions; general loader/helper integration remains N4/N9. N3 loads only the embedded `_validate_int`
+core dependency, not a partial normal bootstrap.
 
-The [detailed evidence record](coverage.md#n1-verified-evidence-record) identifies source revision,
-artifact hashes and pre-commit version metadata, exact discovery/execution counts, 76 native
-library tests, preserved prototype regressions, 181 Unix library tests and real native/Unix
-smokes. The actual native workflow gate body also passed locally; no remote CI run is claimed.
-Required fixture absence still **hard-fails**, never skips.
+The [N1 record](coverage.md#n1-verified-evidence-record) and [N2 record](coverage.md#n2-verified-evidence-record)
+preserve their historical artifact and execution details. The [N3 record](coverage.md#n3-verified-evidence-record)
+adds the actual native workflow-body run, native/Unix regression counts, minimum-toolchain executable
+verification and real Unicode BOM/CRLF script/substitution/formatter smokes. No remote CI run is claimed.
+Required fixture absence still **hard-fails**, never skips. Development builds remain `--no-default-features`;
+N10 owns default-feature release/install certification.
 
 ## Portability classifications
 

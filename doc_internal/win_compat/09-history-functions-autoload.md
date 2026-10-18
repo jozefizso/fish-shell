@@ -1,6 +1,16 @@
 # History, functions, abbreviations, and autoloading
 
-## Scope and evidence
+## Verified N3 implementation
+
+Native functions now execute with shared argument/inherited-variable scopes, recursion, return,
+copy/erase metadata and tombstones. Generic/variable handlers and blocked/queued events run on
+the main evaluator thread. In-memory abbreviation and completion declarations survive serialization
+and replay with their semantic fields intact; legacy serializer line order is not rule identity.
+Only the embedded `_validate_int` core dependency autoloads during N3. General disk/embedded
+autoload, public function saving and durable history/universal state remain N4 prerequisites.
+See [N3](GOAL_03.md) and its [coverage record](coverage.md#n3-verified-evidence-record).
+
+## Historical scope and evidence
 
 The source families are [`history/`](../../src/history), [`function.rs`](../../src/function.rs), [`abbrs.rs`](../../src/abbrs.rs), and [`autoload.rs`](../../src/autoload.rs), including their persistence, reader and shipped-script call sites. The following are source observations and proposed native Windows mappings, not build/test results. See the [coverage ledger](coverage.md), [filesystem services](07-filesystem-paths-wildcards.md), [universal variables](08-environment-and-universal-variables.md), and [shipped assets](13-binaries-and-assets.md).
 
@@ -39,4 +49,4 @@ The source families are [`history/`](../../src/history), [`function.rs`](../../s
 
 ## Classification and limits
 
-History search/codec, function/abbreviation models, and most cache logic are **portable**. History persistence/mappings/time formatting, filesystem discovery, and execution of sourced/replacer/editor scripts are **host-backed**. Windows APIs above are candidate mechanisms, not exercised implementations; all validation scenarios remain prospective.
+History search/codec, function/abbreviation models and most cache logic are **portable**. Persistence/mappings/time formatting, filesystem discovery and execution of sourced/replacer/editor scripts are **host-backed**. The original API proposals were not tests; the N3 overlay distinguishes implemented in-memory behavior from still-unimplemented N4 storage and loader policy.

@@ -1,7 +1,7 @@
 # GOAL_03 — Full batch language, functions, scripts and portable builtins
 
-**Phase:** N3. **Status: planned / not started.**
-Tests below specify acceptance; they are not claims that future tests exist, run or pass today.
+**Phase:** N3. **Status: implemented and verified at source commit `861a9bdc6`.**
+Native debug/release, minimum-Rust executables and retained Unix verification are recorded below.
 The primary native target is `x86_64-pc-windows-msvc`; ARM64 requires separate native architecture evidence.
 
 ## Objective and completion boundary
@@ -132,7 +132,7 @@ Keep a per-option/subcommand mapping under these IDs so portable coverage cannot
   and cleanup path even when an assertion fails; unavailable required fixtures block acceptance instead of skipping.
 - When suites land, record exact runnable test names/commands, toolchain/SDK/dependency versions, target/revision,
   required discovery and executed/nonignored counts, results and debug/release artifact references.
-  No currently runnable future Cargo target is asserted by these proposed gate IDs.
+  The implemented Cargo target is `windows_n3`; its underscore test names emit the required hyphenated IDs.
 - CI fails on missing IDs, empty execution, ignored mandatory cases and unmapped required option/subcommand coverage.
 - Preserve prototype positives and permanent/still-deferred rejections. Replace superseded syntax/substitution/script/
   formatter rejection tests with real positive/failure cases, updating CI registry/counts rather than merely flipping status.
@@ -148,3 +148,51 @@ Hand [N4](GOAL_04.md) a real source/noninteractive reader seam, functions/events
 hand [N5](GOAL_05.md) full evaluator behavior atop N2 runtime ownership. [N6](GOAL_06.md) adds the interactive reader,
 [N8](GOAL_08.md) adds native script providers/platform services and [N9](GOAL_09.md) closes help/shipped assets.
 Those later owners do not excuse missing N3 batch language, portable options, formatter or script execution behavior.
+
+## Verified implementation and handoff
+
+Branch: `platform/windows/batch-parity`. Source: `861a9bdc6`. The approved delivery scope above
+is implemented, not a replacement interpreter or a reduced prototype. Detailed option mapping,
+commands, counts and artifact identities are in the [N3 coverage record](coverage.md#n3-verified-evidence-record).
+
+Run from an x64 MSVC developer environment with SDK `10.0.26100.0` selected:
+
+```powershell
+$env:PCRE2_SYS_STATIC = '1'
+cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin fish_indent --bin windows_native_probe
+cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish --bin fish_indent
+$env:FISH_NATIVE_TEST_BIN = (Resolve-Path target/x86_64-pc-windows-msvc/debug/fish.exe).Path
+$env:FISH_NATIVE_TEST_RELEASE_BIN = (Resolve-Path target/x86_64-pc-windows-msvc/release/fish.exe).Path
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n3 -- --list
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n3 -- --nocapture
+```
+
+Discovery is exactly `N3_LANGUAGE`, `N3_CAPTURE`, `N3_SCRIPTS`. Each debug/release harness
+executed all three against both executable profiles, including all eight mapped behavioral families.
+The actual native CI gate body ran locally with its missing/ignored/empty-case checks enabled.
+Minimum Rust `1.85.0` fish/formatter artifacts also passed N1–N3 against the stable release artifact.
+Retained Unix verification passed 184 library tests and all eleven selected portable check files,
+with zero skips. This is local execution evidence, not a claim of a remote CI run.
+
+The real debug/release smoke executed a Unicode/space UTF-8 BOM/CRLF script with functions,
+switch, a block pipeline, nested expansion, UTF-32 named captures, Unicode argv and a real profile
+file; standalone formatting produced the expected nested indentation. Development artifacts used
+Rust `1.95.0`, MSVC `14.51.36231`, SDK `10.0.26100.0` and `--no-default-features`.
+Default-feature packaging, other Windows/volume architectures and interactive GUI certification are not inferred.
+
+N4 receives the actual noninteractive reader/source seam, in-memory functions/events and declarative
+completion/abbreviation metadata. Until N4 supplies durable universal state and utility-free bootstrap,
+normal startup still requires `-N`; autoload is intentionally limited to the embedded `_validate_int`
+core dependency, including user overrides and erase tombstones. General disk/embedded autoload,
+`funcsave`, history and startup flags remain N4, not silent global/universal substitutes.
+
+Capture completion remains evaluation-boundary based even with live descendants. Deferred internal
+producers have their own bounded retention budget, before a downstream collector can remove delimiters.
+A genuine deferred retention fault aborts substitution expansion; an ordinary native exit 122 does not.
+Later captures start from a fresh fault-generation snapshot. Reserved private-use Unicode retains
+fish's existing encoded-byte representation, including Unix's internal-count limitation, while literal
+Unicode and arbitrary redirected bytes remain distinct. Batch ANSI follows configured styles without
+claiming terminal capability. `-D`/`--debug-stack-frames` is explicitly retired/nonzero.
+
+Fork, same-PID exec and POSIX fg/bg remain the permanent exclusions above. Native user jobs,
+console editing, evaluated completion, additional script providers, help and catalogs retain N5–N9 ownership.

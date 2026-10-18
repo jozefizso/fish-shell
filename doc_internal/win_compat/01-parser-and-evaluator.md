@@ -1,6 +1,14 @@
 # Parser and evaluator
 
-## Scope and evidence
+## Verified N3 implementation
+
+At `861a9bdc6`, native batch evaluation uses the shared grammar, control flow, function scopes,
+source/eval and expansion machinery. No Windows-only language or host-shell evaluator was added.
+`reader_windows.rs` supplies noninteractive UTF-8/BOM/CRLF source independently of a console editor.
+Trace/profile sinks and function-frame queries are exercised by [N3](GOAL_03.md); user-visible
+job supervision and interactive reader state retain N5/N6 ownership.
+
+## Historical scope and evidence
 
 This is a source audit, not a successful Windows build or runtime report. Language semantics and host integration are separate: a module can contain portable algorithms while still importing Unix-only types. Process launch, signals, descriptors, and filesystem implementations are detailed in [03](03-process-execution-job-control.md), [04](04-signals-events-waits.md), [05](05-io-redirection-file-descriptors.md), and [07](07-filesystem-paths-wildcards.md).
 
@@ -28,4 +36,4 @@ This is a source audit, not a successful Windows build or runtime report. Langua
 
 ## Classification
 
-Syntax, trees, scope/control-flow algorithms and arithmetic are **portable logic**, not proof that their containing crate builds unchanged. Parser directory state, redirection representations, execution orchestration, cancellation, diagnostics/output and timing cross **POSIX-backed boundaries**. The scenarios above are proposed validation, not observed results.
+Syntax, trees, scope/control-flow algorithms and arithmetic are **portable logic**. Parser directory state, redirection representations, execution orchestration, cancellation, diagnostics/output and timing cross **host-backed boundaries**. The original scenarios above were an audit proposal; current implemented and exercised scope is recorded in the N3 overlay and coverage ledger.

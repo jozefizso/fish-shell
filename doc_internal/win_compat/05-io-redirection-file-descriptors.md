@@ -1,10 +1,10 @@
 # I/O, file descriptors, pipes, and redirection
 
-## Current N2 implementation overlay
+## Current N2/N3 implementation overlay
 
 The sections below this overlay retain the original pre-prototype audit and proposed scenarios.
 Current verified implementation/evidence is recorded in [GOAL_02](GOAL_02.md) and
-[coverage](coverage.md#n2-verified-evidence-record).
+[N2 coverage](coverage.md#n2-verified-evidence-record), extended by [N3](GOAL_03.md).
 
 - `io_windows.rs` and `io/windows_descriptors.rs` bind logical numbers to typed borrowed/owned
   file, console, pipe, memory and closed endpoints. Ordered overlays implement input/try-input,
@@ -28,8 +28,12 @@ Current verified implementation/evidence is recorded in [GOAL_02](GOAL_02.md) an
   removed from ordinary import/export. Arbitrary native executables with extra fds fail before child effects.
   Internal monitoring handles and unrelated launch endpoints are never in the child allowlist.
 
-Function/block mixed pipelines, command substitution and noninteractive `read` language behavior belong
-to N3; sockets are not implicitly supported by these file/pipe/console endpoint mechanisms.
+N3 exercises function/block pipelines, nested substitutions and noninteractive `read` against
+these endpoints. Partial input survives internal/native handoff and failed materialization without
+consuming the caller's cursor; setup commits only after pipes and idle workers are prepared.
+Native readers peek chunks, not one byte per kernel call. Descendant-held capture tests isolate
+stderr ownership so a harness waiting for stderr EOF cannot masquerade as evaluator deadlock.
+Sockets are not implicitly supported by these file/pipe/console endpoint mechanisms.
 
 ## Scope
 

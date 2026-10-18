@@ -1,10 +1,10 @@
 # Process execution and job control
 
-## Current N2 implementation overlay
+## Current N2/N3 implementation overlay
 
 `exec_windows.rs` and `exec/windows_launch.rs` now implement prepared native pipeline launch.
 The following original audit/candidate scenarios are not the current support ledger; consult
-[N2 evidence](coverage.md#n2-verified-evidence-record).
+[N2 evidence](coverage.md#n2-verified-evidence-record) and [N3 batch consumers](GOAL_03.md).
 
 All native plans and ordered file opens are prepared before stage launch. `CreateProcessW`
 receives explicit application/argv/environment/cwd and `STARTUPINFOEX` handle allowlists;
@@ -19,8 +19,11 @@ contents. The initial loader-to-startup path-resolution interval is not a handle
 guarantee. Child physical cwd may use an extended namespace spelling; identity, not prefix spelling,
 is the filesystem contract.
 
-Native/builtin pipelines and raw DWORD completion retention are delivered. Function/block mixed
-pipelines remain N3; user-visible background jobs, control cancellation/events and accounting remain N5.
+Native/builtin/function/block pipelines and raw DWORD completion retention are delivered.
+Function scope and separated substitution helpers are shared with Unix, while Windows launch
+retains its native process and endpoint ownership. Deferred retention faults carry independent
+provenance; an ordinary native exit 122 is not an expansion-breaking I/O failure.
+User-visible background jobs, control cancellation/events and accounting remain N5.
 Faithful fork, same-PID exec and POSIX fg/bg remain permanently excluded.
 
 ## Scope
