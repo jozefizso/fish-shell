@@ -1,5 +1,15 @@
 # Parser and evaluator
 
+## Current N4 integration overlay
+
+Native normal batch startup now evaluates config, ordered `-C/--init-command` commands and then
+the requested command/script/stdin through the same parser. `-N` skips config, not init commands,
+and selects private history; `-P` selects private history, `-l` sets real login state, and startup
+profiling records actual stages. `-n` avoids config/init/state effects. N4 does not add another
+grammar, N5 jobs or N6 editor. Current source/evidence boundaries are in the
+[N4 record](coverage.md#n4-implementation-and-evidence-record);
+the final native/minimum-Rust/retained matrix passed; the N3 evidence below remains historical.
+
 ## Verified N3 implementation
 
 At `861a9bdc6`, native batch evaluation uses the shared grammar, control flow, function scopes,

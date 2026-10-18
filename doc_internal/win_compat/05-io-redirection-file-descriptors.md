@@ -1,5 +1,16 @@
 # I/O, file descriptors, pipes, and redirection
 
+## Current N4 persistence/notification consumers
+
+`fs/windows.rs` implements native state transactions separately from user redirection streams:
+stable parent `.fish_lock`/LockFileEx, checked identities, flushed sibling staging and checked
+replacement/create-new. Existing-target DACLs are installed at staging creation before bytes;
+failure cannot acknowledge a save. Public funcsave uses `builtins/native_fs.rs` atomic writes.
+`universal_notifier/windows_io.rs` owns OVERLAPPED directory requests until cancellation/drain,
+posting through N2 without pretending a HANDLE is a Unix fd. `read -U` now assigns real
+durable universals; prompt/terminal read remains N6. See the
+[N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
+
 ## Current N2/N3 implementation overlay
 
 The sections below this overlay retain the original pre-prototype audit and proposed scenarios.

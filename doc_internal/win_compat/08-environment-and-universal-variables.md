@@ -1,5 +1,38 @@
 # Environment, configuration paths, and universal variables
 
+## Current N4 implementation overlay
+
+The original audit below is preserved as historical candidate analysis, not current unavailability.
+`path/windows_config.rs`, `env/config_paths.rs`, `env/native_state.rs`, `env_dispatch/common.rs`,
+`env_dispatch/windows.rs`, `locale/windows.rs` and `universal_notifier/windows{,_io}.rs` now supply
+the native services. The [current ledger and N4 evidence](coverage.md#n4-implementation-and-evidence-record)
+record implemented scope and the completed native/minimum-Rust/retained-suite matrix.
+
+- Config/data/cache defaults are machine-local LocalAppData/fish/{config,data,cache}. Validated
+  global-exported XDG roots append `fish`; explicit exported HOME supplies `.config/fish`,
+  `.local/share/fish`, `.cache/fish` fallbacks; HOME otherwise comes from FOLDERID_Profile.
+  Discovery is read-only; initialization validates overrides before directory creation.
+  Executable-relative install assets are separate; trusted OS image spelling uses
+  `wutil/windows.rs::native_current_exe_path`, never user-path validation bypass.
+- Universals retain existing escaped file formats, empty array versus empty value, Unicode/raw
+  bytes and export/path flags, with 16 MiB limits on reads and serialized snapshots. Distinct
+  keys merge; same-key last acknowledged writer wins. Inherited matching exported globals are
+  reconciled so they do not accidentally shadow persisted universal state.
+- `fs/windows.rs` provides stable parent `.fish_lock`/LockFileEx, checked identities, flushed
+  sibling/create-new/replacement and no false acknowledgement. Existing-target DACLs protect
+  staging before bytes; no owner/SACL/integrity copy, power-loss directory/SMB-server durability
+  or unsafe crash-orphan sweep is promised. Failures retain pending mutations. Callbacks/effects
+  run outside environment locks; failed-mutation events replay only after successful persistence.
+- Read-limit/trace, function/completion-path invalidation and actual history/private selection
+  have consumers. Shared width effects and explicit reader-settings generations do not implement
+  N6/N7 editor state; the history stale interface does not import foreign commands automatically.
+- Exported LC_ALL > category > LANG selects NLS numeric/UCRT historical time locale. C/UTF-8,
+  native Windows locale IDs and declared aliases are supported; UTC/Windows TZ IDs use historical
+  DST. Unsupported IANA/POSIX TZ/GNU-format inputs diagnose. Full catalogs/locale parity remain N9.
+- Parent/ancestor ReadDirectoryChangesW watches use N2 runtime completion ownership, rebind/rescan
+  after replacement/lost detail (including ERROR_MORE_DATA 234), and cancel/drain before release.
+  Real UNC fixtures are covered, but no live SMB-server disconnect experiment is claimed.
+
 ## Scope and evidence
 
 This source-grounded audit accounts for every `env/` and `universal_notifier/` module, plus `env_dispatch.rs` and `env_universal_common.rs`. Windows APIs describe proposed native behavior, not existing backends. No build, notifier experiment or Windows runtime test was performed. Filesystem locking/replacement is audited in [07](07-filesystem-paths-wildcards.md); the full module inventory is in [coverage](coverage.md).

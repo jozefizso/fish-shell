@@ -1,5 +1,22 @@
 # Filesystem, paths, directories, and wildcards
 
+## Current N4 state-filesystem overlay
+
+`fs/windows.rs` now selects the native persistence backend: all participants lock the stable
+parent `.fish_lock` with LockFileEx; transactions use checked parent/target identities,
+delete-sharing opens, flushed sibling staging and checked replacement/create-new. The target
+DACL is copied into protected staging security before contents are written; first creation uses
+parent inheritance. Owner/SACL/integrity are not copied, and this does not promise directory
+metadata or SMB-server power-loss durability. Failed saves retain pending mutations; protected
+crash orphan siblings are not swept with an unsafe filename-based cleanup.
+
+`path/windows_config.rs` chooses LocalAppData/fish/{config,data,cache}, global-exported XDG root/fish
+overrides, or explicit exported HOME `.config/fish`, `.local/share/fish`, `.cache/fish` fallbacks.
+Install assets remain executable-relative via `env/config_paths.rs`, not under state roots.
+`native_current_exe_path` handles trusted OS image spelling (including literal extended roots)
+without relaxing N1 user-path validation. See the
+[N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
+
 ## Current N1 integration boundary
 
 The [current module/option ledger](coverage.md#current-runtime-and-native-module-inventory)
@@ -14,8 +31,8 @@ Current native owners are [`path/windows.rs`](../../src/path/windows.rs),
 `NativeCwd` is retained beside PWD in per-process environment state; updates replace both together,
 snapshots clone the Arc, and physical queries use the owned directory rather than process-global
 cwd. Selected native launch, discovery, traversal and predicate callers must share that policy.
-Unix `path.rs`, `wutil/dir_iter.rs` and `fs.rs` are not evidence of native service availability;
-the complete persistence/locking/replacement protocol remains N4.
+Unix `path.rs` and `wutil/dir_iter.rs` are not native backends. Native persistence is now
+implemented by the N4 `fs/windows.rs` overlay above, not inferred from Unix `fs.rs`.
 
 The source contract distinguishes drive absolute/relative, current-drive-rooted, UNC and explicit
 extended drive/UNC/volume namespaces. `C:x` uses fish's cwd on C: or C:'s root otherwise, not hidden

@@ -13,6 +13,7 @@ A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/
 - The [N1 evidence record](coverage.md#n1-verified-evidence-record) is the stable place to add integration revision, exact commands/counts, native debug/release artifacts, applicable Unix results and actual smoke observations after the gates.
 - The [N2 evidence record](coverage.md#n2-verified-evidence-record) records streaming/ordered-redirection/capture/runtime verification and the handoff to batch-language and job consumers.
 - The [N3 evidence record](coverage.md#n3-verified-evidence-record) maps portable options to eight behavioral families and records full batch-language, scripts, UTF-32 PCRE2, buffered read and formatter verification at source commit `861a9bdc6`.
+- [N4 delivery and evidence](GOAL_04.md#runnable-target-and-current-evidence) records verified native startup/state at `c52f6d98a`: three gates, eleven families, both harness profiles, minimum-Rust execution and retained Unix results.
 
 The component analyses and old file counts describe the original pre-prototype audit. Current-source overlays in [filesystem analysis](07-filesystem-paths-wildcards.md) and [builtin analysis](10-builtins.md) distinguish integrating implementations from historical candidate APIs. Historical counts never establish current support, and proposed future scenarios are not passing tests.
 
@@ -28,15 +29,21 @@ The [option ledger](coverage.md#builtin-option-and-subcommand-ledger) distinguis
 option from its later owner. Deferred reserved commands remain rejected instead of falling through
 to unrelated executables.
 
-Run command strings, scripts or redirected stdin with `fish -N`; `-c` may be repeated and
-`--` preserves option/argv boundaries. Source/eval, functions, while/switch, nested substitution
-and mixed native/builtin/function/block pipelines use the shared evaluator. Syntax-only, feature,
-version, debug/category/trace/profile options and non-help formatter modes are implemented.
-Normal config/startup, durable universal/history state, user-visible jobs, interactive/key-reader
-operation, evaluated completion and help still require their later phases.
+Run command strings, scripts or redirected stdin with ordinary `fish`; `-c` may be
+repeated and `--` preserves option/argv boundaries. Source/eval, functions,
+while/switch, nested substitution and mixed native/builtin/function/block pipelines
+use the shared evaluator. Normal startup runs configuration → ordered repeated
+`-C/--init-command` → execution. `-N/--no-config` skips configuration, not init
+commands, and implies private history; `-P/--private` isolates history;
+`-l/--login` and `--profile-startup` are implemented. `-n/--no-execute` has no
+config/init/state effects. Syntax-only, feature, version, debug/category/trace/profile
+options and non-help formatter modes are implemented. Durable universal/history
+state, full core autoload and utility-free public `funcsave` are implemented.
+User-visible jobs, interactive/key-reader operation, active `complete -C` and help
+still require their owning phases; this is not a full interactive Windows shell.
 
 Ordinary namespace, metadata and native permission options were delivered by N1. Full portable batch
-language/builtins and formatter flags are N3; startup/persistence belongs to N4; jobs/accounting to
+language/builtins and formatter flags are N3; startup/persistence is implemented and verified in N4; jobs/accounting belong to
 N5; interactive/key-reader flags to N6; advanced editor UX to N7; platform-only identity/device/
 quota options and additional script providers to N8; help/assets/localization to N9; release to
 N10. N11 reconciles completed behavior, not forgotten implementation.
@@ -59,9 +66,9 @@ internal scheduling; same-image fish children can receive extra logical descript
 private bridge. Arbitrary native children cannot inherit fish-numbered extra fds.
 Capture, substitutions, nested functions/blocks and buffered noninteractive reads use the same owned
 I/O infrastructure. Capture completion cancels/drains one available-byte snapshot instead of waiting
-for descendant EOF. User-visible job/control events remain N5. `cd -` belongs to shipped directory-history
-functions; general loader/helper integration remains N4/N9. N3 loads only the embedded `_validate_int`
-core dependency, not a partial normal bootstrap.
+for descendant EOF. User-visible job/control events remain N5. `cd -` uses shipped
+directory-history functions; N4 now loads the normal core bootstrap and full
+embedded/disk autoload rather than only the N3 `_validate_int` dependency.
 
 The [N1 record](coverage.md#n1-verified-evidence-record) and [N2 record](coverage.md#n2-verified-evidence-record)
 preserve their historical artifact and execution details. The [N3 record](coverage.md#n3-verified-evidence-record)
@@ -69,6 +76,43 @@ adds the actual native workflow-body run, native/Unix regression counts, minimum
 verification and real Unicode BOM/CRLF script/substitution/formatter smokes. No remote CI run is claimed.
 Required fixture absence still **hard-fails**, never skips. Development builds remain `--no-default-features`;
 N10 owns default-feature release/install certification.
+
+### Native startup/state roots and testing
+
+N4 defaults writable config/data/cache to local
+`FOLDERID_LocalAppData/fish/{config,data,cache}`. Global exported XDG roots select
+`<root>/fish`; explicit exported HOME supplies `.config/fish`,
+`.local/share/fish` and `.cache/fish` fallbacks. Otherwise HOME is
+`FOLDERID_Profile`. Bundled install assets are executable-relative, not writable
+state. Conf.d basename masking and disk/embedded autoload precedence are real.
+
+From the repository root, run the development target with the required native
+fixtures (including `FISH_NATIVE_N1_UNC_ROOT`):
+
+```powershell
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n4 -- --nocapture
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n4 --release -- --nocapture
+```
+
+The three Cargo tests are `N4_STARTUP`, `N4_SHARING`, `N4_RECOVERY`.
+They contain 2/4/5 families respectively and each invocation exercises both native
+artifacts: 11 families per artifact, 22 `PASS-CASE` records, no ignored mandatory
+fixtures. Both debug/release harnesses passed the complete registry; minimum-Rust
+debug harnesses also passed N1–N4 against minimum-compiler debug and stable release.
+Native libraries and retained Unix suites passed, with one declared Unix locale
+fixture skip. This is not default-feature release certification.
+
+State uses locked, flushed sibling replacement with identity checks and DACL
+copying before staging bytes; failures retain pending mutations without false
+acknowledgement. It does not promise power-loss directory or SMB-server durability,
+or copy owner/SACL/integrity labels. History keeps an immutable initial owned
+snapshot and transactionally checked explicit merges. Session clear journals
+acknowledged own versions and their actual predecessors, preserving foreign
+updates/deletions; legacy same-command/same-second records cannot distinguish authors.
+Locale/time consumers support the declared Windows NLS/UCRT, C/UTF-8/Windows-ID,
+UTC/Windows-TZ scope, not full IANA/POSIX TZ or GNU-format parity.
+See [N4 limits and handoff](GOAL_04.md#delivered-behavior-and-explicit-limits) for
+notification recovery, storage security and N6/N7 reader-interface details.
 
 ## Portability classifications
 
@@ -150,4 +194,4 @@ The original analysis-only audit completed these documentation checks:
 - Matched all 21 then-current workspace crates and the complete 2,247-file audit inventory to analysis ownership, with no missing or extra source paths at that baseline.
 - Checked the critical Windows inheritance, console-control, file-replacement and directory-notification contracts against Microsoft documentation.
 
-These historical checks establish original documentation structure and ownership. Current N1 native/runtime evidence is recorded in the coverage ledger; later phases remain unverified until their implementations and exact execution evidence land. GOAL.md remains the unchanged prototype history.
+These historical checks establish original documentation structure and ownership. N1–N4 evidence is recorded separately in the coverage ledger. Later phases remain unverified until their implementations and exact execution evidence land. GOAL.md remains the unchanged prototype history.

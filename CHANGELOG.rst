@@ -29,9 +29,17 @@ Scripting improvements
   Portable native batch scripts now support functions, while/switch, nested substitutions,
   mixed function/block pipelines, noninteractive read, portable builtins and UTF-32 PCRE2.
   Native standalone/builtin fish_indent and debug/profile output are implemented.
-  Configuration still requires ``-N`` until persistent startup lands; interactive editing,
-  user-visible native jobs and help remain separate phases. Faithful fork, same-PID exec
-  and POSIX fg/bg remain excluded.
+  Normal native batch startup now loads configuration, ordered init commands and
+  embedded/disk autoload without requiring ``-N`` or Unix bootstrap utilities.
+  Native known-folder/XDG/HOME state roots, shared universal variables, persistent
+  history and atomic public ``funcsave`` let independent shells retain and observe
+  real state instead of relying on disposable no-config sessions.
+  Locked, flushed replacement checks identities and preserves the DACL before
+  staging bytes; this is not a power-loss or SMB-server durability guarantee.
+  N4 startup/sharing/recovery gates pass in both native development profiles.
+  This does not complete all eleven Windows phases. Interactive editing, user-visible native jobs, evaluated completion,
+  help and full locale/assets parity remain separate phases. Faithful fork,
+  same-PID exec and POSIX fg/bg remain excluded.
 
 Regression fixes:
 -----------------

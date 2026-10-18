@@ -1,5 +1,20 @@
 # Concurrency, monitoring, diagnostics, and runtime support
 
+## Current N4 directory-notification consumers
+
+`universal_notifier/windows.rs` and `windows_io.rs` now use N2 source identities/completion delivery
+for parent/ancestor ReadDirectoryChangesW watches, rebind/rescan and cancellation/drain. Lost detail,
+including ERROR_MORE_DATA 234, invalidates the full state even when a basename filter exists.
+Recovery uses bounded workers, not a new unbounded thread per watcher. `env/native_state.rs`
+arms watchers before initial reads, drains ownership on shutdown and dispatches effects/events
+outside environment locks with deferred failed-mutation replay. History invalidation marks an
+owned snapshot stale without implicitly merging another session.
+
+Real UNC fixture behavior is not a live SMB-server disconnect claim. N6/N7 reader-settings
+generation/history-stale interfaces do not enable editor readiness; N5 control/jobs remain deferred.
+See the [N4 record](coverage.md#n4-implementation-and-evidence-record)
+for final combined results; the original candidate audit remains historical.
+
 ## Current N2 implementation overlay
 
 `src/threads/windows.rs` and `windows_workers.rs` now provide the native runtime; the following
@@ -20,8 +35,8 @@ See [N2 evidence](coverage.md#n2-verified-evidence-record).
 - Real bounded workers and debounce preserve cancellation/generation ownership. An abandoned old
   token cannot publish merely because a newer request is active; completed-result delivery is main-thread work.
 
-N4 watchers, N5 user-visible control/job events and N7 editor background work must reuse these
-services. N2 does not implement those consumers or Unix signal masks/atfork on Windows.
+N4 watchers now consume these services as described above. N5 user-visible control/job events
+and N7 editor background work retain ownership; N2 does not emulate Unix signal masks/atfork.
 
 N3 now consumes these services for actual nested capture, source/read and mixed function/block
 pipelines. Main-thread generic/variable event dispatch, wildcard-selected debug categories,

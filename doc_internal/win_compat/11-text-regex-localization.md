@@ -1,5 +1,21 @@
 # Text, regex, numeric parsing, and localization
 
+## Current N4 numeric/time locale overlay
+
+`locale/windows.rs` now implements exported LC_ALL > category > LANG selection using NLS numeric
+locale and explicit UCRT time-locale objects. C/UTF-8, native Windows locale IDs and declared
+aliases are supported; formatting uses historical wall-clock timestamps, UTC/Windows timezone IDs
+and historical DST rules. Unsupported IANA/POSIX TZ and GNU time-format directives diagnose
+instead of silently substituting current-local time or format output.
+
+`env_dispatch/windows.rs` invalidates/configures these real consumers on changes; shared read/
+trace/width hooks live in `env_dispatch/common.rs`. The Rust numeric formatter and shared parsers
+remain authoritative; NLS is not a replacement parser or PCRE2 engine. N9 still owns full
+locale/catalog/GNU-format parity and deployed help; N6/N7 own active rendering. The historical
+fixed-C N3 cutoff and candidate audit below are not current N4 unavailability. See the
+[N4 evidence record](coverage.md#n4-implementation-and-evidence-record)
+for the completed native/minimum-Rust/retained matrix.
+
 ## Verified N3 implementation
 
 Native MSVC builds now use fish's existing UTF-32 PCRE2 dependency and every string subcommand.
@@ -7,7 +23,7 @@ Groups, supplementary-character offsets, named captures, replacement/case-foldin
 malformed-pattern behavior are exercised against the real linked engine, not a Win32/.NET substitute.
 Reserved private-use Unicode retains fish's canonical encoded-byte representation (and its existing
 Unix internal-count limitation), while literal Unicode and raw redirected bytes remain distinct.
-Fixed-C/minimal message fallback is real; locale/catalog selection remains N9.
+At the N3 cutoff fixed-C/minimal message fallback was delivered; N4 numeric/time locale is now implemented above, while full catalog selection remains N9.
 See [N3 verification](coverage.md#n3-verified-evidence-record).
 
 ## Historical evidence and scope
@@ -40,4 +56,4 @@ This is a source audit, not a report of a successful native build or terminal ru
 
 ## Tooling limits and classification
 
-The original audit did not execute native builds, PCRE2 or terminal checks; its candidate API mappings are not evidence. N1/N3 verification above now establishes the checked text boundary and batch regex/formatting consumers, not a complete locale or renderer port. Native locale/catalog deployment and active terminal rendering remain their N9 and N6/N7 owners.
+The original audit did not execute native builds, PCRE2 or terminal checks; its candidate API mappings are not evidence. N1/N3 evidence and the current N4 numeric/time locale overlay delimit support, not a complete locale/catalog or renderer port. Full locale/catalog deployment and active terminal rendering remain N9 and N6/N7.

@@ -1,12 +1,13 @@
 # GOAL_04 — Configuration, autoload, history and universal variables
 
 **Phase: N4**  
-**Status: planned / not started**  
+**Status: implemented and verified**  
 **Primary native target:** `x86_64-pc-windows-msvc`; ARM64 is a separate extension.
 
-The acceptance cases below are specifications, not claims of existing test names,
-runnable targets or passing results. This contract expands the approved roadmap at
-commit `2acbbad4b`; it does not change the historical evidence in [GOAL.md](GOAL.md).
+Source commit **`c52f6d98a`** on `platform/windows/persistent-state`, from base
+`1bfef1539`. Final development acceptance, minimum-Rust execution and retained Unix
+results are recorded below and in the [evidence ledger](coverage.md#n4-implementation-and-evidence-record).
+Historical [GOAL.md](GOAL.md) and N1–N3 evidence is unchanged.
 
 ## Objective
 
@@ -103,6 +104,61 @@ This supplies startup/state services to the interactive reader, not an editor.
    settings now through explicit N6/N7 interfaces, activating their tests there;
    no forgotten variable-dispatch consumer is deferred to the N11 audit.
 
+### Delivered behavior and explicit limits
+
+- Normal batch launch executes configuration, ordered repeated init commands and
+  then the requested command/script/stdin. `-N` skips configuration but retains
+  init commands and uses private history; `-P` makes history private, `-l`
+  selects login startup, and startup profiling measures the actual stages.
+  `-n` parses without configuration, init or persistent-state effects.
+- Default writable roots are local `FOLDERID_LocalAppData/fish/{config,data,cache}`.
+  A global exported XDG root selects `<root>/fish`; explicit exported HOME supplies
+  `.config/fish`, `.local/share/fish` and `.cache/fish` fallbacks. Otherwise HOME
+  comes from `FOLDERID_Profile`. Installation assets remain executable-relative,
+  separate from writable roots. Unicode, spaces and literal extended install,
+  state and HOME paths are covered by the startup fixture.
+- Normal bootstrap and the public `funcsave` path require no Unix utilities.
+  Full embedded/disk autoload, conf.d basename masking, function/completion path
+  invalidation and native atomic function saves are implemented. This is not
+  active `complete -C`, editor operation or a complete shipped-asset audit.
+- State transactions use a stable parent `.fish_lock` with `LockFileEx`,
+  create-new sibling staging, flushed writes, checked identities and
+  `ReplaceFileW`. The existing DACL is copied **before staging bytes**.
+  Failed writes do not acknowledge success or discard pending mutations.
+  This protects the prior committed file during the exercised process failures;
+  it does not promise power-loss directory durability or SMB-server durability.
+  Owner, SACL and integrity-label copying are not provided. Protected crash
+  orphans are not swept unsafely.
+- Universal variables retain existing formats, empty-array/empty-value,
+  Unicode/raw-byte, export and path semantics, with a 16 MiB read and serialized
+  snapshot cap. Distinct keys merge; the last acknowledged writer wins a
+  same-key conflict. Matching inherited exported globals are reconciled.
+  Callback effects/events run outside environment locks; failed mutations
+  retain deferred replay.
+- History retains valid existing YAML and real wall-clock timestamps; the
+  already-unsupported Fish 1 decoder is not added. Its initial owned baseline
+  stays immutable across automatic saves and watcher invalidation. Explicit
+  checked merge captures its snapshot inside the transaction before retiring
+  local entries. A committed-generation journal lets session clear undo only
+  acknowledged local versions still present on disk and restore their actual
+  observed predecessors, preserving intervening foreign updates/deletions.
+  Failed or compacted duplicate saves do not erase this ownership history.
+  The legacy same-command/same-second format cannot uniquely identify authors.
+  Private selection precedes disk-history initialization; shutdown flushes dirty
+  history, including pending deletes and recoverable earlier save failures.
+- Parent/ancestor `ReadDirectoryChangesW` registrations use the N2 runtime and
+  cancel/drain lifecycle. Lost detail and `ERROR_MORE_DATA` (234) trigger full
+  invalidation/rescan. Real UNC storage was exercised; no live SMB-server
+  disconnect experiment is claimed.
+- Exported `LC_ALL` takes precedence over category variables and `LANG`.
+  Numeric formatting uses Windows NLS; historical time formatting uses UCRT.
+  C/UTF-8/native Windows locale IDs and declared aliases, UTC and Windows TZ IDs
+  with historical DST are supported. Unsupported IANA/POSIX TZ and GNU formats
+  are diagnosed; full localization/assets parity belongs to N9.
+- Read-limit, trace, function/completion paths and history dispatch reach real
+  consumers. Explicit reader-settings generations and the history stale-state
+  interface hand off activation to N6/N7, not a simulated interactive shell.
+
 ## Permanently out-of-scope contracts
 
 - **POSIX `fork()`:** no process snapshot/return-twice emulation and no post-fork
@@ -139,12 +195,51 @@ ACL fixtures are an explicit acceptance dependency, not silently ignored cases.
   barriers, not sleeps. Terminate/reap only owned processes and drain watchers.
 - CI must discover exactly the three required IDs above and their declared cases;
   fail missing IDs, zero cases, ignored mandatory cases and hidden fixture skips.
-- When implementation lands, record exact runnable commands/test names, expected
-  and executed/nonignored counts, Rust/SDK/toolchain, target, revision, results and
-  artifact/log references. Do not invent future Cargo targets in this plan.
+- Retain exact counts, Rust/SDK/toolchain, source revision and artifact/log identities.
+  The final combined execution is recorded below; individual earlier runs are not
+  substituted for that matrix.
 - Include a real clean-root runtime smoke: normal launch loads config/autoload,
   a second shell sees a saved universal change, and a private session leaves no
   history. Smoke supplements automated gates; it does not replace them.
+
+### Runnable target and current evidence
+
+From the repository root, with the mandatory native fixtures available:
+
+```powershell
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n4 -- --nocapture
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n4 --release -- --nocapture
+```
+
+The source-authoritative target is `tests/windows_n4.rs`. Cargo discovers exactly
+`N4_STARTUP`, `N4_SHARING` and `N4_RECOVERY`; their emitted gate IDs use hyphens.
+STARTUP has 2 families (`configuration-autoload-save`, `history-modes`), SHARING
+has 4 (`universal-values-events`, `storage-transactions`, `history-sessions`,
+`locale-timezone`) and RECOVERY has 5 (`universal-formats-errors`,
+`storage-crash-acl`, `autoload-save-errors`, `history-recovery`,
+`directory-notifications`). Each harness invocation exercises both debug and
+release executables: 11 families per artifact, 22 `PASS-CASE` records total.
+All three gate IDs must pass for both artifacts; none of the mandatory cases
+may be ignored. `FISH_NATIVE_N1_UNC_ROOT` is required, not a skip switch.
+
+The final actual workflow passed its exact discovery and execution checks: all
+three N4 gates and 22 family/artifact pairs passed in each debug/release harness,
+with zero ignored cases. Retained native N1–N3/prototype/initialization/provenance
+gates and library tests passed; the root native library ran 60 tests.
+
+Rust 1.85 built fish, fish_indent and the probe; its debug harnesses passed all
+twelve N1–N4 Cargo tests against the minimum-compiler debug and stable release
+executables. The Unix build and 183 library tests passed. Selected Unix checks:
+14 passed, 1 skipped (`locale-numeric.fish`, required comma-decimal locale absent).
+Both native artifacts passed fresh-root actual-executable config/autoload,
+Unicode universal restart and private-history smoke with empty stderr and no
+history file created.
+
+Toolchains were Rust 1.95.0/1.85.0, MSVC 14.51.36231, SDK 10.0.26100.0,
+target `x86_64-pc-windows-msvc`. Full commands, SHA-256 identities and retained
+`target/n4-gate-results/` logs are in the [ledger](coverage.md#final-executed-matrix).
+These are `--no-default-features` development results; N10 owns default-feature
+release/install certification. N5–N11 are not completed by this delivery.
 
 ## Definition of done and handoff
 

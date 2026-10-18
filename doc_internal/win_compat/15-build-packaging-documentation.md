@@ -1,5 +1,20 @@
 # Build, installation, packaging, and documentation
 
+## Current N4 runtime-layout overlay
+
+`env/config_paths.rs` now selects native executable-relative install assets, distinct from
+`path/windows_config.rs` LocalAppData/XDG/explicit-HOME state roots. The trusted OS-image helper
+`wutil/windows.rs::native_current_exe_path` supports literal extended install spelling without
+relaxing ordinary N1 path policy. Utility-free normal config/bootstrap, conf.d masks,
+disk/embedded core autoload and public atomic funcsave are implemented; these are runtime
+consumers, not an installer or full N9 asset/help/catalog certification.
+
+Current evidence is development `--no-default-features`; N10 retains release/default-feature,
+installation/layout/package/signing certification. Final Rust 1.85/native/retained-suite results
+and artifact identities are recorded in the
+[N4 record](coverage.md#n4-implementation-and-evidence-record).
+The original source audit and prior host-tool evidence below remain historical and unchanged.
+
 ## Scope and evidence
 
 This page maps all top-level build/package/documentation families, including their subcomponents. The complete tracked-file accounting is in [`coverage.md`](coverage.md); concrete entry points below explain mechanisms rather than imply that a few example files are the entire inventory. Workspace build scripts/xtask children are individually covered in [14](14-workspace-crates.md), localization in [11](11-text-regex-localization.md), and CI/test tooling in [16](16-tests-benchmarks-ci.md).

@@ -1,13 +1,35 @@
 # Binaries and shipped fish assets
 
+## Current N4 startup/core-assets overlay
+
+Native fish now supports normal config → ordered init commands → command/script/stdin execution;
+`-N` skips config but retains `-C` and private history, `-P` selects private history, `-l` and
+default/query status expose real login state, and `--profile-startup` measures real stages.
+`-n` avoids config/init/persistent-state effects. Interactive/key-reader remain N6 and help N9.
+
+`env/config_paths.rs` locates executable-relative install assets independently of
+`path/windows_config.rs` user config/data/cache roots. `wutil/windows.rs::native_current_exe_path`
+handles trusted OS image spelling, including literal extended install roots, without relaxing
+user-path validation. Core `share/config.fish` bootstrap is utility-free with native paths,
+ordered conf.d basename masks, path-list policy and no Unix-only startup probes on Windows.
+Full ordered disk/embedded autoload preserves overrides/tombstones and generated-completion
+precedence. Public `funcsave` uses `builtins/native_fs.rs` atomic writes, mkdir and removal,
+not external coreutils. Embedded `status get-file/list-files` are real core resource consumers.
+
+This is not a complete per-file asset/dependency certification: N6 first prompt/key handling,
+N7 active completion/editor helpers, N8 platform/providers/psub and N9 remaining helpers,
+external-editor tools, help/catalogs and user tools retain ownership. Earlier N3 evidence and
+the original candidate audit/counts below remain historical. See the
+[N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
+
 ## Verified N3 implementation
 
 `bin/fish/windows.rs` now runs repeated command strings, scripts and stdin through the shared
 noninteractive evaluator with `-N`, explicit argv/`--`, parse-only/features/version and real
 debug/category/trace/profile output. Retired `-D` is a nonzero diagnostic, not ignored success.
 Standalone and builtin `fish_indent` share real non-help stream/file/check/write/ANSI/HTML/token modes.
-Normal utility-free startup/autoload/save remains N4, key-reader/console editing N6 and help/assets N9.
-Only `_validate_int` is exposed from embedded core functions during N3; no complete asset audit is implied.
+At the N3 cutoff normal utility-free startup/autoload/save remained N4; these are now delivered
+above. The then-validator-only embedded exposure was not a complete asset audit, nor is N4.
 See [N3's executable option mapping and artifacts](coverage.md#n3-verified-evidence-record).
 
 ## Historical scope and evidence
@@ -106,4 +128,4 @@ The complete sample-prompt family has different dependency classes; source snipp
 - Do not indiscriminately remove Unix completions: dormant static tables are different from active Linux probes. Keep cross-platform/native definitions and audit/gate executable providers at their actual call sites.
 - No `/etc/shells` registration, login-shell installation assumption, privileged symlink requirement or compatibility-environment path translation is needed merely to distribute the native binaries and embedded data. Actual installation layout is covered in [15](15-build-packaging-documentation.md).
 - Proposed Win32 APIs describe capabilities, not CLI replacements. Open decisions include POSIX job/signal exposure, FIFO `psub` consumer compatibility, native account/permission semantics, man rendering, executable-extension policy, native Python discovery/version floor, and which third-party utilities are intentionally optional dependencies.
-- The original audit used source inventory and targeted reads across asset families, without executing its proposed scenarios. The N3 overlay records implemented executable consumers; third-party tools, normal bootstrap, help and the complete shipped asset inventory still require their named phases.
+- The original audit used source inventory and targeted reads across asset families without executing its proposed scenarios. N3 and current N4 overlays distinguish executable/bootstrap/autoload/funcsave support from third-party tools, help and complete per-file shipped-asset certification at their named owners.

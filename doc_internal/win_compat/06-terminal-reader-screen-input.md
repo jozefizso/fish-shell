@@ -1,5 +1,16 @@
 # Terminal, reader, screen, and input
 
+## Current native batch/state overlay
+
+`reader_windows.rs` provides the N3 noninteractive source reader and N4 actual current-history
+selection. History snapshots can be marked stale by native directory notifications without
+importing foreign session commands automatically. `env_dispatch/windows.rs` applies actual history,
+read-limit, trace, function/completion-path and locale effects, and exposes a reader-settings
+generation for N6/N7. These are real consumer interfaces, not an implemented input loop,
+commandline buffer, console mode/renderer, suggestions or search UI. Those remain N6/N7.
+The candidate terminal audit below remains historical; see the
+[N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
+
 ## Scope and evidence
 
 This is a source audit, not a report of a native Windows build or terminal run. Windows APIs below are candidate replacements, not existing fish backends. Linux-specific behavior is distinguished from the much larger POSIX/terminal-protocol boundary. Source links are relative to this document.

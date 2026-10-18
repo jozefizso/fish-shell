@@ -1,5 +1,27 @@
 # Tests, benchmarks, and CI
 
+## Current N4 acceptance registry and evidence boundary
+
+`tests/windows_n4.rs` is authoritative: exactly `N4_STARTUP`, `N4_SHARING`, `N4_RECOVERY`,
+11 required behavioral families and 22 PASS-CASE records per full harness across debug/release
+executables. Each family receives fresh startup/config/state roots; no mandatory case is ignored,
+and missing `FISH_NATIVE_N1_UNC_ROOT` hard-fails. `tests/windows_n4/{startup,history,storage,locale,
+notifications,universal}.rs` own the cases; storage/notification probes are real helper processes.
+See the [exact registry/commands](coverage.md#n4-implementation-and-evidence-record).
+
+The final native workflow passed both harness profiles against both artifacts: each N4 harness
+executed all three gates and 22 family/artifact pairs with no ignored cases. N1–N3, prototype,
+initialization/provenance and native libraries also passed; the root library ran 60 tests.
+Rust 1.85 built the native binaries and its debug harnesses passed all twelve N1–N4 gates
+against the minimum-compiler debug executable and stable release executable.
+Retained Unix evidence is 183 library tests passed and 14 selected checks passed, with
+`locale-numeric.fish` skipped because its required comma-decimal locale is not installed.
+Clean-root config/autoload/universal-restart/private-history smokes passed in debug and release.
+Logs and checksums are recorded in the ledger. Development evidence uses
+`--no-default-features`; N10 owns default-feature/release/install certification, N11 reconciliation,
+N6/N7 active editor/terminal tests. The original audit/scenarios/counts below remain historical;
+real UNC notifier fixtures do not imply an observed live SMB-server disconnect experiment.
+
 ## Scope and evidence boundary
 
 This page covers Rust unit/doctests/benchmarks, every top-level `tests/` family, the complete shell benchmark workload set, all eight GitHub workflows and five local action families, all four `.builds` configurations, Docker and BSD Vagrant tooling. [`coverage.md`](coverage.md) contains the file-level inventory; named checks below illustrate mechanisms within those complete families rather than stand in for all tests.

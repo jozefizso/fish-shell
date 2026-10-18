@@ -1,13 +1,40 @@
 # History, functions, abbreviations, and autoloading
 
+## Current N4 implementation overlay
+
+`history/{mod,file,history,yaml_backend}.rs`, `fs/windows.rs` and `reader_windows.rs` now implement
+native named/private/default batch histories and their commands, not an in-memory placeholder.
+Windows uses immutable owned byte snapshots and publishes complete flushed transactions rather
+than partial appends. Existing fish YAML-compatible records, multiline/Unicode content and
+real wall-clock timestamps are retained; Fish 1.x remains an existing unsupported decoder.
+
+An initial owned session baseline survives automatic saves and watcher invalidation. Checked
+explicit merge captures the resulting snapshot inside the persistence transaction before retiring
+local entries. Clear-session uses a committed-generation journal to undo only acknowledged own
+versions still on disk and restore the predecessor observed during their save, preserving foreign
+updates and deletions even after duplicate compaction or a failed save. Same-command/same-second
+records cannot uniquely identify independent authors. Directory notifications mark snapshots stale,
+not automatically visible as another session's commands. Private selection precedes loading old
+disk history; shutdown flushes dirty history. Active search UI remains N7.
+NLS/UCRT locale and Windows historical-DST timezone handling support native history formatting;
+unsupported GNU formats/IANA/POSIX TZ inputs diagnose, with full parity still N9.
+
+Full core ordered disk/embedded autoload, path/cwd/identity invalidation, overrides/tombstones,
+recursion protection and embedded provenance now work. Public `funcsave` uses native directory
+creation/removal/atomic writes through `builtins/native_fs.rs` without coreutils. This does not
+port external-editor `funced`, every shipped script, complete -C or editor abbreviation expansion
+(N9/N7). The validator-only limit below describes historical N3, not current support.
+See the [N4 record](coverage.md#n4-implementation-and-evidence-record)
+for final combined results; original proposed scenarios remain historical.
+
 ## Verified N3 implementation
 
 Native functions now execute with shared argument/inherited-variable scopes, recursion, return,
 copy/erase metadata and tombstones. Generic/variable handlers and blocked/queued events run on
 the main evaluator thread. In-memory abbreviation and completion declarations survive serialization
 and replay with their semantic fields intact; legacy serializer line order is not rule identity.
-Only the embedded `_validate_int` core dependency autoloads during N3. General disk/embedded
-autoload, public function saving and durable history/universal state remain N4 prerequisites.
+At the N3 cutoff only embedded `_validate_int` autoloaded. General disk/embedded autoload,
+public function saving and durable history/universal state were then N4 prerequisites, now delivered above.
 See [N3](GOAL_03.md) and its [coverage record](coverage.md#n3-verified-evidence-record).
 
 ## Historical scope and evidence
@@ -49,4 +76,4 @@ The source families are [`history/`](../../src/history), [`function.rs`](../../s
 
 ## Classification and limits
 
-History search/codec, function/abbreviation models and most cache logic are **portable**. Persistence/mappings/time formatting, filesystem discovery and execution of sourced/replacer/editor scripts are **host-backed**. The original API proposals were not tests; the N3 overlay distinguishes implemented in-memory behavior from still-unimplemented N4 storage and loader policy.
+History search/codec, function/abbreviation models and most cache logic are **portable**. Persistence/mappings/time formatting, filesystem discovery and execution of sourced/replacer/editor scripts are **host-backed**. The original API proposals were not tests; current N4 storage/loader implementation is distinguished from N3 evidence and remaining N7/N9 consumers by the overlays above.

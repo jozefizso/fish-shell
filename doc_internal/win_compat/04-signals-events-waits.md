@@ -1,5 +1,16 @@
 # Signals, events, waits, accounting, and resource limits
 
+## Current native N3/N4 overlay
+
+Generic/variable events execute on the main evaluator thread. N4's `env/native_state.rs`
+queues universal callbacks/effects outside environment locks and retains failed-mutation keys for
+deferred replay after a successful retry. Directory changes are invalidation hints delivered by
+`universal_notifier/windows{,_io}.rs` through N2 runtime ownership, not Unix signals or fabricated
+child events. Cancel/drain protects notification storage. Native control/job/shell lifecycle
+events and accounting remain N5; quotas/Unix-only identity policy remain N8. The original
+candidate audit below is historical; [N4 combined evidence](coverage.md#n4-implementation-and-evidence-record)
+records the completed native/minimum-Rust/retained matrix.
+
 ## Scope and evidence boundary
 
 This source audit covers [`signal.rs`](../../src/signal.rs), [`event.rs`](../../src/event.rs), [`topic_monitor.rs`](../../src/topic_monitor.rs), [`timer.rs`](../../src/timer.rs), and [`builtins/ulimit.rs`](../../src/builtins/ulimit.rs). Process lifecycle and language wait records are detailed in [03](03-process-execution-job-control.md); descriptor wakeups are in [05](05-io-redirection-file-descriptors.md). Windows APIs below are candidates, not an implemented or exercised port.

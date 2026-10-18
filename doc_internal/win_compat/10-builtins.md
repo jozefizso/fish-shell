@@ -1,5 +1,21 @@
 # Builtins
 
+## Current N4 builtin/option overlay
+
+`set -U` and noninteractive `read -U` now operate on real durable universals with flags,
+cross-process merge, callback replay and nonzero storage errors. History search/filter/output,
+append/delete/clear/save/merge/clear-session and private/named session selection are implemented.
+`functions`/`type` use full disk/embedded autoload, not only `_validate_int`. Public `funcsave`
+(`-q/--quiet`, `-d/--directory`) uses `builtins/native_fs.rs` mkdir/remove/atomic-write internally,
+without utilities. `status is-login` and its default login summary report real N4 startup state;
+`status get-file/list-files` expose embedded resources, while `status language` remains N9.
+
+N4 numeric/time locale updates have actual printf/history consumers; complete message catalogs
+and locale-format parity remain N9. `complete -C`, commandline/editor/active abbreviation operations
+remain N7/N6; jobs/wait/disown/accounting remain N5. See the
+[N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
+The original audit remains historical; earlier evidence/counts are not changed.
+
 ## Current native registry and option ownership
 
 N1 filesystem/discovery builtins and N3 portable batch families are implemented at source
@@ -24,7 +40,7 @@ N11 reconciles these owners' completed behavior, not a new destination for missi
 
 Prototype math/set/boolean restrictions are removed: math options and stdin operate, set retains
 list/slice/path/event semantics, and true/false/colon follow shared ignored-operand behavior.
-Universal state remains nonzero unsupported until N4; ordinary read is not an interactive prompt.
+Universal state is now implemented by N4 above; ordinary read is still not an interactive prompt.
 The `_` gettext helper supplies the real fixed-C/minimal fallback used by the embedded validator,
 not full N9 catalog selection. N1 ordinary path/test metadata works while Unix-only type/identity
 categories remain explicit N8 errors. [N3 mapping/evidence](coverage.md#n3-verified-evidence-record)
@@ -35,8 +51,8 @@ The [N1 evidence record](coverage.md#n1-verified-evidence-record) records passin
 gates, minimum-Rust executable verification, native/Unix regressions and actual runtime smokes.
 Required fixture absence hard-fails acceptance, not a skip; unsupported volume case/identity
 queries remain explicit errors. Historical prototype results in GOAL.md remain unchanged.
-`cd -`/directory history is supplied by shipped fish functions and remains N4/N9 integration,
-not a second native builtin history implementation.
+`cd -`/directory history is supplied by shipped fish functions through the implemented N4 loader;
+complete helper certification remains N9, not a second native builtin history implementation.
 
 ## Historical scope, inventory, and platform boundary
 

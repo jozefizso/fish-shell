@@ -1,5 +1,16 @@
 # Expansion, command discovery, completion, and highlighting
 
+## Current N4 integration overlay
+
+The shared variable/history consumers now see real persistent universal values and the native
+batch current-history selection (`reader_windows.rs`), not global-variable substitutes. Function
+discovery uses full disk/embedded autoload with ordered paths, override/tombstone and invalidation
+policy. `fish_function_path`/`fish_complete_path` mutations have real cache effects; reader-setting
+generations and history-stale interfaces are available for N6/N7. They do not enable `complete -C`,
+Tab completion, suggestions, editor search or abbreviation expansion (N7), nor port every loaded
+asset (N9). See the [N4 record](coverage.md#n4-implementation-and-evidence-record);
+the combined native/minimum-Rust/retained matrix passed and the candidate audit below is historical.
+
 ## Verified N3 implementation
 
 Native command substitution now follows the shared expansion order and separated-element rules,

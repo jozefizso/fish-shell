@@ -1,5 +1,16 @@
 # Process execution and job control
 
+## Current N4 image/startup boundary
+
+`wutil/windows.rs::native_current_exe_path` centralizes trusted OS-reported current-image
+identity for executable-relative assets/current-shell consumers, including literal extended
+install roots. Its namespace restoration is not accepted for ordinary user paths or a
+PATH-selected shell, and does not change N2's handle-based launch/bridge contracts. Normal
+startup and real login state are N4; user-visible jobs/control/accounting remain N5.
+Fork, same-PID exec and POSIX fg/bg remain permanently excluded. See the
+[N4 record](coverage.md#n4-implementation-and-evidence-record)
+for the completed native/minimum-Rust/retained matrix.
+
 ## Current N2/N3 implementation overlay
 
 `exec_windows.rs` and `exec/windows_launch.rs` now implement prepared native pipeline launch.

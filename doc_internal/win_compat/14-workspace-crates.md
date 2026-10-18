@@ -1,5 +1,21 @@
 # Workspace crates
 
+## Current N4 consumer overlay
+
+The 21-crate inventory and candidate audit below remain historical; their old unconditional-Unix
+descriptions are not the current native availability ledger. N4 root `locale/windows.rs` supplies
+NLS numeric locale to the existing Rust `printf` crate and explicit UCRT historical time formatting;
+it does not replace the formatter or certify full Fluent/gettext catalogs (N9).
+Native universal/history/public-funcsave transactions use `src/fs/windows.rs`, with checked
+identity, stable parent locks and target DACLs at staging creation; generic `tempfile` crate
+success is not evidence for those guarantees. Trusted current-image resolution lives in
+`src/wutil/windows.rs::native_current_exe_path`, not a second crate-local path policy.
+
+N4 development evidence uses `--no-default-features`; default-feature generator/catalog/install
+certification remains N9/N10. Rust 1.85 and combined native/retained results are
+recorded in the [N4 record](coverage.md#n4-implementation-and-evidence-record).
+No original audit count or earlier evidence is changed by this overlay.
+
 ## Inventory and evidence boundary
 
 [`Cargo.toml`](../../Cargo.toml) uses `members = ["crates/*"]`: there are **21 direct-child crates**, in addition to the root `fish` package and its three binaries. The table below inventories all 21, including every local build script. [`coverage.md`](coverage.md) provides the tracked-file inventory; examples of symbols below are entry points, not a claim that each crate contains only those functions.
