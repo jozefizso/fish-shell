@@ -1,0 +1,217 @@
+{
+  "phase": "N6",
+  "source_commit": "6fcfb5520",
+  "capture": "actual bg_98 stdout before N7 or performance optimization; source-identical pre-format standalone driver",
+  "workload_source": "benchmarks/windows_reader.rs",
+  "command": [
+    "native-reader-baseline.exe",
+    "target/n6-smoke-current/release",
+    "D:\\dev\\fish-workspace\\fish-windows-runtime\\target\\n6-gate-results\\baseline-pre-n7-54452-1792336585968725700"
+  ],
+  "host": {
+    "cpu": {
+      "Name": "AMD Ryzen 9 5950X 16-Core Processor            ",
+      "NumberOfCores": 16,
+      "NumberOfLogicalProcessors": 32
+    },
+    "os": "Microsoft Windows NT 10.0.26300.0",
+    "windows_defender_observed_after_run": {
+      "AMRunningMode": "Not running",
+      "AntivirusEnabled": false,
+      "RealTimeProtectionEnabled": false,
+      "AntivirusSignatureVersion": null
+    },
+    "other_antivirus": "not inspected",
+    "protection_settings_changed_by_task": false,
+    "console": "owned ConPTY, 100 columns x 30 rows; conhost buffer observations, no graphical terminal/font renderer",
+    "rust": "1.95.0",
+    "target": "x86_64-pc-windows-msvc",
+    "features": "--no-default-features",
+    "profile": "release",
+    "msvc_tools": "14.51.36231",
+    "sdk": "10.0.26100.0"
+  },
+  "artifacts": {
+    "fish.exe": {
+      "sha256": "e20b48aaaafa462aa79657e79a8327bc13a54ee68f0236a09efa1f68b45e1395",
+      "bytes": 10722816
+    },
+    "windows_native_probe.exe": {
+      "sha256": "843af09312c8e3fb10746971a2a9a79b0848666ce2c4e84714cb4acc88692e8e",
+      "bytes": 11722240
+    }
+  },
+  "method": {
+    "warmups_per_metric": 3,
+    "first_prompt_samples": 16,
+    "edit_samples_per_text": 32,
+    "child_samples": 16,
+    "fresh_private_home_per_startup": true,
+    "history": "-N private sessions",
+    "ascii_text": "a",
+    "unicode_text": "雪🐟é",
+    "clock": "std::time::Instant (monotonic)",
+    "first_prompt_scope": "includes owned ConPTY and bootstrap creation; not isolated fish process startup",
+    "edit_scope": "typed input through capture-file ACK and actual raw-input-mode observation",
+    "child_scope": "typed command, real native marker child, observed exit and following builtin ACK; not isolated CreateProcessW latency"
+  },
+  "budgets": {
+    "adopted_before": "N7 implementation and performance optimization",
+    "median_multiplier": 1.25,
+    "p95_multiplier": 1.5,
+    "fixed_noise_allowances_ms": {
+      "owned-console-first-prompt-ms": {
+        "median": 25,
+        "p95": 50
+      },
+      "ascii-edit-capture-ack-ms": {
+        "median": 5,
+        "p95": 10
+      },
+      "unicode-edit-capture-ack-ms": {
+        "median": 5,
+        "p95": 10
+      },
+      "native-child-submit-complete-ms": {
+        "median": 10,
+        "p95": 25
+      }
+    },
+    "scope": "same workload, host/protection conditions and sink; no universal host SLA",
+    "policy": "Do not raise a budget after observing a regression to make it pass."
+  },
+  "metrics": {
+    "owned-console-first-prompt-ms": {
+      "samples_ms": [
+        84.1223,
+        74.6429,
+        72.7325,
+        75.0728,
+        73.9967,
+        72.785,
+        75.3914,
+        73.1406,
+        74.4088,
+        77.1762,
+        75.95349999999999,
+        74.7002,
+        74.7383,
+        74.504,
+        74.8968,
+        73.9194
+      ],
+      "sample_count": 16,
+      "median_ms": 74.67155,
+      "nearest_rank_p95_ms": 84.1223,
+      "median_budget_ms": 118.3394375,
+      "p95_budget_ms": 176.18345
+    },
+    "ascii-edit-capture-ack-ms": {
+      "samples_ms": [
+        3.5511000000000004,
+        3.3108999999999997,
+        3.3815999999999997,
+        3.3403,
+        3.4734000000000003,
+        3.3731999999999998,
+        3.4372000000000003,
+        3.359,
+        3.3928000000000003,
+        3.4182,
+        3.5726,
+        3.4099999999999997,
+        3.5376000000000003,
+        3.6041,
+        3.5309999999999997,
+        3.5027,
+        3.3520999999999996,
+        3.6621,
+        3.3317,
+        3.4662,
+        3.3956,
+        3.5168,
+        3.3763,
+        3.3545,
+        3.7932,
+        3.415,
+        3.5376000000000003,
+        3.7261,
+        3.4001,
+        3.6374,
+        3.3830999999999998,
+        3.476
+      ],
+      "sample_count": 32,
+      "median_ms": 3.4277,
+      "nearest_rank_p95_ms": 3.7261,
+      "median_budget_ms": 9.284625,
+      "p95_budget_ms": 15.58915
+    },
+    "unicode-edit-capture-ack-ms": {
+      "samples_ms": [
+        4.511399999999999,
+        4.9441,
+        4.605899999999999,
+        4.7044,
+        4.6681,
+        5.0466,
+        4.424499999999999,
+        5.1067,
+        4.8608,
+        4.7783,
+        4.3997,
+        4.4415000000000004,
+        4.4519,
+        4.6886,
+        4.5322000000000005,
+        4.3736,
+        4.5942,
+        4.9891,
+        4.893,
+        4.6987000000000005,
+        4.7616000000000005,
+        4.695,
+        4.8511,
+        5.2094000000000005,
+        5.2267,
+        5.0005,
+        6.1743,
+        4.7915,
+        4.627,
+        4.8354,
+        5.1595,
+        4.8204
+      ],
+      "sample_count": 32,
+      "median_ms": 4.76995,
+      "nearest_rank_p95_ms": 5.2267,
+      "median_budget_ms": 10.9624375,
+      "p95_budget_ms": 17.840049999999998
+    },
+    "native-child-submit-complete-ms": {
+      "samples_ms": [
+        100.80980000000001,
+        90.5643,
+        87.6771,
+        95.3465,
+        86.4457,
+        95.143,
+        91.488,
+        90.8931,
+        88.49210000000001,
+        90.1178,
+        91.4755,
+        87.1561,
+        91.7042,
+        90.0296,
+        94.90690000000001,
+        91.41770000000001
+      ],
+      "sample_count": 16,
+      "median_ms": 91.15540000000001,
+      "nearest_rank_p95_ms": 100.80980000000001,
+      "median_budget_ms": 123.94425000000001,
+      "p95_budget_ms": 176.21470000000002
+    }
+  }
+}

@@ -1,12 +1,12 @@
 # GOAL_06 — First usable native interactive reader
 
 **Phase: N6**  
-**Status: planned / not started**  
+**Status: implemented; required N6 gates verified for the recorded development matrix**  
 **Primary native target:** `x86_64-pc-windows-msvc`; ARM64 is a separate extension.
 
 This is an execution contract for the approved roadmap at commit `2acbbad4b`.
-Acceptance cases are future specifications, not existing/runnable/passing tests.
-The completed batch prototype evidence in [GOAL.md](GOAL.md) remains unchanged.
+The acceptance fixtures are implemented and exercised below. Historical batch
+prototype evidence in [GOAL.md](GOAL.md) remains unchanged.
 
 ## Objective
 
@@ -125,6 +125,109 @@ The editor reuses existing reader/screen algorithms, not a separate shell or REP
 Fragment terminal queries and input deterministically, synchronize child-read
 ownership and compare saved/restored mode bits. Unit decoder/model tests may
 supplement these gates but cannot substitute for real console/ConPTY behavior.
+
+## Implementation and verified evidence
+
+Source commit: **`6fcfb5520`**, branch `platform/windows/interactive-reader`.
+The native entrypoint uses the existing editor, parser, screen, bindings and
+tools rather than a separate REPL. `reader/batch_windows.rs` remains independent
+for source/script/redirected input.
+
+The transport owns real console handles and consumes exactly one ready
+`ReadConsoleInputW` record on the main thread. Nested consumers share strict
+Unicode/repeat state; there is no console input worker or competing prefetch.
+Native cursor/viewport/palette APIs replace asynchronous terminal probes, so
+late responses cannot enter a nested raw reader. Foreground donation owns modes
+and protocol state through actual process/writer completion.
+
+The implemented tools include standalone/builtin key-reader options, binding and
+commandline operations, nested breakpoint, edited/silent/scalar-count/line reads,
+and deliberately nonediting `read --null`. Required first-prompt helpers need no
+Unix utilities. Native CF_UNICODETEXT clipboard errors are real failures; recursive
+substitutions inherit the caller's descriptor overlay instead of losing stderr
+redirection. Startup establishes global vi binding mode before config helpers.
+
+### Runnable commands
+
+From an x64 MSVC developer shell with SDK libraries available:
+
+```powershell
+cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bins
+cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bins
+.\target\x86_64-pc-windows-msvc\debug\fish.exe -N -i
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n6 -- --nocapture
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --release --test windows_n6 -- --nocapture
+```
+
+The three Cargo IDs are `n6_editor`, `n6_child`, `n6_tools`. Each harness drives
+both executable profiles. Real console/ConPTY, private logon/window-station and
+clipboard fixtures are required and fail closed when unavailable; no host
+clipboard fallback is permitted. Forced interactive startup rejects an arbitrary
+redirected pipe rather than claiming it is a VT console.
+
+### Recorded native and retained results
+
+Host: **Windows `10.0.26300` x64**, local NTFS and the inherited writable
+`\\localhost\D$` fixture; SDK **10.0.26100.0**, MSVC tools **14.51.36231**.
+Native binaries and gates used **`--no-default-features`**.
+
+| Toolchain | Native debug library | N6-EDITOR family executions | N6-CHILD family executions | N6-TOOLS family executions |
+|---|---:|---:|---:|---:|
+| Rust 1.95.0 | 111 passed | 32 passed | 20 passed | 28 passed |
+| Rust 1.85.0 | 111 passed | 32 passed | 20 passed | 28 passed |
+
+Family counts include both debug/release harnesses and both debug/release
+artifacts: **80 executions per toolchain, zero failed or ignored**. The minimum
+toolchain used its own debug **and release** binaries under `target/n6-msrv`,
+not a stable-release fallback.
+
+The existing workflow step **“Native GOAL leaf, library, initialization and
+acceptance gates”** was replayed locally for both toolchains. Its leaf/library,
+initialization/provenance, 30-record prototype registry and inherited N1–N5
+debug/release gates passed. The initial replay commands reached their tool
+deadlines; continuations executed the remaining gates, preserving exact
+discovery/case assertions rather than skipping unfinished work. Logs are under
+`target/n6-ci-stable/` and `target/n6-ci-msrv/`, including retained native
+console traces. This is segmented local execution, **not a remote CI run**;
+unchanged W1 helper steps are not newly claimed by this replay.
+
+Retained Unix library: **183 passed, zero failed or ignored**. An actual Unix
+PTY smoke typed/edited arithmetic and `read`, observed `42` and `雪🐟aZ`,
+returned exit 3 and verified exact termios restoration. Owned trace:
+`/tmp/fish-n6-unix-reader-zv9iknz5/trace.vt`.
+
+### Actual native smoke and pre-parity baseline
+
+An independent current-source ConPTY smoke, outside Cargo tests, exercised both
+profiles: typed arithmetic produced `native=42`; nested `read` edited
+`雪🐟ab` into `雪🐟aZ`; the next command returned status 0; `exit 3` returned 3.
+It observed viewport `61 × 17`, then `COLUMNS=43` with 17 rows, then
+`LINES=11` with 43 columns. Original and final console modes were:
+
+| Console mode | Before fish | After fish |
+|---|---:|---:|
+| Input | 503 | 503 |
+| Output | 7 | 7 |
+
+Owned evidence is under
+`target/n6-gate-results/native-reader-smoke-{profile}-{pid}-{stamp}/`.
+The viewport family additionally queries an owned hidden classic console with
+nonzero viewport origin, custom palette, reverse video and offscreen live cursor.
+
+[Raw pre-N7 measurements and adopted budgets](baselines/N6.json) retain 96
+release-profile samples, exact binary digests, host/protection conditions and
+workload boundaries. `benchmarks/windows_reader.rs` reproduces the owned-console
+workload. First-prompt and child metrics include their stated fixture/typing
+costs; they are not isolated process-creation measurements or graphical/font
+accessibility certification. N11 must compare matching workloads/conditions and
+must not raise budgets after observing a regression.
+
+This closes **N6**, not N7 completion/editor/rendering parity. Optional unqueried
+VT capabilities retain fallback policy; native palette queries do not claim all
+remote-terminal theme extensions. Default-feature compilation emitted missing
+Sphinx/gettext-tool warnings and certifies neither installed help nor catalogs.
+Other Windows/console/filesystem/ARM64 matrices and human accessibility signoffs
+remain with their stated later owners.
 
 ## Verification and exit evidence
 

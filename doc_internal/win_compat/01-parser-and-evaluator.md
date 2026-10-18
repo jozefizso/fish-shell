@@ -14,7 +14,7 @@ the final native/minimum-Rust/retained matrix passed; the N3 evidence below rema
 
 At `861a9bdc6`, native batch evaluation uses the shared grammar, control flow, function scopes,
 source/eval and expansion machinery. No Windows-only language or host-shell evaluator was added.
-`reader_windows.rs` supplies noninteractive UTF-8/BOM/CRLF source independently of a console editor.
+At that revision `reader_windows.rs` supplied noninteractive UTF-8/BOM/CRLF source; N6 moves that implementation to `reader/batch_windows.rs` independently of the shared console editor.
 Trace/profile sinks and function-frame queries are exercised by [N3](GOAL_03.md); user-visible
 job supervision and interactive reader state retain N5/N6 ownership.
 

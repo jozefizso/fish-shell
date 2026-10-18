@@ -1,19 +1,49 @@
 # Terminal, reader, screen, and input
 
-## Current native batch/state overlay
+## Current N6 native reader overlay
 
-`reader_windows.rs` provides the N3 noninteractive source reader and N4 actual current-history
-selection. History snapshots can be marked stale by native directory notifications without
-importing foreign session commands automatically. `env_dispatch/windows.rs` applies actual history,
-read-limit, trace, function/completion-path and locale effects, and exposes a reader-settings
-generation for N6/N7. These are real consumer interfaces, not an implemented input loop,
-commandline buffer, console mode/renderer, suggestions or search UI. Those remain N6/N7.
-The candidate terminal audit below remains historical; see the
-[N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
+The native entrypoint now selects the shared interactive `reader/reader.rs` and
+the separate `reader/batch_windows.rs` source/history path. This is an implemented
+reader verified for its recorded matrix, not complete N7 parity;
+[GOAL_06](GOAL_06.md#implementation-and-verified-evidence) records actual acceptance.
+
+`console_windows.rs` owns independently validated, noninheritable duplicates of
+the real console handles. `input/windows.rs` waits on the retained input handle
+and reads exactly one ready `ReadConsoleInputW` record on the main thread.
+Nested editor, `read`, key-reader and breakpoint consumers share the decoder;
+there is no input worker or competing `ReadFile` console reader. Strict split
+UTF-16/UTF-8, physical modifiers, committed text, repeats, AltGr and ignored
+nontext records have explicit handling. `native_text.rs` keeps canonical
+escaped-byte representations of valid native scalars atomic across editing and
+undo; full terminal-cell/layout parity remains N7.
+
+`tty_handoff/windows.rs` owns native modes and emitted protocol state together.
+It pauses input and disables protocols before restoring cooked modes; foreground
+jobs retain donation through actual process/writer completion. Reclaim enters
+editor modes before enabling protocols. Original unrelated mode bits survive
+normal exit and recoverable failures; abrupt process kill is not RAII.
+
+Cursor/viewport queries use `GetConsoleScreenBufferInfo`; palette-backed
+background queries use `GetConsoleScreenBufferInfoEx`, including reverse video.
+Coordinates subtract the visible viewport origin; an off-viewport live cursor is
+unknown position, not EOF. Native startup/recurrent queries emit no OSC/DSR/DA
+probes, so late replies cannot become another reader's data. This native palette
+policy does not claim every remote terminal extension or full N7 theme parity.
+Physical console records do not need Kitty keyboard negotiation.
+
+`env_dispatch/windows.rs` now applies actual reader settings/repaint effects,
+and native startup establishes global `fish_bind_mode` before config functions.
+`bind`, `commandline`, nested `breakpoint`, standalone/builtin `fish_key_reader`
+and interactive `read` use real shared state and owned input. `read --null`
+deliberately bypasses editing/bindings and preserves committed escape/paste/control
+bytes, with scalar counts, limits, cancellation and shared-cursor semantics.
+`clipboard_windows.rs` implements bounded strict CF_UNICODETEXT copy/paste with
+real busy/denied/invalid-data errors; it is separate from the in-memory kill ring.
+Named native control handlers are distinct from typed editor Ctrl-C.
 
 ## Scope and evidence
 
-This is a source audit, not a report of a native Windows build or terminal run. Windows APIs below are candidate replacements, not existing fish backends. Linux-specific behavior is distinguished from the much larger POSIX/terminal-protocol boundary. Source links are relative to this document.
+The table below is the original source audit, not a fresh build/run report. Candidate replacements and proposed scenarios remain historical unless superseded by the current-source overlay and its linked evidence. Linux-specific behavior is distinguished from the larger POSIX/terminal-protocol boundary.
 
 ## Component-by-component coverage
 
@@ -51,7 +81,7 @@ For console output, enable `ENABLE_PROCESSED_OUTPUT` and `ENABLE_VIRTUAL_TERMINA
 
 For console input, either select VT input or translate `ReadConsoleInputW` records; do not consume both competing paths. Configure line/echo/processed input deliberately: `ENABLE_PROCESSED_INPUT` changes Ctrl-C control-event behavior. Structured input must handle repeats, key-up filtering, UTF-16 pairs, dead keys, AltGr and finalized IME text. Mouse/focus records are not automatically equivalent to fish's VT event vocabulary; unsupported events need an explicit ignore or translation policy. Quick Edit changes require `ENABLE_EXTENDED_FLAGS`, and unrelated user mode bits should be preserved.
 
-These are proposed backend boundaries; the existing `InputEventQueuer` trait still exposes fds and decoder callbacks still perform waits. Likewise, the current code has no native console renderer or record translator. Reusing algorithms is not evidence that the modules compile unchanged on Windows.
+At audit time these were proposed backend boundaries. The current N6 overlay above supplies the native console translator, waits, renderer integration and nested ownership. Shared fd-shaped interfaces remain logical identifiers on Windows, not cast HANDLEs; retaining algorithms alone still does not establish complete N7 behavior.
 
 ## Semantic gaps and Windows validation scenarios
 

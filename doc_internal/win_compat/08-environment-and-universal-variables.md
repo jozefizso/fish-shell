@@ -24,8 +24,10 @@ record implemented scope and the completed native/minimum-Rust/retained-suite ma
   or unsafe crash-orphan sweep is promised. Failures retain pending mutations. Callbacks/effects
   run outside environment locks; failed-mutation events replay only after successful persistence.
 - Read-limit/trace, function/completion-path invalidation and actual history/private selection
-  have consumers. Shared width effects and explicit reader-settings generations do not implement
-  N6/N7 editor state; the history stale interface does not import foreign commands automatically.
+  have consumers. N6 connects shared width/settings/color/repaint effects to the real reader and
+  initializes global binding mode before config helpers. The old unused settings-generation
+  interface is removed; N7 owns full context/publication parity. History invalidation still does
+  not import foreign session commands automatically.
 - Exported LC_ALL > category > LANG selects NLS numeric/UCRT historical time locale. C/UTF-8,
   native Windows locale IDs and declared aliases are supported; UTC/Windows TZ IDs use historical
   DST. Unsupported IANA/POSIX TZ/GNU-format inputs diagnose. Full catalogs/locale parity remain N9.

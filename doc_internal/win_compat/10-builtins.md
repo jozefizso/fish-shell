@@ -11,10 +11,32 @@ without utilities. `status is-login` and its default login summary report real N
 `status get-file/list-files` expose embedded resources, while `status language` remains N9.
 
 N4 numeric/time locale updates have actual printf/history consumers; complete message catalogs
-and locale-format parity remain N9. `complete -C`, commandline/editor/active abbreviation operations
-remain N7/N6; jobs/wait/disown/accounting now use the N5 overlay below. See the
+and locale-format parity remain N9. N6 now enables commandline/editor tools and the
+active completion engine; N7 owns evaluated-completion/abbreviation/editor parity.
+Jobs/wait/disown/accounting use the N5 overlay below. See the
 [N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
 The original audit remains historical; earlier evidence/counts are not changed.
+
+## Current N6 reader/tool overlay
+
+`bind`, `commandline`, nested `breakpoint`, interactive `read` and standalone/builtin
+`fish_key_reader` now use the shared reader and one retained console input owner.
+Key-reader version/verbose/continuous flags and actual invalid/redirected stream
+behavior are exercised by N6 fixtures; installed help remains N9. Ordinary `read`
+supports prompt, silent, scalar counts and line modes; redirected input ignores
+editor metadata without executing prompt commands. `read --null` is deliberately
+nonediting even on a console: committed escapes/control/paste bytes remain data,
+with NUL termination, limits, cancellation, scalar counts and nested cursor
+ownership. There is no hidden byte-reader thread.
+
+Native `set_color` uses the shared style parser/output paths. CF_UNICODETEXT
+clipboard errors remain real failures, including through command substitution:
+recursive evaluation inherits the enclosing logical descriptor overlay, replacing
+only substitution stdout. Alias order, closed stderr, stdin and extra descriptors
+retain their existing native capability boundaries.
+
+[GOAL_06](GOAL_06.md#implementation-and-verified-evidence) records verified N6
+console/tool behavior; source availability is still not full N7 parity.
 
 ## Current N5 lifecycle and accounting overlay
 
@@ -61,7 +83,7 @@ The authoritative [option/subcommand ledger](coverage.md#builtin-option-and-subc
 enumerates each builtin flag/alias/subcommand, its current supported/rejected/unavailable
 state, required semantics and owner. The [executable CLI ledger](coverage.md#executable-cli-option-ledger)
 also covers every fish, fish_indent and fish_key_reader option, including their builtin tool
-spellings. Native standalone/builtin formatter modes are delivered; key-reader remains N6 and help N9.
+spellings. Native formatter and N6 key-reader implementations are enabled; installed help remains N9.
 
 Ordinary filesystem namespaces, metadata, timestamps/same-file and native permission options are
 N1; Unix-only identity/mode/device options and quotas are N8; help is N9. Portable batch/string/

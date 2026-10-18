@@ -3,12 +3,14 @@
 ## Current N4 integration overlay
 
 The shared variable/history consumers now see real persistent universal values and the native
-batch current-history selection (`reader_windows.rs`), not global-variable substitutes. Function
+batch history selection (now `reader/batch_windows.rs`), not global-variable substitutes. Function
 discovery uses full disk/embedded autoload with ordered paths, override/tombstone and invalidation
-policy. `fish_function_path`/`fish_complete_path` mutations have real cache effects; reader-setting
-generations and history-stale interfaces are available for N6/N7. They do not enable `complete -C`,
-Tab completion, suggestions, editor search or abbreviation expansion (N7), nor port every loaded
-asset (N9). See the [N4 record](coverage.md#n4-implementation-and-evidence-record);
+policy. `fish_function_path`/`fish_complete_path` mutations have real cache effects. N6 enables
+the shared editor/completion/highlight consumers and actual reader-setting hooks instead of the
+earlier unused settings-generation interface. N7 still owns full evaluated completion, suggestions,
+search, abbreviation and context-generation parity; loading assets does not port every dependency
+(N9). See [N6 implementation evidence](GOAL_06.md#implementation-and-verified-evidence) and the
+[N4 record](coverage.md#n4-implementation-and-evidence-record);
 the combined native/minimum-Rust/retained matrix passed and the candidate audit below is historical.
 
 ## Verified N3 implementation

@@ -5,7 +5,7 @@
 Native fish now supports normal config → ordered init commands → command/script/stdin execution;
 `-N` skips config but retains `-C` and private history, `-P` selects private history, `-l` and
 default/query status expose real login state, and `--profile-startup` measures real stages.
-`-n` avoids config/init/persistent-state effects. Interactive/key-reader remain N6 and help N9.
+`-n` avoids config/init/persistent-state effects. N6 enables the real interactive/key-reader entrypoints; installed help remains N9.
 
 `env/config_paths.rs` locates executable-relative install assets independently of
 `path/windows_config.rs` user config/data/cache roots. `wutil/windows.rs::native_current_exe_path`
@@ -16,11 +16,18 @@ Full ordered disk/embedded autoload preserves overrides/tombstones and generated
 precedence. Public `funcsave` uses `builtins/native_fs.rs` atomic writes, mkdir and removal,
 not external coreutils. Embedded `status get-file/list-files` are real core resource consumers.
 
-This is not a complete per-file asset/dependency certification: N6 first prompt/key handling,
-N7 active completion/editor helpers, N8 platform/providers/psub and N9 remaining helpers,
-external-editor tools, help/catalogs and user tools retain ownership. Earlier N3 evidence and
+N6 ports required utility-free first-prompt/default-binding helpers and native
+clipboard/private editor-temp services; see its current evidence below. This is
+not complete per-file asset certification: N7 completion/editor parity, N8
+platform/providers/psub and N9 remaining helpers, optional external editors,
+help/catalogs and user tools retain ownership. Earlier N3 evidence and
 the original candidate audit/counts below remain historical. See the
 [N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
+
+The [N6 reader overlay](06-terminal-reader-screen-input.md#current-n6-native-reader-overlay)
+documents actual console transport and tools; [GOAL_06](GOAL_06.md#implementation-and-verified-evidence)
+records verified N6 console cases. Default-feature compilation
+with missing Sphinx/msgfmt is not successful help/catalog generation.
 
 ## Current N5 binary/lifecycle consumers
 

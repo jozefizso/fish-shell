@@ -2,8 +2,9 @@
 
 ## Current N4 implementation overlay
 
-`history/{mod,file,history,yaml_backend}.rs`, `fs/windows.rs` and `reader_windows.rs` now implement
-native named/private/default batch histories and their commands, not an in-memory placeholder.
+`history/{mod,file,history,yaml_backend}.rs`, `fs/windows.rs` and `reader/batch_windows.rs` implement
+native named/private/default histories and commands, now consumed by the N6 shared reader too.
+Full interactive search/suggestion/session parity remains N7, not a storage-only claim.
 Windows uses immutable owned byte snapshots and publishes complete flushed transactions rather
 than partial appends. Existing fish YAML-compatible records, multiline/Unicode content and
 real wall-clock timestamps are retained; Fish 1.x remains an existing unsupported decoder.

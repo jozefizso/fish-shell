@@ -4,7 +4,7 @@ This directory maps fish components to their Linux/POSIX dependencies and native
 
 ## Current status and planning entry points
 
-A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/cwd/discovery/globs, N2 streaming I/O/runtime ownership, N3 portable batch language, N4 startup/persistence and N5 native jobs/control/accounting are verified for the recorded host/volume/feature matrix.** It retains fish's evaluator and real native streams/environment/children; it is not yet an interactive Windows shell. See the explicit SMB glob capability limit below.
+A native `x86_64-pc-windows-msvc` runtime retains fish's evaluator and real native streams/environment/children. **N1 filesystem/cwd/discovery/globs, N2 streaming I/O/runtime ownership, N3 portable batch language, N4 startup/persistence, N5 native jobs/control/accounting and N6 first interactive reader are verified for the recorded matrix.** This is not full N7 editor parity. See [N6 implementation and evidence](GOAL_06.md#implementation-and-verified-evidence) and the explicit SMB glob limit below.
 
 - [GOAL.md](GOAL.md) records the completed prototype contract and its historical native/Unix verification evidence; that record is not rewritten by the N1 integration.
 - [ROADMAP.md](ROADMAP.md) defines the eleven dependency-ordered phases, semantic decisions and mandatory acceptance gates.
@@ -15,6 +15,7 @@ A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/
 - The [N3 evidence record](coverage.md#n3-verified-evidence-record) maps portable options to eight behavioral families and records full batch-language, scripts, UTF-32 PCRE2, buffered read and formatter verification at source commit `861a9bdc6`.
 - [N4 delivery and evidence](GOAL_04.md#runnable-target-and-current-evidence) records verified native startup/state at `c52f6d98a`: three gates, eleven families, both harness profiles, minimum-Rust execution and retained Unix results.
 - [N5 delivery and evidence](coverage.md#n5-implementation-and-evidence-record) records source `0106034e1`: three integration IDs, 25 families, both harness/artifact profiles, real private assignment rejection, minimum-Rust execution and actual native/Unix smokes. Source contracts are in [process ownership](03-process-execution-job-control.md#current-n5-native-lifecycle-contract), [control/accounting](04-signals-events-waits.md#current-n5-control-and-accounting-contract) and [runtime consumers](12-concurrency-and-runtime-support.md#current-n5-lifecycle-consumers).
+- [N6 implementation and evidence](GOAL_06.md#implementation-and-verified-evidence) records source `6fcfb5520`, both toolchains/harness/artifact profiles, actual native/Unix reader smokes and pre-parity benchmark samples. [Reader ownership](06-terminal-reader-screen-input.md#current-n6-native-reader-overlay) documents the single input owner, native query equivalents and checked child handoff.
 
 The component analyses and old file counts describe the original pre-prototype audit. Current-source overlays in [filesystem analysis](07-filesystem-paths-wildcards.md) and [builtin analysis](10-builtins.md) distinguish integrating implementations from historical candidate APIs. Historical counts never establish current support, and proposed future scenarios are not passing tests.
 
@@ -41,8 +42,9 @@ config/init/state effects. Syntax-only, feature, version, debug/category/trace/p
 options and non-help formatter modes are implemented. Durable universal/history
 state, full core autoload and utility-free public `funcsave` are implemented.
 Native `&`, jobs/wait/disown, lifecycle events and accounting are implemented as described below.
-Interactive/key-reader operation, active `complete -C` and help still require their owning
-phases; this is not a full interactive Windows shell.
+N6 enables interactive/key-reader operation, shared binding/commandline/breakpoint
+state and the active completion engine. Its current verification is linked above;
+evaluated completion/editor parity belongs to N7, and installed help remains N9.
 
 Ordinary namespace, metadata and native permission options were delivered by N1. Full portable batch
 language/builtins and formatter flags are N3; startup/persistence is implemented and verified in N4;

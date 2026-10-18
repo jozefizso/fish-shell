@@ -18,6 +18,10 @@ Interactive improvements
 - In :envvar:`fish_color_valid_path`, the ``--reset`` option can be given to completely override :envvar:`fish_color_param` rather than merging (:issue:`13042`).
 - When setting :envvar:`fish_complete_path`, fish no longer forgets completions that ship with fish and that fish happened to load earlier (:issue:`13049`).
 - ``funced`` no longer saves a function copied interactively with ``functions --copy`` to the file of the original function (:issue:`12305`).
+- The experimental native Windows backend now has a shared interactive reader,
+  strict Unicode console-record input, core editing/bindings, nested reader tools,
+  native clipboard support and checked console-mode/protocol handoff to children.
+  Full editor/completion parity and installed help/localization remain later phases.
 
 Scripting improvements
 ----------------------
@@ -37,9 +41,10 @@ Scripting improvements
   Locked, flushed replacement checks identities and preserves the DACL before
   staging bytes; this is not a power-loss or SMB-server durability guarantee.
   N4 startup/sharing/recovery gates pass in both native development profiles.
-  This does not complete all eleven Windows phases. Interactive editing, user-visible native jobs, evaluated completion,
-  help and full locale/assets parity remain separate phases. Faithful fork,
-  same-PID exec and POSIX fg/bg remain excluded.
+  Native jobs/wait/disown, lifecycle events, cancellation and process accounting
+  are also implemented. This does not complete all eleven Windows phases:
+  evaluated completion/editor parity, help and full locale/assets parity remain
+  separate phases. Faithful fork, same-PID exec and POSIX fg/bg remain excluded.
 
 Regression fixes:
 -----------------
