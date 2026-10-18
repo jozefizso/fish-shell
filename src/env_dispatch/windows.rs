@@ -22,5 +22,7 @@ pub fn env_dispatch_var_change(_milieu: VarChangeMilieu, key: &wstr, vars: &EnvS
                 .map(|value| value.as_list().to_vec())
                 .unwrap_or_default(),
         );
+    } else if key == "fish_function_path" {
+        crate::function::invalidate_path();
     }
 }

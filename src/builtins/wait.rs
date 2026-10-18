@@ -192,8 +192,7 @@ pub fn wait(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     }
 
     if print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     if w.wopt_index == argc {

@@ -11,26 +11,29 @@ use crate::{
     proc::{InternalJobId, Pid},
 };
 
-#[cfg(unix)]
 use crate::{
     flog::flog,
     io::{IoChain, IoStreams},
-    parser::Block,
-    reader::reader_update_termsize,
-    signal::{RawSignal, signal_check_cancel, signal_handle},
+    parser::{Block, LoopStatus},
+    signal::signal_check_cancel,
 };
 #[cfg(unix)]
+use crate::{
+    reader::reader_update_termsize,
+    signal::{RawSignal, signal_handle},
+};
 use fish_common::{ScopeGuard, escape};
 use fish_widestring::str2wcstring;
 #[cfg(unix)]
+use std::sync::atomic::AtomicU32;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 
-#[cfg(unix)]
 pub enum EventType {
     Any,
+    #[cfg(unix)]
     Signal,
     Variable,
     ProcessExit,
@@ -74,12 +77,12 @@ pub enum EventDescription {
     },
 }
 
-#[cfg(unix)]
 impl EventDescription {
     fn str_param1(&self) -> Option<&wstr> {
         match self {
+            #[cfg(unix)]
+            EventDescription::Signal { .. } => None,
             EventDescription::Any
-            | EventDescription::Signal { .. }
             | EventDescription::ProcessExit { .. }
             | EventDescription::JobExit { .. }
             | EventDescription::CallerExit { .. } => None,
@@ -91,6 +94,7 @@ impl EventDescription {
     fn name(&self) -> &'static wstr {
         match self {
             EventDescription::Any => L!("any"),
+            #[cfg(unix)]
             EventDescription::Signal { .. } => L!("signal"),
             EventDescription::Variable { .. } => L!("variable"),
             EventDescription::ProcessExit { .. } => L!("process-exit"),
@@ -119,11 +123,11 @@ impl EventDescription {
     }
 }
 
-#[cfg(unix)]
 impl From<&EventDescription> for EventType {
     fn from(desc: &EventDescription) -> Self {
         match desc {
             EventDescription::Any => EventType::Any,
+            #[cfg(unix)]
             EventDescription::Signal { .. } => EventType::Signal,
             EventDescription::Variable { .. } => EventType::Variable,
             EventDescription::ProcessExit { .. } => EventType::ProcessExit,
@@ -134,7 +138,6 @@ impl From<&EventDescription> for EventType {
     }
 }
 
-#[cfg(unix)]
 #[derive(Debug)]
 pub struct EventHandler {
     /// Properties of the event to match.
@@ -148,7 +151,6 @@ pub struct EventHandler {
     pub fired: AtomicBool,
 }
 
-#[cfg(unix)]
 impl EventHandler {
     pub fn new(desc: EventDescription, name: Option<WString>) -> Self {
         Self {
@@ -165,8 +167,9 @@ impl EventHandler {
             EventDescription::ProcessExit { pid } => pid.is_some(),
             EventDescription::JobExit { pid, .. } => pid.is_some(),
             EventDescription::CallerExit { .. } => true,
-            EventDescription::Signal { .. }
-            | EventDescription::Variable { .. }
+            #[cfg(unix)]
+            EventDescription::Signal { .. } => false,
+            EventDescription::Variable { .. }
             | EventDescription::Generic { .. }
             | EventDescription::Any => false,
         }
@@ -176,6 +179,7 @@ impl EventHandler {
     fn matches(&self, event: &Event) -> bool {
         match (&self.desc, &event.desc) {
             (EventDescription::Any, _) => true,
+            #[cfg(unix)]
             (
                 EventDescription::Signal { signal },
                 EventDescription::Signal { signal: ev_signal },
@@ -211,7 +215,6 @@ impl EventHandler {
         }
     }
 }
-#[cfg(unix)]
 type EventHandlerList = Vec<Arc<EventHandler>>;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -281,7 +284,6 @@ impl Event {
     }
 
     /// Test if specified event is blocked.
-    #[cfg(unix)]
     fn is_blocked(&self, parser: &Parser) -> bool {
         for block in parser.blocks_iter_rev() {
             if block.event_blocks {
@@ -328,16 +330,16 @@ pub fn get_desc(parser: &Parser, evt: &Event) -> WString {
     str2wcstring(&s)
 }
 
-// Event delivery and signal observation are not part of native batch execution.
-#[cfg(unix)]
-mod unix {
+mod dispatch {
     use super::*;
 
+    #[cfg(unix)]
     /// All the signals we are interested in are in the 1-32 range (with 32 being the typical SIGRTMAX),
     /// but we can expand it to 64 just to be safe. All code checks if a signal value is within bounds
     /// before handling it.
     const SIGNAL_COUNT: usize = 64;
 
+    #[cfg(unix)]
     struct PendingSignals {
         /// A counter that is incremented each time a pending signal is received.
         counter: AtomicU32,
@@ -348,6 +350,7 @@ mod unix {
         last_counter: Mutex<u32>,
     }
 
+    #[cfg(unix)]
     impl PendingSignals {
         /// Mark a signal as pending. This may be called from a signal handler. We expect only one
         /// signal handler to execute at once. Also note that these may be coalesced.
@@ -385,12 +388,15 @@ mod unix {
         }
     }
 
+    #[cfg(unix)]
     // Required until inline const is stabilized.
     #[allow(clippy::declare_interior_mutable_const)]
     const ATOMIC_BOOL_FALSE: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
     #[allow(clippy::declare_interior_mutable_const)]
     const ATOMIC_U32_0: AtomicU32 = AtomicU32::new(0);
 
+    #[cfg(unix)]
     static PENDING_SIGNALS: PendingSignals = PendingSignals {
         counter: AtomicU32::new(0),
         received: [ATOMIC_BOOL_FALSE; SIGNAL_COUNT],
@@ -404,6 +410,7 @@ mod unix {
 
     /// Tracks the number of registered event handlers for each signal.
     /// This is inspected by a signal handler. We assume no values in here overflow.
+    #[cfg(unix)]
     static OBSERVED_SIGNALS: [AtomicU32; SIGNAL_COUNT] = [ATOMIC_U32_0; SIGNAL_COUNT];
 
     /// List of events that have been sent but have not yet been delivered because they are blocked.
@@ -412,12 +419,14 @@ mod unix {
     /// temporarily moved here. There was no mutex around this in the cpp code. TODO: Move it back.
     static BLOCKED_EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 
+    #[cfg(unix)]
     fn inc_signal_observed(sig: RawSignal) {
         if let Some(sig) = OBSERVED_SIGNALS.get(usize::from(sig)) {
             sig.fetch_add(1, Ordering::Relaxed);
         }
     }
 
+    #[cfg(unix)]
     fn dec_signal_observed(sig: RawSignal) {
         if let Some(sig) = OBSERVED_SIGNALS.get(usize::from(sig)) {
             sig.fetch_sub(1, Ordering::Relaxed);
@@ -426,6 +435,7 @@ mod unix {
 
     /// Returns whether an event listener is registered for the given signal. This is safe to call from
     /// a signal handler.
+    #[cfg(unix)]
     pub fn is_signal_observed(sig: libc::c_int) -> bool {
         // We are in a signal handler!
         OBSERVED_SIGNALS
@@ -435,6 +445,7 @@ mod unix {
 
     /// Add an event handler.
     pub fn add_handler(eh: EventHandler) {
+        #[cfg(unix)]
         if let EventDescription::Signal { signal } = eh.desc {
             signal_handle(signal);
             inc_signal_observed(signal);
@@ -457,6 +468,7 @@ mod unix {
             let handler = &handlers[i];
             if pred(handler) {
                 handler.removed.store(true, Ordering::Relaxed);
+                #[cfg(unix)]
                 if let EventDescription::Signal { signal } = handler.desc {
                     dec_signal_observed(signal);
                 }
@@ -513,7 +525,7 @@ mod unix {
 
             // Construct a buffer to evaluate, starting with the function name and then all the
             // arguments.
-            let mut buffer = handler.function_name.clone();
+            let mut buffer = escape(&handler.function_name);
             for arg in &event.arguments {
                 buffer.push(' ');
                 buffer.push_utfstr(&escape(arg));
@@ -523,8 +535,20 @@ mod unix {
             // non-interactive.
             let _non_interactive = parser.push_scope(|s| s.is_interactive = false);
             let saved_statuses = parser.last_statuses();
+            let saved_returning = std::mem::replace(&mut parser.libdata_mut().returning, false);
+            let saved_exit_current_script =
+                std::mem::replace(&mut parser.libdata_mut().exit_current_script, false);
+            let saved_loop_status =
+                std::mem::replace(&mut parser.libdata_mut().loop_status, LoopStatus::Normals);
             let parser = &mut **ScopeGuard::new(&mut *parser, |parser| {
-                parser.set_last_statuses(saved_statuses);
+                let requested_exit = parser.libdata().exit_current_script;
+                if !requested_exit {
+                    parser.set_last_statuses(saved_statuses);
+                }
+                parser.libdata_mut().returning = saved_returning;
+                parser.libdata_mut().exit_current_script =
+                    saved_exit_current_script || requested_exit;
+                parser.libdata_mut().loop_status = saved_loop_status;
             });
 
             flog!(
@@ -542,6 +566,9 @@ mod unix {
 
             handler.fired.store(true, Ordering::Relaxed);
             fired_one_shot |= handler.is_one_shot();
+            if parser.libdata().exit_current_script {
+                break;
+            }
         }
 
         if fired_one_shot {
@@ -551,13 +578,14 @@ mod unix {
 
     /// Fire all delayed events attached to the given parser.
     pub fn fire_delayed(parser: &mut Parser) {
+        crate::threads::assert_is_main_thread();
         // Do not invoke new event handlers from within event handlers.
         if parser.scope().is_event {
             return;
         }
 
         // Do not invoke new event handlers if we are unwinding (#6649).
-        if signal_check_cancel() != 0 {
+        if signal_check_cancel() != 0 || parser.libdata().exit_current_script {
             return;
         }
 
@@ -568,41 +596,53 @@ mod unix {
 
         // Append all signal events to to_send.
         // 'signals' contains a bit set for each signal that has been received.
-        let mut signals: u64 = PENDING_SIGNALS.acquire_pending();
-        while signals != 0 {
-            let sig = signals.trailing_zeros() as i32;
-            signals &= !(1_u64 << sig);
-            let sig = RawSignal::new(sig);
+        #[cfg(unix)]
+        {
+            let mut signals: u64 = PENDING_SIGNALS.acquire_pending();
+            while signals != 0 {
+                let sig = signals.trailing_zeros() as i32;
+                signals &= !(1_u64 << sig);
+                let sig = RawSignal::new(sig);
 
-            // HACK: The only variables we change in response to a *signal* are $COLUMNS and $LINES.
-            // Do that now.
-            if sig == libc::SIGWINCH {
-                reader_update_termsize(parser);
+                // HACK: The only variables we change in response to a *signal* are $COLUMNS and $LINES.
+                // Do that now.
+                if sig == libc::SIGWINCH {
+                    reader_update_termsize(parser);
+                }
+                let event = Event {
+                    desc: EventDescription::Signal { signal: sig },
+                    arguments: vec![sig.name().into()],
+                };
+                to_send.push(event);
             }
-            let event = Event {
-                desc: EventDescription::Signal { signal: sig },
-                arguments: vec![sig.name().into()],
-            };
-            to_send.push(event);
         }
 
-        // Fire or re-block all events. Don't obtain BLOCKED_EVENTS until we know that we have at least
-        // one event that is blocked.
-        let mut blocked_events = None;
-        for event in to_send {
-            if event.is_blocked(parser) {
-                if blocked_events.is_none() {
-                    blocked_events = Some(BLOCKED_EVENTS.lock().expect("Mutex poisoned"));
+        // Never retain the queue lock while invoking a handler: a handler can
+        // emit another event, which is queued until main-thread dispatch resumes.
+        while !to_send.is_empty() {
+            let mut delivered = false;
+            for event in to_send {
+                if event.is_blocked(parser) || parser.libdata().exit_current_script {
+                    BLOCKED_EVENTS.lock().expect("Mutex poisoned").push(event);
+                } else {
+                    fire_internal(parser, &event);
+                    delivered = true;
                 }
-                blocked_events.as_mut().unwrap().push(event);
-            } else {
-                // fire_internal() does not access BLOCKED_EVENTS so this call can't deadlock.
-                fire_internal(parser, &event);
             }
+            if !delivered {
+                break;
+            }
+            to_send = std::mem::take(&mut *BLOCKED_EVENTS.lock().expect("Mutex poisoned"));
         }
     }
 
+    /// Queue a callback-produced event without entering parser state.
+    pub fn enqueue(event: Event) {
+        BLOCKED_EVENTS.lock().expect("Mutex poisoned!").push(event);
+    }
+
     /// Enqueue a signal event. Invoked from a signal handler.
+    #[cfg(unix)]
     pub fn enqueue_signal(signal: libc::c_int) {
         // Beware, we are in a signal handler
         PENDING_SIGNALS.mark(signal);
@@ -610,10 +650,11 @@ mod unix {
 
     /// Fire the specified event event, executing it on `parser`.
     pub fn fire(parser: &mut Parser, event: Event) {
+        crate::threads::assert_is_main_thread();
         // Fire events triggered by signals.
         fire_delayed(parser);
 
-        if event.is_blocked(parser) {
+        if event.is_blocked(parser) || parser.libdata().exit_current_script {
             BLOCKED_EVENTS.lock().expect("Mutex poisoned!").push(event);
         } else {
             fire_internal(parser, &event);
@@ -662,6 +703,7 @@ mod unix {
             }
 
             match &evt.desc {
+                #[cfg(unix)]
                 EventDescription::Signal { signal } => {
                     let name: WString = signal.name().into();
                     streams
@@ -697,5 +739,4 @@ mod unix {
     }
 }
 
-#[cfg(unix)]
-pub use unix::*;
+pub use dispatch::*;

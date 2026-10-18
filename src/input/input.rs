@@ -7,9 +7,10 @@ use crate::{
     env::{EnvStack, Environment as _},
     fd_readable_set::{FdReadableSet, Timeout},
     flog::{FloggableDebug, flog},
-    key::{self, Key, Modifiers, ViewportPosition, char_to_symbol},
+    key::{self, Key, Modifiers, ViewportPosition},
     prelude::*,
     reader::reader_test_and_clear_interrupted,
+    text_helpers::char_to_symbol,
     universal_notifier::default_notifier,
     wutil::{fish_is_pua, fish_wcstol},
 };

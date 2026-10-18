@@ -1,25 +1,35 @@
 //! Functions for syntax highlighting.
+#[cfg(windows)]
+use super::ansi::AnsiBuffer as Outputter;
+#[cfg(windows)]
+use crate::text_face::{color_support_from_env, parse_text_face_with_color_support};
+#[cfg(unix)]
 use crate::{
     abbrs::{self, with_abbrs},
+    complete::complete_wrap_map,
+    expand::{ExpandFlags, expand_one},
+    history::all_paths_are_valid,
+    parse_util::get_process_first_token_offset,
+    path::{path_get_cdpath, paths_are_same_file},
+    terminal::Outputter,
+};
+use crate::{
     ast::{
         self, Argument, BlockStatement, BlockStatementHeader, BraceStatement, DecoratedStatement,
         Keyword, Kind, Node, NodeVisitor, Redirection, Token, VariableAssignment,
     },
     builtins::builtin_exists,
     common::{valid_var_name, valid_var_name_char},
-    complete::complete_wrap_map,
     env::{EnvVar, Environment},
-    expand::{ExpandFlags, ExpandResultCode, expand_one, expand_to_command_and_args},
+    expand::{ExpandResultCode, expand_to_command_and_args},
     function,
     highlight::file_tester::FileTester,
-    history::all_paths_are_valid,
     operation_context::OperationContext,
     parse_constants::{
         ParseKeyword, ParseTokenType, ParseTreeFlags, SourceRange, StatementDecoration,
     },
-    parse_util::{get_process_first_token_offset, locate_cmdsubst_range, slice_length},
-    path::{path_as_implicit_cd, path_get_cdpath, path_get_path, paths_are_same_file},
-    terminal::Outputter,
+    parse_util::{locate_cmdsubst_range, slice_length},
+    path::{path_as_implicit_cd, path_get_path},
     text_face::{ResettableStyle, SpecifiedTextFace, TextFace, UnderlineStyle, parse_text_face},
     threads::assert_is_background_thread,
     tokenizer::{PipeOrRedir, variable_assignment_equals_pos},
@@ -63,7 +73,10 @@ impl HighlightSpec {
 pub fn colorize(text: &wstr, colors: &[HighlightSpec], vars: &dyn Environment) -> Vec<u8> {
     assert_eq!(colors.len(), text.len());
     let mut rv = HighlightColorResolver::new();
+    #[cfg(unix)]
     let mut outp = Outputter::new_buffering();
+    #[cfg(windows)]
+    let mut outp = Outputter::new(color_support_from_env(vars));
 
     let mut last_color = HighlightSpec::with_fg(HighlightRole::Normal);
     for (i, c) in text.chars().enumerate() {
@@ -80,7 +93,7 @@ pub fn colorize(text: &wstr, colors: &[HighlightSpec], vars: &dyn Environment) -
         outp.writech(c);
     }
     outp.set_text_face(TextFace::terminal_default());
-    outp.contents().to_owned()
+    outp.take_contents()
 }
 
 /// Perform syntax highlighting for the shell commands in buff. The result is stored in the color
@@ -92,6 +105,8 @@ pub fn colorize(text: &wstr, colors: &[HighlightSpec], vars: &dyn Environment) -
 /// \param ctx The variables and cancellation check for this operation.
 /// \param io_ok If set, allow IO which may block. This means that e.g. invalid commands may be
 /// detected.
+/// With I/O disabled, all platforms use the same AST and token coloration without
+/// resolving commands, touching history, or probing the filesystem.
 /// \param cursor The position of the cursor in the commandline.
 pub fn highlight_shell<'src, 'ctx>(
     buff: &'src wstr,
@@ -100,7 +115,19 @@ pub fn highlight_shell<'src, 'ctx>(
     io_ok: bool, /* = false */
     cursor: Option<usize>,
 ) {
+    #[cfg(unix)]
     let working_directory = ctx.vars().get_pwd_slash();
+    // Native PWD belongs to a retained per-stack directory identity. In particular, a
+    // globals-only context need not have a PWD variable; "/" is not a native cwd fallback.
+    // If that identity cannot be resolved, syntax highlighting still works without I/O.
+    #[cfg(windows)]
+    let working_directory = io_ok
+        .then(|| ctx.vars().get_working_directory().ok())
+        .flatten();
+    #[cfg(windows)]
+    let io_ok = working_directory.is_some();
+    #[cfg(windows)]
+    let working_directory = working_directory.unwrap_or_default();
     let mut highlighter = Highlighter::new(buff, cursor, ctx, &working_directory, io_ok);
     *color = highlighter.highlight();
 }
@@ -152,6 +179,13 @@ impl HighlightColorResolver {
         }
     }
     fn resolve_spec_uncached(highlight: &HighlightSpec, vars: &dyn Environment) -> TextFace {
+        #[cfg(unix)]
+        let parse_face = parse_text_face;
+        #[cfg(windows)]
+        let parse_face = {
+            let support = color_support_from_env(vars);
+            move |arguments: &[WString]| parse_text_face_with_color_support(arguments, support)
+        };
         let resolve_role = |role| {
             let mut roles: &[HighlightRole] = &[role, get_fallback(role), HighlightRole::Normal];
             // TODO(MSRV>=?) partition_dedup
@@ -164,7 +198,7 @@ impl HighlightColorResolver {
                 if let Some(face) = vars
                     .get_unless_empty(get_highlight_var_name(role))
                     .as_ref()
-                    .and_then(parse_text_face_for_highlight)
+                    .and_then(|var| text_face_for_highlight(parse_face(var.as_list())))
                 {
                     return face;
                 }
@@ -187,7 +221,7 @@ impl HighlightColorResolver {
         // Handle modifiers.
         if highlight.valid_path {
             if let Some(valid_path_var) = vars.get(L!("fish_color_valid_path")) {
-                let valid_path_face = parse_text_face(valid_path_var.as_list());
+                let valid_path_face = parse_face(valid_path_var.as_list());
                 if valid_path_face.reset {
                     face = TextFace::terminal_default();
                 }
@@ -215,7 +249,10 @@ impl HighlightColorResolver {
 
 /// Return the internal color code representing the specified color.
 pub(crate) fn parse_text_face_for_highlight(var: &EnvVar) -> Option<TextFace> {
-    let face = parse_text_face(var.as_list());
+    text_face_for_highlight(parse_text_face(var.as_list()))
+}
+
+fn text_face_for_highlight(face: SpecifiedTextFace) -> Option<TextFace> {
     (face != SpecifiedTextFace::default()).then(|| {
         let default = TextFace::terminal_default();
         let fg = face.fg.unwrap_or(default.fg);
@@ -242,7 +279,6 @@ fn command_role(
     // Determine which types we check, based on the decoration.
     let mut builtin_ok = true;
     let mut function_ok = true;
-    let mut abbreviation_ok = true;
     let mut command_ok = true;
     let mut implicit_cd_ok = true;
     if matches!(
@@ -251,13 +287,11 @@ fn command_role(
     ) {
         builtin_ok = false;
         function_ok = false;
-        abbreviation_ok = false;
         command_ok = true;
         implicit_cd_ok = false;
     } else if decoration == StatementDecoration::Builtin {
         builtin_ok = true;
         function_ok = false;
-        abbreviation_ok = false;
         command_ok = false;
         implicit_cd_ok = false;
     }
@@ -272,7 +306,10 @@ fn command_role(
         return Some(Function);
     }
 
-    // Abbreviations
+    // Abbreviations belong to the interactive Unix runtime.
+    #[cfg(unix)]
+    let abbreviation_ok = decoration == StatementDecoration::None;
+    #[cfg(unix)]
     if abbreviation_ok && with_abbrs(|set| set.has_match(cmd, abbrs::Position::Command, L!(""))) {
         return Some(Command);
     }
@@ -301,6 +338,7 @@ fn has_expand_reserved(s: &wstr) -> bool {
 
 // Parse a command line. Return by reference the first command, and the first argument to that
 // command (as a string), if any. This is used to validate autosuggestions.
+#[cfg(unix)]
 fn autosuggest_parse_command(
     buff: &wstr,
     ctx: &mut OperationContext<'_>,
@@ -333,7 +371,16 @@ fn autosuggest_parse_command(
 }
 
 pub fn is_veritable_cd(expanded_command: &wstr) -> bool {
-    expanded_command == L!("cd") && complete_wrap_map().get(L!("cd")).is_none()
+    if expanded_command != L!("cd") {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        return complete_wrap_map().get(L!("cd")).is_none();
+    }
+    // Native batch mode has no programmable completion wrappers.
+    #[cfg(windows)]
+    true
 }
 
 fn is_cd_option(candidate: &wstr) -> bool {
@@ -352,6 +399,7 @@ fn is_cd_option(candidate: &wstr) -> bool {
 /// Given an item `item` from the history which is a proposed autosuggestion, return whether the
 /// autosuggestion is valid. It may not be valid if e.g. it is attempting to cd into a directory
 /// which does not exist.
+#[cfg(unix)]
 pub fn autosuggest_validate_from_history(
     item_commandline: &wstr,
     suggested_range: std::ops::Range<usize>,
@@ -1373,7 +1421,7 @@ pub struct HighlightSpec {
     pub force_underline: bool,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{HighlightColorResolver, HighlightRole, HighlightSpec, highlight_shell};
     use crate::env::{EnvMode, EnvSetMode, EnvVar, EnvVarFlags, Environment as _};

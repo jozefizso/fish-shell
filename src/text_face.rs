@@ -1,7 +1,81 @@
+#[cfg(windows)]
+use crate::env::Environment;
 use crate::prelude::*;
-use crate::terminal::{self, get_color_support};
 use fish_color::Color;
 use fish_wgetopt::{ArgType, WGetopter, WOption, wopt};
+
+#[derive(Copy, Clone, Default)]
+pub struct ColorSupport {
+    pub term_256color: bool,
+    pub term_24bit: bool,
+}
+
+#[cfg(windows)]
+/// Interpret fish's configured color-depth policy without querying a terminal.
+/// Batch ANSI output uses this policy for serialization, not as a claim about console support.
+pub(crate) fn color_support_from_env(vars: &dyn Environment) -> ColorSupport {
+    use fish_wcstringutil::bool_from_string;
+    let is_xterm_16color = vars
+        .get_unless_empty(L!("TERM"))
+        .is_some_and(|term| term.as_list()[0] == "xterm-16color");
+    let term_256color = vars
+        .get(L!("fish_term256"))
+        .map_or(!is_xterm_16color, |value| {
+            bool_from_string(&value.as_string())
+        });
+    let term_24bit = if let Some(value) = vars.get(L!("fish_term24bit")) {
+        bool_from_string(&value.as_string())
+    } else if vars.get(L!("STY")).is_some() {
+        false
+    } else if let Some(value) = vars.get(L!("COLORTERM")) {
+        let value = value.as_string();
+        value == "truecolor" || value == "24bit"
+    } else {
+        !is_xterm_16color
+            && vars
+                .get_unless_empty(L!("TERM_PROGRAM"))
+                .is_none_or(|value| value.as_list()[0] != "Apple_Terminal")
+    };
+    ColorSupport {
+        term_256color,
+        term_24bit,
+    }
+}
+
+/// Pick a configured color using the shared RGB-versus-named fallback policy.
+pub fn best_color(candidates: impl Iterator<Item = Color>, support: ColorSupport) -> Option<Color> {
+    let mut first = None;
+    let mut first_rgb = None;
+    let mut first_named = None;
+    for color in candidates {
+        if first.is_none() {
+            first = Some(color);
+        }
+        if first_rgb.is_none() && color.is_rgb() {
+            first_rgb = Some(color);
+        }
+        if first_named.is_none() && color.is_named() {
+            first_named = Some(color);
+        }
+    }
+    (if (first_rgb.is_some() && support.term_256color) || first_named.is_none() {
+        first_rgb
+    } else {
+        first_named
+    })
+    .or(first)
+}
+
+fn default_color_support() -> ColorSupport {
+    #[cfg(unix)]
+    {
+        crate::terminal::get_color_support()
+    }
+    #[cfg(windows)]
+    {
+        color_support_from_env(crate::env::EnvStack::globals())
+    }
+}
 
 pub(crate) trait StyleSet {
     fn union_prefer_right(self, other: Self) -> Self;
@@ -207,12 +281,30 @@ impl Default for SpecifiedTextFace {
 }
 
 pub(crate) fn parse_text_face(arguments: &[WString]) -> SpecifiedTextFace {
-    let mut argv: Vec<&wstr> = Some(L!(""))
-        .into_iter()
-        .chain(arguments.iter().map(|s| s.as_utfstr()))
-        .collect();
+    parse_text_face_with_color_support(arguments, default_color_support())
+}
+
+pub(crate) fn parse_text_face_with_color_support(
+    arguments: &[WString],
+    support: ColorSupport,
+) -> SpecifiedTextFace {
+    #[cfg(unix)]
+    let words = arguments.iter().map(|argument| argument.as_utfstr());
+    // Native inherited environment values are scalars. A color setting's exported form
+    // joins its option/color words with spaces, whereas a locally assigned setting may
+    // already be an array. Normalize both forms here, not in generic environment import.
+    // These are borrowed color-option words, never shell commands or expansions.
+    #[cfg(windows)]
+    let words = arguments.iter().flat_map(|argument| {
+        argument
+            .as_char_slice()
+            .split(|character| character.is_ascii_whitespace())
+            .filter(|word| !word.is_empty())
+            .map(wstr::from_char_slice)
+    });
+    let mut argv: Vec<&wstr> = Some(L!("")).into_iter().chain(words).collect();
     use ParsedArgs::*;
-    match parse_text_face_and_options(&mut argv, /*is_builtin=*/ false) {
+    match parse_text_face_and_options_with_color_support(&mut argv, false, support) {
         Ok(SetFace(specified_face)) => specified_face,
         Err(_) => Default::default(),
         Ok(PrintColors(_)) | Ok(PrintHelp) => unreachable!(),
@@ -259,6 +351,14 @@ fn parse_resettable_style<'a>(w: &WGetopter<'_, 'a, '_>) -> Result<ResettableSty
 pub(crate) fn parse_text_face_and_options<'argarray, 'args>(
     argv: &'argarray mut [&'args wstr],
     is_builtin: bool,
+) -> Result<ParsedArgs<'argarray, 'args>, ParseError<'args>> {
+    parse_text_face_and_options_with_color_support(argv, is_builtin, default_color_support())
+}
+
+fn parse_text_face_and_options_with_color_support<'argarray, 'args>(
+    argv: &'argarray mut [&'args wstr],
+    is_builtin: bool,
+    support: ColorSupport,
 ) -> Result<ParsedArgs<'argarray, 'args>, ParseError<'args>> {
     let builtin_extra_args = if is_builtin { 0 } else { "hc".len() };
     let short_options = L!("f:b:oi::dr::s::u::ch");
@@ -381,8 +481,7 @@ pub(crate) fn parse_text_face_and_options<'argarray, 'args>(
         return Err(InvalidFgArgCombination);
     }
 
-    let best_color =
-        |colors: Vec<Color>| terminal::best_color(colors.into_iter(), get_color_support());
+    let best_color = |colors: Vec<Color>| best_color(colors.into_iter(), support);
 
     let bg = best_color(bg_colors);
     let underline_color = best_color(underline_colors);
@@ -432,7 +531,10 @@ pub(crate) fn parse_text_face_and_options<'argarray, 'args>(
 
 #[cfg(test)]
 mod tests {
-    use super::{SpecifiedTextFace, TextStyling, parse_text_face};
+    use super::{
+        ColorSupport, SpecifiedTextFace, TextStyling, parse_text_face,
+        parse_text_face_with_color_support,
+    };
     use fish_color::{Color, Color24};
 
     #[test]
@@ -451,5 +553,46 @@ mod tests {
                 reset: false
             }
         );
+    }
+
+    #[test]
+    fn configured_color_depth_selects_named_fallback_without_losing_styles() {
+        let arguments = ["ff0000".into(), "green".into(), "--bold".into()];
+        let palette = parse_text_face_with_color_support(&arguments, ColorSupport::default());
+        assert_eq!(palette.fg, Some(Color::Named { idx: 2 }));
+        assert!(palette.style.bold);
+        let rgb = parse_text_face_with_color_support(
+            &arguments,
+            ColorSupport {
+                term_256color: true,
+                term_24bit: true,
+            },
+        );
+        assert_eq!(rgb.fg, Some(Color::from_rgb(255, 0, 0)));
+        assert!(rgb.style.bold);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_exported_color_expression_preserves_rgb_and_styles() {
+        let support = ColorSupport {
+            term_256color: true,
+            term_24bit: true,
+        };
+        let scalar = parse_text_face_with_color_support(
+            &[" \t--bold  123456 --underline=curly\n".into()],
+            support,
+        );
+        assert_eq!(scalar.fg, Some(Color::from_rgb(18, 52, 86)));
+        assert!(scalar.style.bold);
+        assert_eq!(
+            scalar.style.underline_style,
+            super::ResettableStyle::On(super::UnderlineStyle::Curly),
+        );
+        let array = parse_text_face_with_color_support(
+            &["--bold".into(), "123456".into(), "--underline=curly".into()],
+            support,
+        );
+        assert_eq!(scalar, array);
     }
 }

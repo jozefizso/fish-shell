@@ -9,8 +9,7 @@ pub fn emit(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     let opts = HelpOnlyCmdOpts::parse(argv, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     let Some(event_name) = argv.get(opts.optind) else {

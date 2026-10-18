@@ -1,4 +1,6 @@
 use super::prelude::*;
+#[cfg(unix)]
+use crate::termsize::termsize_last;
 use crate::{
     builtins::Error,
     common::{reformat_for_screen, valid_func_name},
@@ -8,7 +10,6 @@ use crate::{
     highlight::highlight_and_colorize,
     parse_util::{apply_indents, compute_indents},
     parser_keywords::parser_keywords_is_reserved,
-    termsize::termsize_last,
 };
 use fish_common::{EscapeFlags, EscapeStringStyle, escape_string};
 use fish_widestring::bytes2wcstring;
@@ -142,8 +143,7 @@ pub fn functions(
     let args = &args[optind..];
 
     if opts.print_help {
-        builtin_print_error_trailer(parser, streams.err, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     let describe = opts.description.is_some();
@@ -311,9 +311,13 @@ pub fn functions(
                 buff.push_utfstr(&name);
                 first = false;
             }
-            streams
-                .out
-                .append(&reformat_for_screen(&buff, &termsize_last()));
+            #[cfg(unix)]
+            let width = termsize_last().width();
+            #[cfg(windows)]
+            let width = streams
+                .output_width()
+                .unwrap_or(usize::from(crate::common::DEFAULT_SCREEN_WIDTH));
+            streams.out.append(&reformat_for_screen(&buff, width));
         } else {
             for name in names {
                 streams.out.appendln(&name);

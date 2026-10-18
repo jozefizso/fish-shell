@@ -9,9 +9,12 @@ use crate::global_safety::RelaxedAtomicBool;
 use crate::parse_execution::varname_error;
 use crate::parse_tree::NodeRef;
 use crate::parser_keywords::parser_keywords_is_reserved;
+#[cfg(unix)]
 use crate::proc::{InternalJobId, Pid};
+#[cfg(unix)]
 use crate::signal::RawSignal;
 use crate::{err_fmt, err_str, function};
+#[cfg(unix)]
 use nix::unistd::getpid;
 use std::sync::Arc;
 
@@ -57,8 +60,22 @@ const LONG_OPTIONS: &[WOption] = &[
     wopt(L!("inherit-variable"), ArgType::RequiredArgument, 'V'),
 ];
 
+/// Inspect literal header options without expanding their arguments. The same
+/// option table/tokenizer must distinguish flags from descriptions and `--`.
+#[cfg(windows)]
+pub(crate) fn has_unavailable_event_option(argv: &mut [&wstr]) -> bool {
+    let mut options = WGetopter::new(SHORT_OPTIONS, LONG_OPTIONS, argv);
+    while let Some(option) = options.next_opt() {
+        if matches!(option, 's' | 'j' | 'p') {
+            return true;
+        }
+    }
+    false
+}
+
 /// Return the internal_job_id for a pid, or None if none.
 /// This looks through both active and finished jobs.
+#[cfg(unix)]
 fn job_id_for_pid(pid: Pid, parser: &Parser) -> Option<InternalJobId> {
     if let Some(job) = parser.job_get_from_pid(pid) {
         Some(job.internal_job_id)
@@ -129,6 +146,16 @@ fn parse_cmd_opts(
             'd' => {
                 opts.description = w.woptarg.unwrap().to_owned();
             }
+            #[cfg(windows)]
+            's' | 'j' | 'p' => {
+                err_str!(
+                    "signal and process/job event handlers are unavailable in native batch mode"
+                )
+                .cmd(cmd)
+                .finish(streams);
+                return Err(STATUS_INVALID_ARGS);
+            }
+            #[cfg(unix)]
             's' => {
                 let Some(signal) = RawSignal::parse(w.woptarg.unwrap()) else {
                     err_fmt!("Unknown signal '%s'", w.woptarg.unwrap())
@@ -147,6 +174,7 @@ fn parse_cmd_opts(
                 let param = w.woptarg.unwrap().to_owned();
                 opts.events.push(EventDescription::Generic { param });
             }
+            #[cfg(unix)]
             'j' | 'p' => {
                 let woptarg = w.woptarg.unwrap();
                 let e: EventDescription;
@@ -312,8 +340,7 @@ pub fn function(
     parse_cmd_opts(&mut opts, argv, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_error_trailer(parser, streams.err, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     // Extract the current filename.
@@ -361,6 +388,7 @@ pub fn function(
 
     // If there is an --on-process-exit or --on-job-exit event handler for some pid, and that
     // process has already exited, run it immediately (#7210).
+    #[cfg(unix)]
     for ed in &opts.events {
         match *ed {
             EventDescription::ProcessExit { pid: Some(pid) } => {

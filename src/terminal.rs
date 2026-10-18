@@ -3,7 +3,7 @@ use crate::tty_handoff::{XTVERSION, konsole_version};
 use crate::{flog, prelude::*, should_flog};
 use crate::{
     screen::{is_dumb, only_grayscale},
-    text_face::{ResettableStyle, TextFace, TextStyling, UnderlineStyle},
+    text_face::{ColorSupport, ResettableStyle, TextFace, TextStyling, UnderlineStyle},
     threads::MainThread,
 };
 use fish_color::{Color, Color24};
@@ -16,12 +16,6 @@ use std::{
     ops::{Deref, DerefMut},
     os::{fd::RawFd, unix::ffi::OsStrExt as _},
 };
-
-#[derive(Copy, Clone, Default)]
-pub struct ColorSupport {
-    pub term_256color: bool,
-    pub term_24bit: bool,
-}
 
 static COLOR_SUPPORT: Mutex<ColorSupport> = Mutex::new(ColorSupport {
     term_256color: false,
@@ -612,34 +606,6 @@ impl DerefMut for BufferedOutputter<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
-}
-
-/// Given a list of RgbColor, pick the "best" one, as determined by the color support. Returns
-/// RgbColor::NONE if empty.
-pub fn best_color(candidates: impl Iterator<Item = Color>, support: ColorSupport) -> Option<Color> {
-    let mut first = None;
-    let mut first_rgb = None;
-    let mut first_named = None;
-    for color in candidates {
-        if first.is_none() {
-            first = Some(color);
-        }
-        if first_rgb.is_none() && color.is_rgb() {
-            first_rgb = Some(color);
-        }
-        if first_named.is_none() && color.is_named() {
-            first_named = Some(color);
-        }
-    }
-
-    // If we have both RGB and named colors, then prefer rgb if term256 is supported.
-    let has_term256 = support.term_256color;
-    (if (first_rgb.is_some() && has_term256) || first_named.is_none() {
-        first_rgb
-    } else {
-        first_named
-    })
-    .or(first)
 }
 
 pub struct OutputterStyleWriter<'a> {

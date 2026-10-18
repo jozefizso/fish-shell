@@ -14,15 +14,9 @@ pub fn regex_make_anchored(pattern: &wstr) -> WString {
     anchored
 }
 
-/// Copy a wstr to a Box<[char]>.
-pub fn to_boxed_chars(s: &wstr) -> Box<[char]> {
-    let chars = s.as_char_slice();
-    chars.into()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{regex_make_anchored, to_boxed_chars};
+    use super::regex_make_anchored;
     use crate::prelude::*;
 
     #[test]
@@ -30,11 +24,11 @@ mod tests {
         use pcre2::utf32::{Regex, RegexBuilder};
 
         fn test_match(re: &Regex, subject: &wstr) -> bool {
-            re.is_match(&to_boxed_chars(subject)).unwrap()
+            re.is_match(subject.as_char_slice()).unwrap()
         }
 
         let builder = RegexBuilder::new();
-        let result = builder.build(to_boxed_chars(&regex_make_anchored(L!("ab(.+?)"))));
+        let result = builder.build(regex_make_anchored(L!("ab(.+?)")).as_char_slice());
         assert!(result.is_ok());
         let re = &result.unwrap();
 
@@ -44,7 +38,7 @@ mod tests {
         assert!(!test_match(re, L!("xabcd")));
         assert!(test_match(re, L!("abcdefghij")));
 
-        let result = builder.build(to_boxed_chars(&regex_make_anchored(L!("(a+)|(b+)"))));
+        let result = builder.build(regex_make_anchored(L!("(a+)|(b+)")).as_char_slice());
         assert!(result.is_ok());
 
         let re = &result.unwrap();

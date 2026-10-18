@@ -1,4 +1,4 @@
-use crate::{builtins, err_fmt, err_raw, err_str, screen::escape_code_length};
+use crate::{builtins, err_fmt, err_raw, err_str, text_helpers::escape_code_length};
 use fish_wcstringutil::fish_wcwidth_visible;
 // Forward some imports to make subcmd implementations easier
 use super::prelude::*;
@@ -18,7 +18,7 @@ mod transform;
 mod trim;
 mod unescape;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod test_helpers;
 
 trait StringSubCommand<'args> {
@@ -124,8 +124,7 @@ trait StringSubCommand<'args> {
     ) -> Result<(), ErrorCode> {
         if args.len() >= 3 && (args[2] == "-h" || args[2] == "--help") {
             let string_dash_subcmd = WString::from(args[0]) + L!("-") + args[1];
-            builtin_print_help(parser, streams, &string_dash_subcmd);
-            return Ok(());
+            return builtin_print_help(parser, streams, &string_dash_subcmd).map(|_| ());
         }
 
         let args = &mut args[1..];
@@ -293,8 +292,7 @@ pub fn string(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     }
 
     if args[1] == "-h" || args[1] == "--help" {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     let subcmd_name = args[1];

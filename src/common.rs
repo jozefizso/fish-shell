@@ -1,13 +1,12 @@
 //! Prototypes for various functions, mostly string utilities, that are used by most parts of fish.
 
+#[cfg(unix)]
+use crate::terminal::Outputter;
 use crate::{
     global_safety::{AtomicRef, RelaxedAtomicBool},
     prelude::*,
     wutil::fish_iswalnum,
 };
-#[cfg(unix)]
-use crate::{terminal::Outputter, termsize::Termsize};
-#[cfg(unix)]
 use fish_fallback::fish_wcwidth;
 use fish_widestring::subslice_position;
 #[cfg(unix)]
@@ -22,6 +21,7 @@ use fish_common::*;
 pub const BUILD_DIR: &str = env!("FISH_RESOLVED_BUILD_DIR");
 
 pub const PACKAGE_NAME: &str = env!("CARGO_PKG_NAME");
+pub(crate) const DEFAULT_SCREEN_WIDTH: u16 = 80;
 
 #[cfg(unix)]
 pub fn shell_modes() -> MutexGuard<'static, Termios> {
@@ -131,12 +131,10 @@ macro_rules! write_to_output {
     }};
 }
 
-/// Write the given paragraph of output, redoing linebreaks to fit `termsize`.
-#[cfg(unix)]
-pub fn reformat_for_screen(msg: &wstr, termsize: &Termsize) -> WString {
+/// Write the given paragraph of output, redoing linebreaks to fit `screen_width`.
+pub fn reformat_for_screen(msg: &wstr, screen_width: usize) -> WString {
     let mut buff = WString::new();
 
-    let screen_width = termsize.width();
     if screen_width != 0 {
         let mut start = 0;
         let mut pos = start;

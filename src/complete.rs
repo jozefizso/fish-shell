@@ -1,6 +1,15 @@
+use crate::localization::LocalizableString;
 use crate::prelude::*;
+use fish_common::escape;
 use fish_wcstringutil::StringFuzzyMatch;
 use std::ops::{Deref, DerefMut};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{
+        Arc, LazyLock, Mutex, MutexGuard,
+        atomic::{self, AtomicUsize},
+    },
+};
 
 #[cfg(unix)]
 use crate::{
@@ -18,7 +27,7 @@ use crate::{
     flog::{flog, flogf},
     function,
     history::{History, history_id},
-    localization::{LocalizableString, localizable_string},
+    localization::localizable_string,
     operation_context::OperationContext,
     parse_constants::SourceRange,
     parse_util::{get_cmdsubst_extent, get_process_extent, unescape_wildcards},
@@ -33,7 +42,7 @@ use crate::{
 #[cfg(unix)]
 use assert_matches::assert_matches;
 #[cfg(unix)]
-use fish_common::{ScopeGuard, UnescapeFlags, UnescapeStringStyle, escape, unescape_string};
+use fish_common::{ScopeGuard, UnescapeFlags, UnescapeStringStyle, unescape_string};
 #[cfg(unix)]
 use fish_util::wcsfilecmp;
 #[cfg(unix)]
@@ -46,12 +55,8 @@ use fish_widestring::{WExt as _, charptr2wcstring};
 #[cfg(unix)]
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::HashSet,
     mem,
-    sync::{
-        Arc, LazyLock, Mutex, MutexGuard,
-        atomic::{self, AtomicUsize},
-    },
     time::{Duration, Instant},
 };
 
@@ -495,137 +500,396 @@ fn resolve_auto_space(comp: &wstr, wants_suffix: &mut WantsSuffix) {
     }
 }
 
-// Programmable completion, autoloading and filesystem discovery are Unix services.
-// Batch expansion shares the completion records and bounded receiver above.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CompleteOptionType {
+    /// no option
+    ArgsOnly,
+    /// `-x`
+    Short,
+    /// `-foo`
+    SingleLong,
+    /// `--foo`
+    DoubleLong,
+}
+
+/// Struct describing a completion rule for options to a command.
+///
+/// If option is empty, the comp field must not be empty and contains a list of arguments to the
+/// command.
+///
+/// The type field determines how the option is to be interpreted: either empty (args_only) or
+/// short, single-long ("old") or double-long ("GNU"). An invariant is that the option is empty if
+/// and only if the type is args_only.
+///
+/// If option is non-empty, it specifies a switch for the command. If \c comp is also not empty, it
+/// contains a list of non-switch arguments that may only follow directly after the specified
+/// switch.
+#[derive(Clone, Debug)]
+struct CompleteEntryOpt {
+    /// Text of the option (like 'foo').
+    option: WString,
+    /// Arguments to the option; may be a subshell expression expanded at evaluation time.
+    comp: WString,
+    /// Description of the completion.
+    desc: LocalizableString,
+    /// Conditions under which to use the option, expanded and evaluated at completion time.
+    conditions: Box<[WString]>,
+    /// Type of the option: `ArgsOnly`, `Short`, `SingleLong`, or `DoubleLong`.
+    typ: CompleteOptionType,
+    /// Determines how completions should be performed on the argument after the switch.
+    argument_policy: ArgumentPolicy,
+    /// Completion flags.
+    flags: CompleteFlags,
+}
+
+impl CompleteEntryOpt {
+    pub fn expected_dash_count(&self) -> usize {
+        match self.typ {
+            CompleteOptionType::ArgsOnly => 0,
+            CompleteOptionType::Short | CompleteOptionType::SingleLong => 1,
+            CompleteOptionType::DoubleLong => 2,
+        }
+    }
+}
+
+/// Last value used in the order field of [`CompletionEntry`].
+static COMPLETE_ORDER: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone)]
+struct CompletionEntry {
+    /// List of all options.
+    /// The most recently added options are at the end; use the iter() method to iterate in recency order.
+    options: Vec<CompleteEntryOpt>,
+    /// Order for when this completion was created. This aids in outputting completions sorted by
+    /// time.
+    order: usize,
+}
+
+type CompletionEntryIter<'a> = std::iter::Rev<std::slice::Iter<'a, CompleteEntryOpt>>;
+
+impl CompletionEntry {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            options: vec![],
+            order: COMPLETE_ORDER.fetch_add(1, atomic::Ordering::Relaxed),
+        })
+    }
+
+    /// Getters for option list.
+    pub fn get_options(&self) -> &[CompleteEntryOpt] {
+        &self.options
+    }
+
+    /// Adds an option.
+    pub fn add_option(&mut self, opt: CompleteEntryOpt) {
+        self.options.push(opt);
+    }
+
+    /// Remove all completion options in the specified entry that match the specified short / long
+    /// option strings. Returns true if it is now empty and should be deleted, false if it's not
+    /// empty.
+    pub fn remove_option(&mut self, option: &wstr, typ: CompleteOptionType) -> bool {
+        self.options
+            .retain(|opt| opt.option != option || opt.typ != typ);
+        self.options.is_empty()
+    }
+
+    // Return an iterator over the entry options from most recently added to least recent.
+    fn iter<'a>(&'a self) -> CompletionEntryIter<'a> {
+        // Reverse, so later items are returned first.
+        self.options.iter().rev()
+    }
+}
+
+impl<'a> IntoIterator for &'a CompletionEntry {
+    type Item = &'a CompleteEntryOpt;
+    type IntoIter = CompletionEntryIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Set of all completion entries. Keyed by the command name, and whether it is a path.
+#[derive(Clone, Debug, Eq, Ord, PartialOrd, PartialEq, Hash)]
+struct CompletionEntryKey {
+    name: WString,
+    is_path: bool,
+}
+
+/// CompletionEntries are stored in an Arc so options can be read outside of the global
+/// completion lock without copying everything. `make_mut()` is used during mtuations.
+type CompletionEntryMap = BTreeMap<CompletionEntryKey, Arc<CompletionEntry>>;
+static COMPLETION_MAP: Mutex<CompletionEntryMap> = Mutex::new(BTreeMap::new());
+static COMPLETION_TOMBSTONES: Mutex<BTreeSet<WString>> = Mutex::new(BTreeSet::new());
+
+/// Completion "wrapper" support. The map goes from wrapping-command to wrapped-command-list.
+type WrapperMap = HashMap<WString, Vec<WString>>;
+static WRAPPER_MAP: LazyLock<Mutex<WrapperMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Add an unexpanded completion "rule" to generate completions from for a command.
+///
+/// # Examples
+///
+/// The command 'gcc -o' requires that a file follows it, so the `requires_param` mode is suitable.
+/// This can be done using the following line:
+///
+/// complete -c gcc -s o -r
+///
+/// The command 'grep -d' required that one of the strings 'read', 'skip' or 'recurse' is used. As
+/// such, it is suitable to specify that a completion requires one of them. This can be done using
+/// the following line:
+///
+/// complete -c grep -s d -x -a "read skip recurse"
+///
+/// - `cmd`: Command to complete.
+/// - `cmd_is_path`: If `true`, cmd will be interpreted as the absolute
+///   path of the program (optionally containing wildcards), otherwise it
+///   will be interpreted as the command name.
+/// - `option`: The name of an option.
+/// - `option_type`: The type of option: can be option_type_short (-x),
+///   option_type_single_long (-foo), option_type_double_long (--bar).
+/// - `argument_policy`: Controls how to search further completions when this completion has been
+///   successfully matched.
+/// - `comp`: A space separated list of completions which may contain subshells.
+/// - `desc`: A description of the completion.
+/// - `condition`: a command to be run to check it this completion should be used. If `condition`
+///   is empty, the completion is always used.
+/// - `flags`: A set of completion flags
+#[allow(clippy::too_many_arguments)]
+pub fn complete_add(
+    cmd: WString,
+    cmd_is_path: bool,
+    option: WString,
+    option_type: CompleteOptionType,
+    argument_policy: ArgumentPolicy,
+    condition: Vec<WString>,
+    comp: WString,
+    desc: WString,
+    flags: CompleteFlags,
+) {
+    // option should be empty iff the option type is arguments only.
+    assert_eq!(
+        option.is_empty(),
+        (option_type == CompleteOptionType::ArgsOnly)
+    );
+
+    // Lock the lock that allows us to edit the completion entry list.
+    let mut completion_map = COMPLETION_MAP.lock().expect("mutex poisoned");
+    let c = completion_map
+        .entry(CompletionEntryKey {
+            name: cmd,
+            is_path: cmd_is_path,
+        })
+        .or_insert_with(CompletionEntry::new);
+
+    // Create our new option.
+    let opt = CompleteEntryOpt {
+        option,
+        typ: option_type,
+        argument_policy,
+        comp,
+        // The external source is a completion script in `share`,
+        // from which `cargo xtask gettext update` extracts descriptions.
+        desc: LocalizableString::from_external_source(desc),
+        conditions: condition.into_boxed_slice(),
+        flags,
+    };
+    Arc::make_mut(c).add_option(opt);
+}
+
+/// Remove a previously defined completion.
+pub fn complete_remove(cmd: WString, cmd_is_path: bool, option: &wstr, typ: CompleteOptionType) {
+    let mut completion_map = COMPLETION_MAP.lock().expect("mutex poisoned");
+    let key = CompletionEntryKey {
+        name: cmd,
+        is_path: cmd_is_path,
+    };
+    if let Some(c) = completion_map.get_mut(&key) {
+        let delete_it = Arc::make_mut(c).remove_option(option, typ);
+        if delete_it {
+            completion_map.remove(&key);
+        }
+    }
+}
+
+/// Removes all completions for a given command.
+pub fn complete_remove_all(cmd: WString, cmd_is_path: bool, explicit: bool) {
+    let mut completion_map = COMPLETION_MAP.lock().expect("mutex poisoned");
+    let key = CompletionEntryKey {
+        name: cmd,
+        is_path: cmd_is_path,
+    };
+    let removed = completion_map.remove(&key).is_some();
+    WRAPPER_MAP.lock().unwrap().remove(&key.name);
+    if explicit && !removed && !key.is_path {
+        COMPLETION_TOMBSTONES.lock().unwrap().insert(key.name);
+    }
+}
+/// Print the short switch `opt`, and the argument `arg` to the specified
+/// [`WString`], but only if `argument` isn't an empty string.
+fn append_switch_short_arg(out: &mut WString, opt: char, arg: &wstr) {
+    if arg.is_empty() {
+        return;
+    }
+
+    sprintf!(=> out, " -%c %s", opt, escape(arg));
+}
+fn append_switch_long_arg(out: &mut WString, opt: &wstr, arg: &wstr) {
+    if arg.is_empty() {
+        return;
+    }
+
+    sprintf!(=> out, " --%s %s", opt, escape(arg));
+}
+fn append_switch_short(out: &mut WString, opt: char) {
+    sprintf!(=> out, " -%c", opt);
+}
+fn append_switch_long(out: &mut WString, opt: &wstr) {
+    sprintf!(=> out, " --%s", opt);
+}
+
+fn completion2string(key: &CompletionEntryKey, o: &CompleteEntryOpt) -> WString {
+    let mut out = WString::from(L!("complete"));
+
+    if o.flags.dont_sort {
+        append_switch_short(&mut out, 'k');
+    }
+
+    let ArgumentPolicy {
+        files,
+        requires_param,
+    } = o.argument_policy;
+    if files == FileCompletionPolicy::Skip && requires_param {
+        append_switch_long(&mut out, L!("exclusive"));
+    } else if files == FileCompletionPolicy::Skip {
+        append_switch_long(&mut out, L!("no-files"));
+    } else if files == FileCompletionPolicy::Force {
+        append_switch_long(&mut out, L!("force-files"));
+    } else if requires_param {
+        append_switch_long(&mut out, L!("require-parameter"));
+    }
+
+    if key.is_path {
+        append_switch_short_arg(&mut out, 'p', &key.name);
+    } else {
+        out.push(' ');
+        out.push_utfstr(&escape(&key.name));
+    }
+
+    match o.typ {
+        CompleteOptionType::ArgsOnly => {}
+        CompleteOptionType::Short => append_switch_short_arg(&mut out, 's', &o.option[..1]),
+        CompleteOptionType::SingleLong => append_switch_short_arg(&mut out, 'o', &o.option),
+        CompleteOptionType::DoubleLong => append_switch_short_arg(&mut out, 'l', &o.option),
+    }
+
+    append_switch_short_arg(&mut out, 'd', o.desc.localize());
+    append_switch_short_arg(&mut out, 'a', &o.comp);
+    for c in &o.conditions {
+        append_switch_short_arg(&mut out, 'n', c);
+    }
+    out.push('\n');
+
+    out
+}
+/// Return a list of all current completions.
+/// Used by the bare `complete`, loaded completions are printed out as commands
+pub fn complete_print(cmd: &wstr) -> WString {
+    let mut out = WString::new();
+
+    // Get references to our completions and sort them by order.
+    let completions = COMPLETION_MAP.lock().expect("poisoned mutex");
+    let mut completion_refs: Vec<_> = completions.iter().collect();
+    completion_refs.sort_by_key(|(_, c)| c.order);
+
+    for (key, entry) in completion_refs {
+        if !cmd.is_empty() && key.name != cmd {
+            continue;
+        }
+
+        // Output in reverse order to preserve legacy behavior (see #9221).
+        for o in entry.get_options().iter().rev() {
+            out.push_utfstr(&completion2string(key, o));
+        }
+    }
+
+    // Append wraps.
+    let wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
+    for (src, targets) in wrappers.iter() {
+        if !cmd.is_empty() && src != cmd {
+            continue;
+        }
+        for target in targets {
+            out.push_utfstr(L!("complete "));
+            out.push_utfstr(&escape(src));
+            append_switch_long_arg(&mut out, L!("wraps"), target);
+            out.push_utfstr(L!("\n"));
+        }
+    }
+
+    out
+}
+/// Adds a "wrap target." A wrap target is a command that completes like another command.
+pub fn complete_add_wrapper(command: WString, new_target: WString) -> bool {
+    if command.is_empty() || new_target.is_empty() {
+        return false;
+    }
+
+    // If the command and the target are the same,
+    // there's no point in following the wrap-chain because we'd only complete the same thing.
+    // TODO: This should maybe include full cycle detection.
+    if command == new_target {
+        return false;
+    }
+
+    let mut wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
+    let targets = wrappers.entry(command).or_default();
+    // If it's already present, we do nothing.
+    if !targets.contains(&new_target) {
+        targets.push(new_target);
+    }
+
+    true
+}
+
+/// Removes a wrap target.
+pub fn complete_remove_wrapper(command: WString, target_to_remove: &wstr) -> bool {
+    if command.is_empty() || target_to_remove.is_empty() {
+        return false;
+    }
+
+    let mut wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
+    let Some(targets) = wrappers.get_mut(&command) else {
+        return false;
+    };
+    let Some(pos) = targets.iter().position(|t| t == target_to_remove) else {
+        return false;
+    };
+    targets.remove(pos);
+    if targets.is_empty() {
+        wrappers.remove(&command);
+    }
+    true
+}
+
+/// Returns a list of wrap targets for a given command.
+pub fn complete_wrap_map() -> MutexGuard<'static, HashMap<WString, Vec<WString>>> {
+    WRAPPER_MAP.lock().unwrap()
+}
+
+/// Returns a list of wrap targets for a given command.
+pub fn complete_get_wrap_targets(command: &wstr) -> Vec<WString> {
+    if command.is_empty() {
+        return vec![];
+    }
+
+    let wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
+    wrappers.get(command).cloned().unwrap_or_default()
+}
+// Declarative rules are shared with batch startup. Only active completion, filesystem
+// discovery and autoloading below depend on the Unix reader.
 #[cfg(unix)]
 mod unix {
     use super::*;
-
-    #[derive(Clone, Copy, PartialEq, Debug)]
-    pub enum CompleteOptionType {
-        /// no option
-        ArgsOnly,
-        /// `-x`
-        Short,
-        /// `-foo`
-        SingleLong,
-        /// `--foo`
-        DoubleLong,
-    }
-
-    /// Struct describing a completion rule for options to a command.
-    ///
-    /// If option is empty, the comp field must not be empty and contains a list of arguments to the
-    /// command.
-    ///
-    /// The type field determines how the option is to be interpreted: either empty (args_only) or
-    /// short, single-long ("old") or double-long ("GNU"). An invariant is that the option is empty if
-    /// and only if the type is args_only.
-    ///
-    /// If option is non-empty, it specifies a switch for the command. If \c comp is also not empty, it
-    /// contains a list of non-switch arguments that may only follow directly after the specified
-    /// switch.
-    #[derive(Clone, Debug)]
-    struct CompleteEntryOpt {
-        /// Text of the option (like 'foo').
-        option: WString,
-        /// Arguments to the option; may be a subshell expression expanded at evaluation time.
-        comp: WString,
-        /// Description of the completion.
-        desc: LocalizableString,
-        /// Conditions under which to use the option, expanded and evaluated at completion time.
-        conditions: Box<[WString]>,
-        /// Type of the option: `ArgsOnly`, `Short`, `SingleLong`, or `DoubleLong`.
-        typ: CompleteOptionType,
-        /// Determines how completions should be performed on the argument after the switch.
-        argument_policy: ArgumentPolicy,
-        /// Completion flags.
-        flags: CompleteFlags,
-    }
-
-    impl CompleteEntryOpt {
-        pub fn expected_dash_count(&self) -> usize {
-            match self.typ {
-                CompleteOptionType::ArgsOnly => 0,
-                CompleteOptionType::Short | CompleteOptionType::SingleLong => 1,
-                CompleteOptionType::DoubleLong => 2,
-            }
-        }
-    }
-
-    /// Last value used in the order field of [`CompletionEntry`].
-    static COMPLETE_ORDER: AtomicUsize = AtomicUsize::new(0);
-
-    #[derive(Clone)]
-    struct CompletionEntry {
-        /// List of all options.
-        /// The most recently added options are at the end; use the iter() method to iterate in recency order.
-        options: Vec<CompleteEntryOpt>,
-        /// Order for when this completion was created. This aids in outputting completions sorted by
-        /// time.
-        order: usize,
-    }
-
-    type CompletionEntryIter<'a> = std::iter::Rev<std::slice::Iter<'a, CompleteEntryOpt>>;
-
-    impl CompletionEntry {
-        pub fn new() -> Arc<Self> {
-            Arc::new(Self {
-                options: vec![],
-                order: COMPLETE_ORDER.fetch_add(1, atomic::Ordering::Relaxed),
-            })
-        }
-
-        /// Getters for option list.
-        pub fn get_options(&self) -> &[CompleteEntryOpt] {
-            &self.options
-        }
-
-        /// Adds an option.
-        pub fn add_option(&mut self, opt: CompleteEntryOpt) {
-            self.options.push(opt);
-        }
-
-        /// Remove all completion options in the specified entry that match the specified short / long
-        /// option strings. Returns true if it is now empty and should be deleted, false if it's not
-        /// empty.
-        pub fn remove_option(&mut self, option: &wstr, typ: CompleteOptionType) -> bool {
-            self.options
-                .retain(|opt| opt.option != option || opt.typ != typ);
-            self.options.is_empty()
-        }
-
-        // Return an iterator over the entry options from most recently added to least recent.
-        fn iter<'a>(&'a self) -> CompletionEntryIter<'a> {
-            // Reverse, so later items are returned first.
-            self.options.iter().rev()
-        }
-    }
-
-    impl<'a> IntoIterator for &'a CompletionEntry {
-        type Item = &'a CompleteEntryOpt;
-        type IntoIter = CompletionEntryIter<'a>;
-        fn into_iter(self) -> Self::IntoIter {
-            self.iter()
-        }
-    }
-
-    /// Set of all completion entries. Keyed by the command name, and whether it is a path.
-    #[derive(Clone, Debug, Eq, Ord, PartialOrd, PartialEq, Hash)]
-    struct CompletionEntryKey {
-        name: WString,
-        is_path: bool,
-    }
-
-    /// CompletionEntries are stored in an Arc so options can be read outside of the global
-    /// completion lock without copying everything. `make_mut()` is used during mtuations.
-    type CompletionEntryMap = BTreeMap<CompletionEntryKey, Arc<CompletionEntry>>;
-    static COMPLETION_MAP: Mutex<CompletionEntryMap> = Mutex::new(BTreeMap::new());
-    static COMPLETION_TOMBSTONES: Mutex<BTreeSet<WString>> = Mutex::new(BTreeSet::new());
-
-    /// Completion "wrapper" support. The map goes from wrapping-command to wrapped-command-list.
-    type WrapperMap = HashMap<WString, Vec<WString>>;
-    static WRAPPER_MAP: LazyLock<Mutex<WrapperMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
     // If these functions aren't force inlined, it is actually faster to call
     // stable_sort twice rather than to iterate once performing all comparisons in one go!
@@ -2452,111 +2716,6 @@ mod unix {
         expand_one(cmd_tok, ExpandFlags::NO_IO, ctx, None)
     }
 
-    /// Add an unexpanded completion "rule" to generate completions from for a command.
-    ///
-    /// # Examples
-    ///
-    /// The command 'gcc -o' requires that a file follows it, so the `requires_param` mode is suitable.
-    /// This can be done using the following line:
-    ///
-    /// complete -c gcc -s o -r
-    ///
-    /// The command 'grep -d' required that one of the strings 'read', 'skip' or 'recurse' is used. As
-    /// such, it is suitable to specify that a completion requires one of them. This can be done using
-    /// the following line:
-    ///
-    /// complete -c grep -s d -x -a "read skip recurse"
-    ///
-    /// - `cmd`: Command to complete.
-    /// - `cmd_is_path`: If `true`, cmd will be interpreted as the absolute
-    ///   path of the program (optionally containing wildcards), otherwise it
-    ///   will be interpreted as the command name.
-    /// - `option`: The name of an option.
-    /// - `option_type`: The type of option: can be option_type_short (-x),
-    ///   option_type_single_long (-foo), option_type_double_long (--bar).
-    /// - `argument_policy`: Controls how to search further completions when this completion has been
-    ///   successfully matched.
-    /// - `comp`: A space separated list of completions which may contain subshells.
-    /// - `desc`: A description of the completion.
-    /// - `condition`: a command to be run to check it this completion should be used. If `condition`
-    ///   is empty, the completion is always used.
-    /// - `flags`: A set of completion flags
-    #[allow(clippy::too_many_arguments)]
-    pub fn complete_add(
-        cmd: WString,
-        cmd_is_path: bool,
-        option: WString,
-        option_type: CompleteOptionType,
-        argument_policy: ArgumentPolicy,
-        condition: Vec<WString>,
-        comp: WString,
-        desc: WString,
-        flags: CompleteFlags,
-    ) {
-        // option should be empty iff the option type is arguments only.
-        assert_eq!(
-            option.is_empty(),
-            (option_type == CompleteOptionType::ArgsOnly)
-        );
-
-        // Lock the lock that allows us to edit the completion entry list.
-        let mut completion_map = COMPLETION_MAP.lock().expect("mutex poisoned");
-        let c = completion_map
-            .entry(CompletionEntryKey {
-                name: cmd,
-                is_path: cmd_is_path,
-            })
-            .or_insert_with(CompletionEntry::new);
-
-        // Create our new option.
-        let opt = CompleteEntryOpt {
-            option,
-            typ: option_type,
-            argument_policy,
-            comp,
-            // The external source is a completion script in `share`,
-            // from which `cargo xtask gettext update` extracts descriptions.
-            desc: LocalizableString::from_external_source(desc),
-            conditions: condition.into_boxed_slice(),
-            flags,
-        };
-        Arc::make_mut(c).add_option(opt);
-    }
-
-    /// Remove a previously defined completion.
-    pub fn complete_remove(
-        cmd: WString,
-        cmd_is_path: bool,
-        option: &wstr,
-        typ: CompleteOptionType,
-    ) {
-        let mut completion_map = COMPLETION_MAP.lock().expect("mutex poisoned");
-        let key = CompletionEntryKey {
-            name: cmd,
-            is_path: cmd_is_path,
-        };
-        if let Some(c) = completion_map.get_mut(&key) {
-            let delete_it = Arc::make_mut(c).remove_option(option, typ);
-            if delete_it {
-                completion_map.remove(&key);
-            }
-        }
-    }
-
-    /// Removes all completions for a given command.
-    pub fn complete_remove_all(cmd: WString, cmd_is_path: bool, explicit: bool) {
-        let mut completion_map = COMPLETION_MAP.lock().expect("mutex poisoned");
-        let key = CompletionEntryKey {
-            name: cmd,
-            is_path: cmd_is_path,
-        };
-        let removed = completion_map.remove(&key).is_some();
-        WRAPPER_MAP.lock().unwrap().remove(&key.name);
-        if explicit && !removed && !key.is_path {
-            COMPLETION_TOMBSTONES.lock().unwrap().insert(key.name);
-        }
-    }
-
     /// Returns all completions of the command cmd.
     /// If `ctx` contains a parser, this will autoload functions and completions as needed.
     /// If it does not contain a parser, then any completions which need autoloading will be returned.
@@ -2575,74 +2734,6 @@ mod unix {
             completer.acquire_completions(),
             completer.acquire_needs_load(),
         )
-    }
-
-    /// Print the short switch `opt`, and the argument `arg` to the specified
-    /// [`WString`], but only if `argument` isn't an empty string.
-    fn append_switch_short_arg(out: &mut WString, opt: char, arg: &wstr) {
-        if arg.is_empty() {
-            return;
-        }
-
-        sprintf!(=> out, " -%c %s", opt, escape(arg));
-    }
-    fn append_switch_long_arg(out: &mut WString, opt: &wstr, arg: &wstr) {
-        if arg.is_empty() {
-            return;
-        }
-
-        sprintf!(=> out, " --%s %s", opt, escape(arg));
-    }
-    fn append_switch_short(out: &mut WString, opt: char) {
-        sprintf!(=> out, " -%c", opt);
-    }
-    fn append_switch_long(out: &mut WString, opt: &wstr) {
-        sprintf!(=> out, " --%s", opt);
-    }
-
-    fn completion2string(key: &CompletionEntryKey, o: &CompleteEntryOpt) -> WString {
-        let mut out = WString::from(L!("complete"));
-
-        if o.flags.dont_sort {
-            append_switch_short(&mut out, 'k');
-        }
-
-        let ArgumentPolicy {
-            files,
-            requires_param,
-        } = o.argument_policy;
-        if files == FileCompletionPolicy::Skip && requires_param {
-            append_switch_long(&mut out, L!("exclusive"));
-        } else if files == FileCompletionPolicy::Skip {
-            append_switch_long(&mut out, L!("no-files"));
-        } else if files == FileCompletionPolicy::Force {
-            append_switch_long(&mut out, L!("force-files"));
-        } else if requires_param {
-            append_switch_long(&mut out, L!("require-parameter"));
-        }
-
-        if key.is_path {
-            append_switch_short_arg(&mut out, 'p', &key.name);
-        } else {
-            out.push(' ');
-            out.push_utfstr(&escape(&key.name));
-        }
-
-        match o.typ {
-            CompleteOptionType::ArgsOnly => {}
-            CompleteOptionType::Short => append_switch_short_arg(&mut out, 's', &o.option[..1]),
-            CompleteOptionType::SingleLong => append_switch_short_arg(&mut out, 'o', &o.option),
-            CompleteOptionType::DoubleLong => append_switch_short_arg(&mut out, 'l', &o.option),
-        }
-
-        append_switch_short_arg(&mut out, 'd', o.desc.localize());
-        append_switch_short_arg(&mut out, 'a', &o.comp);
-        for c in &o.conditions {
-            append_switch_short_arg(&mut out, 'n', c);
-        }
-        out.push('\n');
-
-        out
     }
 
     /// If the cmd contains a partial executable extension, return the stripped
@@ -2709,44 +2800,6 @@ mod unix {
         loaded_new
     }
 
-    /// Return a list of all current completions.
-    /// Used by the bare `complete`, loaded completions are printed out as commands
-    pub fn complete_print(cmd: &wstr) -> WString {
-        let mut out = WString::new();
-
-        // Get references to our completions and sort them by order.
-        let completions = COMPLETION_MAP.lock().expect("poisoned mutex");
-        let mut completion_refs: Vec<_> = completions.iter().collect();
-        completion_refs.sort_by_key(|(_, c)| c.order);
-
-        for (key, entry) in completion_refs {
-            if !cmd.is_empty() && key.name != cmd {
-                continue;
-            }
-
-            // Output in reverse order to preserve legacy behavior (see #9221).
-            for o in entry.get_options().iter().rev() {
-                out.push_utfstr(&completion2string(key, o));
-            }
-        }
-
-        // Append wraps.
-        let wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
-        for (src, targets) in wrappers.iter() {
-            if !cmd.is_empty() && src != cmd {
-                continue;
-            }
-            for target in targets {
-                out.push_utfstr(L!("complete "));
-                out.push_utfstr(&escape(src));
-                append_switch_long_arg(&mut out, L!("wraps"), target);
-                out.push_utfstr(L!("\n"));
-            }
-        }
-
-        out
-    }
-
     /// Observes that fish_complete_path has changed.
     pub fn complete_invalidate_path() {
         // TODO: here we unload all completions for commands that are loaded by the autoloader. We also
@@ -2759,62 +2812,6 @@ mod unix {
             complete_remove_all(cmd, /*cmd_is_path=*/ false, /*explicit=*/ false);
         }
         autoload.clear();
-    }
-
-    /// Adds a "wrap target." A wrap target is a command that completes like another command.
-    pub fn complete_add_wrapper(command: WString, new_target: WString) -> bool {
-        if command.is_empty() || new_target.is_empty() {
-            return false;
-        }
-
-        // If the command and the target are the same,
-        // there's no point in following the wrap-chain because we'd only complete the same thing.
-        // TODO: This should maybe include full cycle detection.
-        if command == new_target {
-            return false;
-        }
-
-        let mut wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
-        let targets = wrappers.entry(command).or_default();
-        // If it's already present, we do nothing.
-        if !targets.contains(&new_target) {
-            targets.push(new_target);
-        }
-
-        true
-    }
-
-    /// Removes a wrap target.
-    pub fn complete_remove_wrapper(command: WString, target_to_remove: &wstr) -> bool {
-        if command.is_empty() || target_to_remove.is_empty() {
-            return false;
-        }
-
-        let mut wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
-        let mut result = false;
-        for targets in wrappers.values_mut() {
-            if let Some(pos) = targets.iter().position(|t| t == target_to_remove) {
-                targets.remove(pos);
-                result = true;
-            }
-        }
-
-        result
-    }
-
-    /// Returns a list of wrap targets for a given command.
-    pub fn complete_wrap_map() -> MutexGuard<'static, HashMap<WString, Vec<WString>>> {
-        WRAPPER_MAP.lock().unwrap()
-    }
-
-    /// Returns a list of wrap targets for a given command.
-    pub fn complete_get_wrap_targets(command: &wstr) -> Vec<WString> {
-        if command.is_empty() {
-            return vec![];
-        }
-
-        let wrappers = WRAPPER_MAP.lock().expect("poisoned mutex");
-        wrappers.get(command).cloned().unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -3561,3 +3558,7 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::*;
+
+#[cfg(all(test, windows))]
+#[path = "complete_metadata_tests.rs"]
+mod metadata_tests;

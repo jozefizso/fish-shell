@@ -1,53 +1,38 @@
 mod shared;
 
-#[cfg(unix)]
 pub mod abbr;
-#[cfg(unix)]
 pub mod argparse;
 #[cfg(unix)]
 pub mod bg;
 #[cfg(unix)]
 pub mod bind;
-#[cfg(unix)]
 pub mod block;
-#[cfg(unix)]
 pub mod r#break;
 #[cfg(unix)]
 pub mod breakpoint;
-#[cfg(unix)]
 pub mod builtin;
 pub mod cd;
 pub mod command;
 #[cfg(unix)]
 pub mod commandline;
-#[cfg(unix)]
 pub mod complete;
-#[cfg(unix)]
 pub mod contains;
-#[cfg(unix)]
 pub mod r#continue;
-#[cfg(unix)]
 pub mod count;
 #[cfg(unix)]
 pub mod disown;
 pub mod echo;
-#[cfg(unix)]
 pub mod emit;
-#[cfg(unix)]
 pub mod eval;
 pub mod exit;
 pub mod r#false;
 #[cfg(unix)]
 pub mod fg;
-#[cfg(unix)]
 pub mod fish_indent;
 #[cfg(unix)]
 pub mod fish_key_reader;
-#[cfg(unix)]
 pub mod function;
-#[cfg(unix)]
 pub mod functions;
-#[cfg(unix)]
 pub mod r#gettext;
 #[cfg(unix)]
 pub mod history;
@@ -57,20 +42,15 @@ pub mod math;
 pub mod path;
 pub mod printf;
 pub mod pwd;
-#[cfg(unix)]
 pub mod random;
-#[cfg(unix)]
 pub mod read;
 pub mod realpath;
 pub mod r#return;
 pub mod set;
 #[cfg(unix)]
 pub mod set_color;
-#[cfg(unix)]
 pub mod source;
-#[cfg(unix)]
 pub mod status;
-#[cfg(unix)]
 pub mod string;
 pub mod test;
 pub mod r#true;

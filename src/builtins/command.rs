@@ -36,8 +36,7 @@ pub fn r#command(
             // -s and -v are aliases
             'v' => opts.find_path = true,
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return if cfg!(windows) { Err(STATUS_INVALID_ARGS) } else { Ok(SUCCESS) };
+                return builtin_print_help(parser, streams, cmd);
             }
             ':' => {
                 builtin_missing_argument(
@@ -72,7 +71,7 @@ pub fn r#command(
 
     // Quiet implies find_path.
     if !opts.find_path && !opts.all && !opts.quiet {
-        builtin_print_help(parser, streams, cmd);
+        let _ = builtin_print_help(parser, streams, cmd);
         return Err(STATUS_INVALID_ARGS);
     }
 

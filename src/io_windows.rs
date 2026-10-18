@@ -24,8 +24,19 @@ pub(crate) use pipe::{native_input_pipe, native_output_pipe, native_synchronous_
 mod deferred;
 pub(crate) use deferred::NativeDeferredWriter;
 
+#[repr(C)]
+#[derive(Default)]
+struct ConsoleScreenBufferInfo {
+    size: [i16; 2],
+    cursor: [i16; 2],
+    attributes: u16,
+    window: [i16; 4],
+    maximum_size: [i16; 2],
+}
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn GetConsoleScreenBufferInfo(handle: RawHandle, info: *mut ConsoleScreenBufferInfo) -> i32;
     fn WriteFile(
         handle: RawHandle,
         buffer: *const u8,
@@ -470,6 +481,16 @@ impl<'a> IoStreams<'a> {
     }
     pub fn out_is_terminal(&self) -> bool {
         self.out.is_terminal()
+    }
+    pub(crate) fn output_width(&self) -> Option<usize> {
+        let endpoint = self.io_chain.endpoint(1).ok().flatten()?;
+        let handle = endpoint.native_handle()?;
+        let mut info = ConsoleScreenBufferInfo::default();
+        if unsafe { GetConsoleScreenBufferInfo(handle.as_raw_handle(), &mut info) } == 0 {
+            return None;
+        }
+        let width = i32::from(info.window[2]) - i32::from(info.window[0]) + 1;
+        usize::try_from(width).ok().filter(|width| *width > 0)
     }
     pub fn is_terminal(&self, fd: i64) -> bool {
         match fd {

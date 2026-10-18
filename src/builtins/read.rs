@@ -6,27 +6,32 @@ use crate::{
     common::valid_var_name,
     env::{EnvMode, EnvVar, Environment as _, READ_BYTE_LIMIT},
     err_fmt, err_str,
+    parse_execution::varname_error,
+    parser::ParserEnvSetMode,
+    tokenizer::{Tok, TokFlags, Tokenizer},
+    wutil,
+};
+#[cfg(unix)]
+use crate::{
     history::{HistoryId, MemoryHistoryId},
     input::{DecodeState, InvalidPolicy, decode_utf8},
     nix::isatty,
-    parse_execution::varname_error,
-    parser::ParserEnvSetMode,
     reader::{
         ReaderConfig, commandline_set_buffer, reader_pop, reader_push, reader_readline,
         set_shell_modes_temporarily,
     },
-    tokenizer::{Tok, TokFlags, Tokenizer},
-    wutil::{self, perror_nix},
+    wutil::perror_nix,
 };
-use fish_common::{UnescapeStringStyle, escape, read_blocked, unescape_string};
+#[cfg(unix)]
+use fish_common::read_blocked;
+use fish_common::{UnescapeStringStyle, escape, unescape_string};
 use fish_wcstringutil::{split_about, split_string_tok};
 use fish_widestring::bytes2wcstring;
+#[cfg(unix)]
 use nix::unistd::{Whence, lseek};
-use std::{
-    num::NonZeroUsize,
-    os::fd::{BorrowedFd, RawFd},
-    sync::atomic::Ordering,
-};
+#[cfg(unix)]
+use std::os::fd::{BorrowedFd, RawFd};
+use std::{num::NonZeroUsize, sync::atomic::Ordering};
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum TokenOutputMode {
@@ -224,6 +229,7 @@ fn parse_cmd_opts(
 
 /// Read from the tty. This is only valid when the stream is stdin and it is attached to a tty and
 /// we weren't asked to split on null characters.
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn read_interactive(
     parser: &mut Parser,
@@ -304,6 +310,7 @@ fn read_interactive(
 /// Bash uses 128 bytes for its chunk size. Very informal testing I did suggested that a smaller
 /// chunk size performed better. However, we're going to use the bash value under the assumption
 /// they've done more extensive testing.
+#[cfg(unix)]
 const READ_CHUNK_SIZE: usize = 128;
 
 /// Read from the fd in chunks until we see newline or null, as requested, is seen. This is only
@@ -311,6 +318,7 @@ const READ_CHUNK_SIZE: usize = 128;
 /// of chars.
 ///
 /// Returns an exit status.
+#[cfg(unix)]
 fn read_in_chunks(fd: RawFd, buff: &mut WString, split_null: bool, do_seek: bool) -> BuiltinResult {
     let mut exit_res = Ok(SUCCESS);
     let mut narrow_buff = vec![];
@@ -368,6 +376,7 @@ fn read_in_chunks(fd: RawFd, buff: &mut WString, split_null: bool, do_seek: bool
 /// Read from the fd on char at a time until we've read the requested number of characters or a
 /// newline or null, as appropriate, is seen. This is inefficient so should only be used when the
 /// fd is not seekable.
+#[cfg(unix)]
 fn read_one_char_at_a_time(
     fd: RawFd,
     buff: &mut WString,
@@ -546,10 +555,24 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     let argc = argv.len();
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
+    #[cfg(windows)]
+    if opts.set_mode.mode.universal
+        || opts.commandline.is_some()
+        || opts.prompt.is_some()
+        || opts.prompt_str.is_some()
+        || !opts.right_prompt.is_empty()
+        || opts.shell
+        || opts.silent
+        || streams.is_terminal(0)
+    {
+        err_str!("universal variables require N4; terminal/editor read options require N6")
+            .cmd(cmd)
+            .finish(streams);
+        return Err(STATUS_INVALID_ARGS);
+    }
     validate_read_args(cmd, &mut opts, argv, parser, streams)?;
 
     // stdin may have been explicitly closed
@@ -574,6 +597,7 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
         }
     };
 
+    #[cfg(unix)]
     let stream_stdin_is_a_tty = streams.stdin_fd() >= 0 && isatty(streams.stdin_fd());
 
     // Normally, we either consume a line of input or all available input. But if we are reading a
@@ -582,6 +606,7 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     loop {
         buff.clear();
 
+        #[cfg(unix)]
         if stream_stdin_is_a_tty && !opts.split_null {
             // Read interactively using reader_readline(). This does not support splitting on null.
             exit_res = read_interactive(
@@ -632,6 +657,15 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
             );
         }
 
+        #[cfg(windows)]
+        {
+            exit_res = read_native(
+                streams.stdin_file.as_mut().unwrap(),
+                &mut buff,
+                opts.nchars,
+                opts.split_null,
+            );
+        }
         if exit_res.is_err() {
             clear_remaining_vars(parser, &mut var_ptr);
             return exit_res;
@@ -809,4 +843,99 @@ pub fn read(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     }
 
     exit_res
+}
+
+/// Read through N2's shared cursor. Peeking fills endpoint-owned storage; consuming only the
+/// selected bytes preserves the next record even when the underlying handle is a pipe.
+#[cfg(windows)]
+fn read_native(
+    input: &mut crate::fds::BorrowedFdFile,
+    output: &mut WString,
+    nchars: Option<NonZeroUsize>,
+    split_null: bool,
+) -> BuiltinResult {
+    use std::io::Read;
+    let delimiter = if split_null { 0 } else { b'\n' };
+    let limit = READ_BYTE_LIMIT.load(Ordering::Relaxed);
+    if let Some(nchars) = nchars {
+        let mut pending = [0u8; 4];
+        let mut pending_len = 0;
+        let mut nbytes = 0;
+        loop {
+            let available = match input.fill_buf() {
+                Ok(bytes) => bytes,
+                Err(_) => return Err(STATUS_CMD_ERROR),
+            };
+            if available.is_empty() {
+                return if output.is_empty() {
+                    Err(STATUS_CMD_ERROR)
+                } else {
+                    Ok(SUCCESS)
+                };
+            }
+            drop(available);
+            if input
+                .read(&mut pending[pending_len..pending_len + 1])
+                .is_err()
+            {
+                return Err(STATUS_CMD_ERROR);
+            }
+            pending_len += 1;
+            nbytes += 1;
+            if nbytes > limit {
+                return Err(STATUS_READ_TOO_MUCH);
+            }
+            let scalar = &pending[..pending_len];
+            if std::str::from_utf8(scalar).is_err_and(|error| error.error_len().is_none()) {
+                continue;
+            }
+            if scalar == [delimiter] {
+                return Ok(SUCCESS);
+            }
+            output.push_utfstr(&bytes2wcstring(scalar));
+            pending_len = 0;
+            if output.len() >= nchars.get() {
+                return Ok(SUCCESS);
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    loop {
+        let available = match input.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(_) => return Err(STATUS_CMD_ERROR),
+        };
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Err(STATUS_CMD_ERROR);
+            }
+            *output = bytes2wcstring(&bytes);
+            return Ok(SUCCESS);
+        }
+        let count = available
+            .iter()
+            .position(|&byte| byte == delimiter)
+            .map_or(available.len(), |index| index + 1)
+            .min(limit.saturating_sub(bytes.len()).saturating_add(1));
+        let start = bytes.len();
+        bytes.extend_from_slice(&available[..count]);
+        drop(available);
+        // The bytes are already in shared storage, so this cannot overread the native pipe.
+        let consumed = match input.read(&mut bytes[start..]) {
+            Ok(count) => count,
+            Err(_) => return Err(STATUS_CMD_ERROR),
+        };
+        bytes.truncate(start + consumed);
+        let finished = bytes.last() == Some(&delimiter);
+        if finished {
+            bytes.pop();
+        }
+        if bytes.len() > limit {
+            return Err(STATUS_READ_TOO_MUCH);
+        }
+        if finished {
+            *output = bytes2wcstring(&bytes);
+            return Ok(SUCCESS);
+        }
+    }
 }

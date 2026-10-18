@@ -81,8 +81,7 @@ pub fn set_color(
             return Ok(SUCCESS);
         }
         Ok(PrintHelp) => {
-            builtin_print_help(parser, streams, argv[0]);
-            return Ok(SUCCESS);
+            return builtin_print_help(parser, streams, argv[0]);
         }
         Err(err) => {
             let error = match err {

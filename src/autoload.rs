@@ -1,7 +1,5 @@
 //! The classes responsible for autoloading functions and completions.
 
-#![cfg(unix)]
-
 use crate::{
     env::Environment,
     flogf,
@@ -96,13 +94,22 @@ impl Autoload {
     /// mark_autoload_finished() with the same command. Note this does not actually execute any
     /// code; it is the caller's responsibility to load the file.
     pub fn resolve_command(&mut self, cmd: &wstr, env: &dyn Environment) -> AutoloadResult {
-        let result = self.resolve_command_impl(
-            cmd,
-            env.get(self.env_var_name)
-                .as_ref()
-                .map(|var| var.as_list())
-                .unwrap_or_default(),
-        );
+        let paths = env.get(self.env_var_name);
+        let paths = paths.as_ref().map(|var| var.as_list()).unwrap_or_default();
+        // Native filesystem APIs must resolve against this environment's owned cwd,
+        // not the process cwd. Keep the shared cache keyed by the resulting paths so
+        // changing directory also invalidates relative search entries.
+        #[cfg(windows)]
+        let resolved_paths = {
+            let cwd = env.get_pwd_slash();
+            paths
+                .iter()
+                .map(|path| crate::path::path_apply_working_directory(path, &cwd))
+                .collect::<Vec<_>>()
+        };
+        #[cfg(windows)]
+        let paths = resolved_paths.as_slice();
+        let result = self.resolve_command_impl(cmd, paths);
         match result {
             AutoloadResult::Path(AutoloadPath::OnDisk(ref path)) => {
                 flogf!(
@@ -119,6 +126,14 @@ impl Autoload {
             AutoloadResult::Loaded | AutoloadResult::Pending | AutoloadResult::None => {}
         }
         result
+    }
+
+    /// Resolve an embedded core builtin dependency without exposing disk providers.
+    /// The caller owns the core-name policy; loading and recursion/cache tracking
+    /// remain in the same state machine as ordinary autoload.
+    #[cfg(windows)]
+    pub(crate) fn resolve_core_command(&mut self, cmd: &wstr) -> AutoloadResult {
+        self.resolve_command_impl(cmd, &[])
     }
 
     /// Helper to actually perform an autoload.
@@ -446,7 +461,7 @@ impl AutoloadFileCache {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{Autoload, AutoloadResult};
     use crate::prelude::*;

@@ -113,6 +113,7 @@ unsafe extern "system" {
         template: RawHandle,
     ) -> RawHandle;
     fn ConnectNamedPipe(pipe: RawHandle, overlapped: *mut Overlapped) -> i32;
+    fn DisconnectNamedPipe(pipe: RawHandle) -> i32;
     fn GetOverlappedResult(
         handle: RawHandle,
         overlapped: *mut Overlapped,
@@ -183,6 +184,30 @@ impl Event {
 
 pub(super) fn is_pipe(handle: BorrowedHandle<'_>) -> bool {
     unsafe { GetFileType(handle.as_raw_handle()) == 3 }
+}
+pub(super) fn peek_available(
+    handle: BorrowedHandle<'_>,
+    bytes: &mut [u8],
+) -> io::Result<(usize, bool)> {
+    let mut count = 0;
+    if unsafe {
+        PeekNamedPipe(
+            handle.as_raw_handle(),
+            bytes.as_mut_ptr(),
+            bytes.len().min(u32::MAX as usize) as u32,
+            &mut count,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        let code = last_error();
+        if eof(code) {
+            return Ok((0, true));
+        }
+        return Err(error(code));
+    }
+    Ok((count as usize, false))
 }
 pub(super) fn read_synchronous(handle: BorrowedHandle<'_>, bytes: &mut [u8]) -> io::Result<usize> {
     if bytes.is_empty() {
@@ -512,7 +537,7 @@ impl NativeSynchronousInput {
             Err(error(result.code))
         }
     }
-    fn cancel(&self) {
+    pub(super) fn cancel(&self) {
         let mut request = lock(&self.state.state);
         request.cancelled = true;
         if request.active {
@@ -668,6 +693,11 @@ struct CaptureControl {
     last_transfer: usize,
     error: Option<io::Error>,
 }
+enum CaptureSink {
+    Buffer(IoBuffer),
+    Forward(Arc<NativeEndpoint>),
+}
+
 struct CaptureState {
     file: RawHandle,
     io: UnsafeCell<*mut c_void>,
@@ -675,7 +705,7 @@ struct CaptureState {
     slab: UnsafeCell<Vec<u8>>,
     idle: Event,
     control: Mutex<CaptureControl>,
-    buffer: IoBuffer,
+    sink: CaptureSink,
     poster: NativePoster,
     notified: std::sync::atomic::AtomicBool,
 }
@@ -813,9 +843,36 @@ unsafe extern "system" fn capture_callback(
     control.last_transfer = bytes;
     if bytes != 0 {
         let slab = unsafe { &*state.slab.get() };
-        state
-            .buffer
-            .append(&slab[..bytes], super::SeparationType::Inferred);
+        if let CaptureSink::Forward(target) = &state.sink {
+            // Keep read backpressure: do not submit the next slab until its
+            // bytes reach the already-running native consumer. Do not hold the
+            // control lock while writing; cancellation must remain reachable.
+            drop(control);
+            let mut remaining = &slab[..bytes];
+            let result = (|| {
+                while !remaining.is_empty() {
+                    let count = target.write(remaining)?;
+                    if count == 0 {
+                        return Err(io::ErrorKind::WriteZero.into());
+                    }
+                    remaining = &remaining[count..];
+                }
+                Ok::<(), io::Error>(())
+            })();
+            control = lock(&state.control);
+            if let Err(error) = result {
+                control.error.get_or_insert(error);
+                control.stopped = true;
+                // Release a writer blocked behind this failed downstream sink.
+                // Retaining the unread connection would deadlock the root
+                // before evaluation can finish the forwarder.
+                unsafe {
+                    DisconnectNamedPipe(state.file);
+                }
+            }
+        } else if let CaptureSink::Buffer(buffer) = &state.sink {
+            buffer.append(&slab[..bytes], super::SeparationType::Inferred);
+        }
     }
     if eof(code) || (code == 0 && bytes == 0) {
         control.eof = true;
@@ -863,6 +920,11 @@ impl CaptureReader {
 }
 impl Drop for CaptureReader {
     fn drop(&mut self) {
+        if !self.closed {
+            if let CaptureSink::Forward(target) = &self.state.sink {
+                target.cancel_overlapped_io();
+            }
+        }
         if self.close().is_err() {
             std::process::abort();
         }
@@ -881,6 +943,21 @@ pub struct NativeCapture {
 }
 impl NativeCapture {
     pub fn new(limit: usize, runtime: Arc<NativeRuntime>) -> io::Result<Arc<Self>> {
+        Self::with_buffer(IoBuffer::new_bounded(limit), runtime)
+    }
+
+    pub(crate) fn with_buffer(
+        buffer: IoBuffer,
+        runtime: Arc<NativeRuntime>,
+    ) -> io::Result<Arc<Self>> {
+        Self::create(CaptureSink::Buffer(buffer), runtime)
+    }
+
+    pub(crate) fn forwarding(target: Arc<NativeEndpoint>) -> io::Result<Arc<Self>> {
+        Self::create(CaptureSink::Forward(target), NativeRuntime::new()?)
+    }
+
+    fn create(sink: CaptureSink, runtime: Arc<NativeRuntime>) -> io::Result<Arc<Self>> {
         let (file, writer) = named_pipe(true)?;
         let source = runtime.register_source()?;
         let state = Arc::new(CaptureState {
@@ -898,7 +975,7 @@ impl NativeCapture {
                 last_transfer: 0,
                 error: None,
             }),
-            buffer: IoBuffer::new_bounded(limit),
+            sink,
             poster: source.poster(),
             notified: std::sync::atomic::AtomicBool::new(false),
         });
@@ -944,8 +1021,14 @@ impl NativeCapture {
     pub(crate) fn writer_handle(&self) -> BorrowedHandle<'_> {
         self.writer.as_handle()
     }
+    fn stored_buffer(&self) -> &IoBuffer {
+        let CaptureSink::Buffer(buffer) = &self.state.sink else {
+            unreachable!("a streaming forwarder does not retain an output buffer");
+        };
+        buffer
+    }
     pub fn buffer(&self) -> IoBuffer {
-        self.state.buffer.clone()
+        self.stored_buffer().clone()
     }
     pub fn io_chain(self: &Arc<Self>) -> IoChain {
         let mut chain = IoChain::new();
@@ -953,6 +1036,9 @@ impl NativeCapture {
         chain
     }
     pub fn cancel(&self) {
+        if let CaptureSink::Forward(target) = &self.state.sink {
+            target.cancel_overlapped_io();
+        }
         self.state.request_stop(true);
     }
     pub(crate) fn synchronize(&self) -> io::Result<()> {
@@ -971,7 +1057,7 @@ impl NativeCapture {
         }
         Ok(())
     }
-    pub fn finish(&self) -> io::Result<NativeCaptureResult> {
+    pub(crate) fn finish_in_place(&self) -> io::Result<(bool, Option<io::Error>)> {
         let mut reader = lock(&self.reader).take().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -983,9 +1069,16 @@ impl NativeCapture {
         drop(reader);
         let mut control = lock(&self.state.control);
         let error = control.error.take().or(drain_error).or(close_error);
+        Ok((control.cancelled, error))
+    }
+
+    /// Completion is evaluation-boundary based, never descendant-EOF based:
+    /// cancel/drain the outstanding operation, then drain one available-byte snapshot.
+    pub fn finish(&self) -> io::Result<NativeCaptureResult> {
+        let (interrupted, error) = self.finish_in_place()?;
         Ok(NativeCaptureResult {
-            buffer: self.state.buffer.take_buffer(),
-            interrupted: control.cancelled,
+            buffer: self.stored_buffer().take_buffer(),
+            interrupted,
             error,
         })
     }

@@ -23,8 +23,7 @@ pub fn random(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) 
     while let Some(c) = w.next_opt() {
         match c {
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return builtin_print_help(parser, streams, cmd);
             }
             ':' => {
                 builtin_missing_argument(

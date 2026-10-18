@@ -59,7 +59,8 @@ fn read_termsize_from_tty() -> Option<Termsize> {
 
 impl Termsize {
     /// Default width and height.
-    pub const DEFAULT_WIDTH: NonZeroU16 = NonZeroU16::new(80).unwrap();
+    pub const DEFAULT_WIDTH: NonZeroU16 =
+        NonZeroU16::new(crate::common::DEFAULT_SCREEN_WIDTH).unwrap();
     pub const DEFAULT_HEIGHT: NonZeroU16 = NonZeroU16::new(24).unwrap();
 
     /// Construct from width and height.

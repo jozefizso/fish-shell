@@ -31,8 +31,7 @@ pub fn r#builtin(
             'q' => opts.query = true,
             'n' => opts.list_names = true,
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return builtin_print_help(parser, streams, cmd);
             }
             ':' => {
                 builtin_missing_argument(
@@ -79,7 +78,7 @@ pub fn r#builtin(
     // This is also what e.g. command and time,
     // the other decorator/builtins do.
     if !opts.query && !opts.list_names {
-        builtin_print_help(parser, streams, cmd);
+        let _ = builtin_print_help(parser, streams, cmd);
         return Err(STATUS_INVALID_ARGS);
     }
 

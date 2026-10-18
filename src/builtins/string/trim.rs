@@ -95,7 +95,7 @@ impl<'args> StringSubCommand<'args> for Trim<'args> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use crate::builtins::{STATUS_CMD_ERROR, STATUS_CMD_OK};
     use crate::tests::prelude::*;

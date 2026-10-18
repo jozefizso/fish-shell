@@ -1,21 +1,32 @@
 use super::prelude::*;
 use crate::builtins;
 use crate::common::get_program_name;
+#[cfg(unix)]
 use crate::env::config_paths::get_fish_path;
 use crate::err_fmt;
-#[cfg(not(feature = "localize-messages"))]
+#[cfg(all(unix, not(feature = "localize-messages")))]
 use crate::err_raw;
-use crate::proc::{
-    JobControl, get_job_control_mode, get_login, is_interactive_session, set_job_control_mode,
-};
+use crate::proc::JobControl;
+#[cfg(unix)]
+use crate::proc::{get_job_control_mode, get_login, is_interactive_session, set_job_control_mode};
+#[cfg(unix)]
 use crate::reader::reader_in_interactive_read;
+#[cfg(unix)]
 use crate::tty_handoff::{TERMINAL_OS_NAME, get_scroll_content_up_capability, xtversion};
-use crate::wutil::{self, waccess, wbasename, wdirname, wrealpath};
+use crate::wutil::{self, wbasename, wdirname};
+#[cfg(unix)]
+use crate::wutil::{waccess, wrealpath};
+#[cfg(unix)]
 use cfg_if::cfg_if;
 use fish_feature_flags::{self as features, feature_test};
+#[cfg(unix)]
 use fish_util::wcsfilecmp_glob;
-use fish_widestring::{bytes2wcstring, osstr2wcstring, str2wcstring, wcs2bytes};
+use fish_widestring::str2wcstring;
+#[cfg(unix)]
+use fish_widestring::{bytes2wcstring, osstr2wcstring, wcs2bytes};
+#[cfg(unix)]
 use nix::unistd::AccessFlags;
+#[cfg(unix)]
 use rust_embed::RustEmbed;
 
 /// Create an enum with name `$name`.
@@ -300,7 +311,9 @@ fn parse_cmd_opts(
     Ok(SUCCESS)
 }
 
+#[cfg(unix)]
 struct EmptyEmbed;
+#[cfg(unix)]
 impl RustEmbed for EmptyEmbed {
     fn get(_file_path: &str) -> Option<rust_embed::EmbeddedFile> {
         None
@@ -310,6 +323,7 @@ impl RustEmbed for EmptyEmbed {
     }
 }
 
+#[cfg(unix)]
 cfg_if!(
     if #[cfg(feature = "embed-manpages")] {
         #[derive(RustEmbed)]
@@ -321,6 +335,7 @@ cfg_if!(
     }
 );
 
+#[cfg(unix)]
 cfg_if!(
     if #[cfg(using_cmake)] {
         #[derive(RustEmbed)]
@@ -341,8 +356,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     parse_cmd_opts(&mut opts, &mut optind, args, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     // If a status command hasn't already been specified via a flag check the first word.
@@ -369,25 +383,67 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     let Some(subcmd) = opts.status_cmd else {
         debug_assert!(args.is_empty(), "passed arguments to nothing");
 
-        if get_login() {
-            streams.out.appendln(wgettext!("This is a login shell"));
-        } else {
-            streams.out.appendln(wgettext!("This is not a login shell"));
+        #[cfg(unix)]
+        {
+            if get_login() {
+                streams.out.appendln(wgettext!("This is a login shell"));
+            } else {
+                streams.out.appendln(wgettext!("This is not a login shell"));
+            }
+            let job_control_mode = match get_job_control_mode() {
+                JobControl::Interactive => wgettext!("Only on interactive jobs"),
+                JobControl::None => wgettext!("Never"),
+                JobControl::All => wgettext!("Always"),
+            };
+            streams
+                .out
+                .appendln(&wgettext_fmt!("Job control: %s", job_control_mode));
         }
-        let job_control_mode = match get_job_control_mode() {
-            JobControl::Interactive => wgettext!("Only on interactive jobs"),
-            JobControl::None => wgettext!("Never"),
-            JobControl::All => wgettext!("Always"),
-        };
-        streams
-            .out
-            .appendln(&wgettext_fmt!("Job control: %s", job_control_mode));
+        #[cfg(windows)]
+        {
+            streams
+                .out
+                .appendln(L!("Login state: unavailable on native Windows (N4)"));
+            streams
+                .out
+                .appendln(L!("Job control: unavailable on native Windows (N5/N6)"));
+        }
         streams.out.append(&parser.stack_trace());
 
         return Ok(SUCCESS);
     };
 
     match subcmd {
+        #[cfg(windows)]
+        IsLogin => {
+            err_fmt!("login state is unavailable on native Windows (N4)")
+                .cmd(cmd)
+                .finish(streams);
+            return Err(STATUS_INVALID_ARGS);
+        }
+        #[cfg(windows)]
+        JobControl | IsFullJobControl | IsInteractiveJobControl | IsNoJobControl => {
+            err_fmt!("job control is unavailable on native Windows (N5/N6)")
+                .cmd(cmd)
+                .finish(streams);
+            return Err(STATUS_INVALID_ARGS);
+        }
+        #[cfg(windows)]
+        IsInteractive | IsInteractiveRead | IsBreakpoint | Terminal | TerminalOs
+        | TestTerminalFeature => {
+            err_fmt!("reader and terminal state are unavailable on native Windows (N6/N7)")
+                .cmd(cmd)
+                .finish(streams);
+            return Err(STATUS_INVALID_ARGS);
+        }
+        #[cfg(windows)]
+        GetFile | ListFiles | Language => {
+            err_fmt!("resource and language services are unavailable on native Windows (N9)")
+                .cmd(cmd)
+                .finish(streams);
+            return Err(STATUS_INVALID_ARGS);
+        }
+        #[cfg(unix)]
         c @ JobControl => {
             let job_control_mode = match opts.new_job_control_mode {
                 Some(j) => {
@@ -437,6 +493,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                     },
                 );
         }
+        #[cfg(unix)]
         c @ GetFile => {
             if args.len() != 1 {
                 err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 1, args.len())
@@ -456,6 +513,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             streams.out.append(&src);
             return Ok(SUCCESS);
         }
+        #[cfg(unix)]
         Language => {
             cfg_if! {
                 if #[cfg(not(feature = "localize-messages"))] {
@@ -498,6 +556,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                 }
             }
         }
+        #[cfg(unix)]
         ListFiles => {
             let mut paths = vec![];
             let mut add = |arg| {
@@ -531,6 +590,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                 return Err(STATUS_CMD_ERROR);
             }
         }
+        #[cfg(unix)]
         c @ TestTerminalFeature => {
             if args.len() != 1 {
                 err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 1, args.len())
@@ -623,6 +683,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         .out
                         .appendln(&parser.lineno_for_display().to_wstring());
                 }
+                #[cfg(unix)]
                 IsInteractive => {
                     if is_interactive_session() {
                         return Ok(SUCCESS);
@@ -643,6 +704,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
+                #[cfg(unix)]
                 IsBreakpoint => {
                     if parser.is_breakpoint() {
                         return Ok(SUCCESS);
@@ -650,6 +712,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
+                #[cfg(unix)]
                 IsLogin => {
                     if get_login() {
                         return Ok(SUCCESS);
@@ -657,6 +720,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
+                #[cfg(unix)]
                 IsFullJobControl => {
                     if get_job_control_mode() == JobControl::All {
                         return Ok(SUCCESS);
@@ -664,6 +728,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
+                #[cfg(unix)]
                 IsInteractiveJobControl => {
                     if get_job_control_mode() == JobControl::Interactive {
                         return Ok(SUCCESS);
@@ -671,6 +736,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
+                #[cfg(unix)]
                 IsInteractiveRead => {
                     if reader_in_interactive_read() {
                         return Ok(SUCCESS);
@@ -678,6 +744,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
+                #[cfg(unix)]
                 IsNoJobControl => {
                     if get_job_control_mode() == JobControl::None {
                         return Ok(SUCCESS);
@@ -700,6 +767,28 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                     let commandline = &parser.libdata().status_vars.commandline;
                     streams.out.appendln(commandline);
                 }
+                #[cfg(windows)]
+                FishPath => {
+                    let path = match std::env::current_exe()
+                        .and_then(|path| crate::path::native_path_text(&path))
+                        .and_then(|path| crate::wutil::native_realpath(&path))
+                    {
+                        Ok(path) => path,
+                        Err(error) => {
+                            err_fmt!(
+                                "cannot resolve the current executable: %s",
+                                error.to_string()
+                            )
+                            .cmd(cmd)
+                            .finish(streams);
+                            return Err(STATUS_CMD_ERROR);
+                        }
+                    };
+                    streams
+                        .out
+                        .appendln(&fish_widestring::native_to_shell_text(&path));
+                }
+                #[cfg(unix)]
                 FishPath => {
                     use crate::env::config_paths::FishPath::*;
                     let result = match get_fish_path() {
@@ -716,16 +805,28 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                     };
                     streams.out.appendln(&result);
                 }
+                #[cfg(unix)]
                 Terminal => {
                     let xtversion = xtversion().unwrap_or_default();
                     streams.out.appendln(xtversion);
                 }
+                #[cfg(unix)]
                 TerminalOs => {
                     let Some(Some(terminal_os_name)) = TERMINAL_OS_NAME.get() else {
                         return Err(STATUS_CMD_ERROR);
                     };
                     streams.out.appendln(first_line(terminal_os_name));
                 }
+                #[cfg(windows)]
+                IsLogin
+                | IsFullJobControl
+                | IsInteractiveJobControl
+                | IsNoJobControl
+                | IsInteractive
+                | IsInteractiveRead
+                | IsBreakpoint
+                | Terminal
+                | TerminalOs => unreachable!(),
                 JobControl | Features | TestFeature | GetFile | ListFiles | Language
                 | TestTerminalFeature => {
                     unreachable!("")
@@ -737,6 +838,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     Ok(SUCCESS)
 }
 
+#[cfg(unix)]
 fn first_line(s: &wstr) -> &wstr {
     &s[..s.chars().position(|c| c == '\n').unwrap_or(s.len())]
 }

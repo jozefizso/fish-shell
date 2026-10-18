@@ -1,4 +1,4 @@
-use crate::key::char_to_symbol;
+use crate::text_helpers::char_to_symbol;
 
 use super::*;
 use fish_fallback::fish_wcwidth;

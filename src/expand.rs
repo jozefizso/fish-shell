@@ -5,6 +5,9 @@
 
 use std::ops::DerefMut as _;
 
+use crate::exec::exec_subshell_for_expand;
+#[cfg(unix)]
+use crate::history::{History, history_id};
 use crate::{
     builtins::{
         STATUS_CMD_ERROR, STATUS_CMD_UNKNOWN, STATUS_EXPAND_ERROR, STATUS_ILLEGAL_CMD,
@@ -17,15 +20,10 @@ use crate::{
     operation_context::OperationContext,
     parse_constants::{ParseError, ParseErrorCode, ParseErrorList, SOURCE_LOCATION_UNKNOWN},
     parse_util::{expand_variable_error, locate_cmdsubst_range},
-    prelude::*,
     path::path_apply_working_directory,
+    prelude::*,
     wildcard::{WildcardResult, wildcard_expand_string, wildcard_has_internal},
     wutil::{normalize_path, wcstoi, wcstoi_partial},
-};
-#[cfg(unix)]
-use crate::{
-    exec::exec_subshell_for_expand,
-    history::{History, history_id},
 };
 use fish_common::{
     EscapeFlags, EscapeStringStyle, UnescapeFlags, UnescapeStringStyle, escape, escape_string,
@@ -1002,7 +1000,6 @@ fn expand_braces(
 
 /// Expand a command substitution `input`, executing on `ctx`, and inserting the results into
 /// `out_list`, or any errors into `errors`. Return an expand result.
-#[cfg(unix)]
 pub fn expand_cmdsubst(
     input: WString,
     ctx: &mut OperationContext,
@@ -1141,7 +1138,10 @@ pub fn expand_cmdsubst(
         tail.insert(0, '"');
     }
 
-    _ = expand_cmdsubst(tail, ctx, &mut tail_expand_recv, errors); // TODO: offset error locations
+    let tail_result = expand_cmdsubst(tail, ctx, &mut tail_expand_recv, errors);
+    if tail_result.failed() {
+        return tail_result;
+    }
     let tail_expand = tail_expand_recv.take();
 
     // Combine the result of the current command substitution with the result of the recursive tail
@@ -1221,38 +1221,6 @@ pub fn expand_cmdsubst(
     }
 
     ExpandResult::ok()
-}
-
-/// Native batch evaluation never executes command substitutions.
-#[cfg(windows)]
-pub fn expand_cmdsubst(
-    input: WString,
-    _ctx: &mut OperationContext,
-    out: &mut CompletionReceiver,
-    errors: &mut Option<&mut ParseErrorList>,
-) -> ExpandResult {
-    let mut cursor = 0;
-    match locate_cmdsubst_range(&input, &mut cursor, false, None, None) {
-        Err(()) => {
-            append_syntax_error!(errors, SOURCE_LOCATION_UNKNOWN, "Mismatched parenthesis");
-            ExpandResult::make_error(STATUS_EXPAND_ERROR)
-        }
-        Ok(Some(cmdsub)) => {
-            append_cmdsub_error!(
-                errors,
-                cmdsub.opening_paren_offset(),
-                cmdsub.end() - 1,
-                wgettext!("Command substitution is not supported on native Windows")
-            );
-            ExpandResult::make_error(STATUS_EXPAND_ERROR)
-        }
-        Ok(None) => {
-            if out.add(input).is_err() {
-                return append_overflow_error(errors, None);
-            }
-            ExpandResult::ok()
-        }
-    }
 }
 
 // Given that input[0] is HOME_DIRECTORY or tilde (ugh), return the user's name. Return the empty
@@ -1675,10 +1643,14 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
                 paths.push(if for_cd { L!(".") } else { L!("") }.to_owned());
                 // Native discovery never implicitly searches cwd or empty PATH elements.
                 #[cfg(windows)]
-                if for_cd { paths.push(L!(".").to_owned()); }
+                if for_cd {
+                    paths.push(L!(".").to_owned());
+                }
                 for next_path in paths {
                     #[cfg(windows)]
-                    if for_command && next_path.is_empty() { continue; }
+                    if for_command && next_path.is_empty() {
+                        continue;
+                    }
                     effective_working_dirs
                         .push(path_apply_working_directory(&next_path, &working_dir));
                 }
@@ -1729,7 +1701,6 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
         }
         result
     }
-
 
     // Given an original input string, if it starts with a tilde, "unexpand" the expanded home
     // directory.  Note this may be just a tilde or a user name like ~foo/.
@@ -2382,39 +2353,22 @@ mod portable_tests {
 
     #[cfg(windows)]
     #[test]
-    fn unsupported_native_expansion_reports_errors() {
+    fn unavailable_native_history_expansion_reports_error() {
         let mut ctx = OperationContext::empty();
-        let mut completions = CompletionReceiver::new(16);
+        let mut output = CompletionList::new();
         let mut errors = ParseErrorList::new();
         assert_eq!(
-            expand_cmdsubst(
-                L!("(set -g forbidden value)").to_owned(),
+            expand_string(
+                L!("$history").to_owned(),
+                &mut output,
+                ExpandFlags::FAIL_ON_CMDSUBST,
                 &mut ctx,
-                &mut completions,
-                &mut Some(&mut errors),
+                Some(&mut errors),
             )
             .result,
             ExpandResultCode::Error
         );
-        assert!(completions.empty());
-        assert!(ctx.vars().get(L!("forbidden")).is_none());
-
-        for input in [L!("$history")] {
-            let mut output = CompletionList::new();
-            errors.clear();
-            assert_eq!(
-                expand_string(
-                    input.to_owned(),
-                    &mut output,
-                    ExpandFlags::FAIL_ON_CMDSUBST,
-                    &mut ctx,
-                    Some(&mut errors),
-                )
-                .result,
-                ExpandResultCode::Error
-            );
-            assert!(output.is_empty());
-        }
+        assert!(output.is_empty());
     }
 
     #[cfg(windows)]
@@ -2428,28 +2382,46 @@ mod portable_tests {
         std::fs::write(tree.path().join("nested").join("deep.txt"), b"").unwrap();
         let vars = EnvStack::new();
         vars.initialize_native_from(
-            std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(), tree.path(),
-        ).unwrap();
+            std::iter::empty::<(std::ffi::OsString, std::ffi::OsString)>(),
+            tree.path(),
+        )
+        .unwrap();
         let mut ctx = OperationContext::background(&vars, EXPANSION_LIMIT_DEFAULT);
         let cases: &[(&wstr, &[&wstr])] = &[
             (L!("*.txt"), &[L!("a魚.txt"), L!("b.txt")]),
-            (L!("**/*.txt"), &[L!("a魚.txt"), L!("b.txt"), L!("nested/deep.txt")]),
+            (
+                L!("**/*.txt"),
+                &[L!("a魚.txt"), L!("b.txt"), L!("nested/deep.txt")],
+            ),
             (L!(".*.txt"), &[L!(".hidden.txt")]),
             (L!("'*.txt'"), &[L!("*.txt")]),
         ];
         for &(input, expected) in cases {
             let mut output = CompletionList::new();
             let mut errors = ParseErrorList::new();
-            let result = expand_string(input.to_owned(), &mut output, ExpandFlags::FAIL_ON_CMDSUBST,
-                &mut ctx, Some(&mut errors));
+            let result = expand_string(
+                input.to_owned(),
+                &mut output,
+                ExpandFlags::FAIL_ON_CMDSUBST,
+                &mut ctx,
+                Some(&mut errors),
+            );
             assert_eq!(result.result, ExpandResultCode::Ok, "{input}: {errors:?}");
-            let actual: Vec<&wstr> = output.iter().map(|completion| completion.completion.as_utfstr()).collect();
+            let actual: Vec<&wstr> = output
+                .iter()
+                .map(|completion| completion.completion.as_utfstr())
+                .collect();
             assert_eq!(actual.as_slice(), expected, "{input}");
         }
         let mut output = CompletionList::new();
         let mut errors = ParseErrorList::new();
-        let result = expand_string(L!("*.missing").to_owned(), &mut output,
-            ExpandFlags::FAIL_ON_CMDSUBST, &mut ctx, Some(&mut errors));
+        let result = expand_string(
+            L!("*.missing").to_owned(),
+            &mut output,
+            ExpandFlags::FAIL_ON_CMDSUBST,
+            &mut ctx,
+            Some(&mut errors),
+        );
         assert_eq!(result.result, ExpandResultCode::WildcardNoMatch);
         assert!(output.is_empty());
         assert!(errors.is_empty());

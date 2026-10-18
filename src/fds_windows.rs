@@ -103,6 +103,43 @@ pub(crate) struct NativeInputBuffer {
     start: usize,
     end: usize,
     error: Option<Arc<io::Error>>,
+    peeked: bool,
+}
+
+impl NativeInputBuffer {
+    pub(crate) fn has_pending(&self) -> bool {
+        self.start < self.end && !self.peeked
+    }
+    pub(crate) fn take_pending(&mut self) -> Vec<u8> {
+        if self.peeked {
+            self.discard_peeked();
+            return Vec::new();
+        }
+        if self.start == self.end {
+            return Vec::new();
+        }
+        let mut bytes = std::mem::take(&mut self.bytes);
+        bytes.truncate(self.end);
+        bytes.drain(..self.start);
+        self.start = 0;
+        self.end = 0;
+        bytes
+    }
+    pub(crate) fn discard_peeked(&mut self) {
+        if self.peeked {
+            self.start = 0;
+            self.end = 0;
+            self.peeked = false;
+        }
+    }
+    pub(crate) fn restore_pending(&mut self, bytes: Vec<u8>) {
+        self.start = 0;
+        self.end = bytes.len();
+        self.peeked = false;
+        if !bytes.is_empty() {
+            self.bytes = bytes;
+        }
+    }
 }
 
 /// A peek owns the buffer lock; a slice never outlives the shared endpoint storage.
@@ -155,15 +192,28 @@ impl<'a> BorrowedInput<'a> {
         if pending.start < pending.end {
             return Ok(());
         }
-        if pending.bytes.is_empty() {
+        if pending.bytes.len() < 16384 {
             pending.bytes.resize(16384, 0);
         }
         pending.start = 0;
         pending.end = 0;
+        pending.peeked = false;
         let result = if self.is_console() {
             self.read_console(&mut pending.bytes)
         } else {
-            self.handle.read(&mut pending.bytes[..self.chunk_size])
+            match &self.handle {
+                InputHandle::Endpoint(endpoint) => {
+                    match endpoint.peek_input(&mut pending.bytes[..self.chunk_size]) {
+                        Ok(Some(count)) => {
+                            pending.peeked = true;
+                            Ok(count)
+                        }
+                        Ok(None) => self.handle.read(&mut pending.bytes[..self.chunk_size]),
+                        Err(error) => Err(error),
+                    }
+                }
+                _ => self.handle.read(&mut pending.bytes[..self.chunk_size]),
+            }
         };
         match result {
             Ok(count) => {
@@ -172,6 +222,28 @@ impl<'a> BorrowedInput<'a> {
             }
             Err(error) => Err(Self::record_error(pending, error)),
         }
+    }
+
+    fn consume_peeked(&self, pending: &mut NativeInputBuffer, count: usize) -> io::Result<()> {
+        if !pending.peeked {
+            return Ok(());
+        }
+        let mut consumed = 0;
+        while consumed < count {
+            let start = pending.start + consumed;
+            let end = pending.start + count;
+            match self.handle.read(&mut pending.bytes[start..end]) {
+                Ok(0) => {
+                    return Err(Self::record_error(
+                        pending,
+                        io::ErrorKind::UnexpectedEof.into(),
+                    ));
+                }
+                Ok(count) => consumed += count,
+                Err(error) => return Err(Self::record_error(pending, error)),
+            }
+        }
+        Ok(())
     }
 
     fn record_error(pending: &mut NativeInputBuffer, error: io::Error) -> io::Error {
@@ -247,7 +319,8 @@ impl<'a> BorrowedInput<'a> {
             let available = &pending.bytes[pending.start..pending.end];
             let found = available.iter().position(|&byte| byte == delimiter);
             let count = found.map_or(available.len(), |index| index + 1);
-            output.extend_from_slice(&available[..count]);
+            self.consume_peeked(&mut pending, count)?;
+            output.extend_from_slice(&pending.bytes[pending.start..pending.start + count]);
             pending.start += count;
             if found.is_some() {
                 return Ok(output.len() - original);
@@ -264,6 +337,8 @@ impl<'a> BorrowedInput<'a> {
             if pending.start == pending.end {
                 return Ok(output.len() - original);
             }
+            let count = pending.end - pending.start;
+            self.consume_peeked(&mut pending, count)?;
             output.extend_from_slice(&pending.bytes[pending.start..pending.end]);
             pending.start = pending.end;
         }
@@ -307,6 +382,7 @@ impl Read for BorrowedInput<'_> {
         }
         self.fill_pending(&mut pending)?;
         let count = bytes.len().min(pending.end - pending.start);
+        self.consume_peeked(&mut pending, count)?;
         bytes[..count].copy_from_slice(&pending.bytes[pending.start..pending.start + count]);
         pending.start += count;
         Ok(count)

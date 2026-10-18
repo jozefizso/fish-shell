@@ -103,7 +103,12 @@ impl Abbreviation {
             return false;
         }
 
-        if !self.commands.is_empty() && !self.commands.contains(&command.to_owned()) {
+        if !self.commands.is_empty()
+            && !self
+                .commands
+                .iter()
+                .any(|candidate| candidate.as_utfstr() == command)
+        {
             return false;
         }
 
@@ -286,11 +291,9 @@ impl AbbreviationSet {
 /// The `position` is given to describe where the token was found.
 pub fn abbrs_match(token: &wstr, position: Position, cmd: &wstr) -> Vec<Replacer> {
     with_abbrs(|set| set.r#match(token, position, cmd))
-        .into_iter()
-        .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{Abbreviation, Position, abbrs_match, with_abbrs_mut};
     use crate::editable_line::{Edit, apply_edit};
@@ -468,5 +471,55 @@ mod tests {
             assert!(!abbrs_g.erase(L!("gcc"), &[]));
             abbrs_g.clear();
         });
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+
+    #[test]
+    fn declarative_unicode_regex_and_command_restrictions() {
+        let mut set = AbbreviationSet::default();
+        let mut abbr = Abbreviation::new(
+            L!("unicode").to_owned(),
+            L!("雪[0-9]+").to_owned(),
+            L!("expanded").to_owned(),
+            Position::Anywhere,
+            false,
+        );
+        abbr.commands.push(L!("tool").to_owned());
+        abbr.regex = Some(Box::new(
+            pcre2::utf32::RegexBuilder::new()
+                .build(crate::re::regex_make_anchored(&abbr.key).as_char_slice())
+                .unwrap(),
+        ));
+        set.add(abbr);
+        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("tool")));
+        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("other")));
+        assert!(!set.has_match(L!("a雪42"), Position::Anywhere, L!("tool")));
+        assert_eq!(
+            set.r#match(L!("雪42"), Position::Anywhere, L!("tool"))[0].replacement,
+            L!("expanded"),
+        );
+        set.rename(L!("unicode"), L!("renamed"), &[L!("tool").to_owned()]);
+        assert!(set.has_name(L!("renamed")));
+        assert!(!set.has_name(L!("unicode")));
+        assert!(set.erase(L!("renamed"), &[L!("tool").to_owned()]));
+        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("tool")));
+    }
+
+    #[test]
+    fn declarative_cursor_marker_uses_character_offsets() {
+        let replacement = Replacement::new(
+            SourceRange {
+                start: 4,
+                length: 2,
+            },
+            L!("雪🐟@tail").to_owned(),
+            Some(L!("@").to_owned()),
+        );
+        assert_eq!(replacement.text, L!("雪🐟tail"));
+        assert_eq!(replacement.cursor, Some(6));
     }
 }

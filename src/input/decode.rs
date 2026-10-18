@@ -11,8 +11,9 @@ use crate::{
     flog::{FloggableDisplay, flog},
     key::{
         self, Key, Modifiers, ViewportPosition, alt, canonicalize_control_char,
-        canonicalize_keyed_control_char, char_to_symbol, function_key, shift,
+        canonicalize_keyed_control_char, function_key, shift,
     },
+    text_helpers::char_to_symbol,
     tty_handoff::{
         SCROLL_CONTENT_UP_TERMINFO_CODE, TERMINAL_OS_NAME, XTGETTCAP_QUERY_OS_NAME, XTVERSION,
         maybe_set_kitty_keyboard_capability, maybe_set_scroll_content_up_capability,

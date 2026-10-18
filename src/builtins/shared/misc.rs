@@ -111,7 +111,6 @@ struct BuiltinData {
 // Data about all the builtin commands in fish.
 // Functions that are bound to builtin_generic are handled directly by the parser.
 // NOTE: These must be kept in sorted order!
-#[cfg(unix)]
 const BUILTIN_DATAS: &[BuiltinData] = &[
     BuiltinData {
         name: L!("!"),
@@ -149,10 +148,12 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("begin"),
         func: builtin_generic,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("bg"),
         func: bg::bg,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("bind"),
         func: bind::bind,
@@ -165,6 +166,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("break"),
         func: r#break::r#break,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("breakpoint"),
         func: breakpoint::breakpoint,
@@ -185,6 +187,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("command"),
         func: command::command,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("commandline"),
         func: commandline::commandline,
@@ -205,6 +208,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("count"),
         func: count::count,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("disown"),
         func: disown::disown,
@@ -229,6 +233,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("eval"),
         func: eval::eval,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("exec"),
         func: builtin_generic,
@@ -241,6 +246,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("false"),
         func: r#false::r#false,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("fg"),
         func: fg::fg,
@@ -249,6 +255,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("fish_indent"),
         func: fish_indent::fish_indent,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("fish_key_reader"),
         func: fish_key_reader::fish_key_reader,
@@ -265,6 +272,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("functions"),
         func: functions::functions,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("history"),
         func: history::history,
@@ -273,6 +281,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("if"),
         func: builtin_generic,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("jobs"),
         func: jobs::jobs,
@@ -321,6 +330,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("set"),
         func: set::set,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("set_color"),
         func: set_color::set_color,
@@ -345,6 +355,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("test"),
         func: test::test,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("time"),
         func: builtin_generic,
@@ -357,10 +368,12 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("type"),
         func: r#type::r#type,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("ulimit"),
         func: ulimit::ulimit,
     },
+    #[cfg(unix)]
     BuiltinData {
         name: L!("wait"),
         func: wait::wait,
@@ -371,123 +384,24 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
     },
 ];
 
-#[cfg(windows)]
-const BUILTIN_DATAS: &[BuiltinData] = &[
-    BuiltinData {
-        name: L!("["),
-        func: test::test,
-    },
-    BuiltinData {
-        name: L!("cd"),
-        func: cd::cd,
-    },
-    BuiltinData {
-        name: L!("command"),
-        func: command::command,
-    },
-    BuiltinData {
-        name: L!("echo"),
-        func: echo::echo,
-    },
-    BuiltinData {
-        name: L!("exit"),
-        func: exit::exit,
-    },
-    BuiltinData {
-        name: L!("false"),
-        func: r#false::r#false,
-    },
-    BuiltinData {
-        name: L!("math"),
-        func: math::math,
-    },
-    BuiltinData {
-        name: L!("path"),
-        func: path::path,
-    },
-    BuiltinData {
-        name: L!("printf"),
-        func: printf::printf,
-    },
-    BuiltinData {
-        name: L!("pwd"),
-        func: pwd::pwd,
-    },
-    BuiltinData {
-        name: L!("realpath"),
-        func: realpath::realpath,
-    },
-    BuiltinData {
-        name: L!("set"),
-        func: set::set,
-    },
-    BuiltinData {
-        name: L!("test"),
-        func: test::test,
-    },
-    BuiltinData {
-        name: L!("true"),
-        func: r#true::r#true,
-    },
-    BuiltinData {
-        name: L!("type"),
-        func: r#type::r#type,
-    },
-];
-
 /// Names reserved by fish which must never fall through to native executable lookup.
 #[cfg(windows)]
 pub fn builtin_is_unsupported(name: &wstr) -> bool {
     [
-        L!("!"),
-        L!("."),
-        L!(":"),
-        L!("_"),
-        L!("abbr"),
-        L!("and"),
-        L!("argparse"),
-        L!("begin"),
         L!("bg"),
         L!("bind"),
-        L!("block"),
-        L!("break"),
         L!("breakpoint"),
-        L!("builtin"),
-        L!("case"),
         L!("commandline"),
-        L!("complete"),
-        L!("contains"),
-        L!("continue"),
-        L!("count"),
         L!("disown"),
-        L!("else"),
-        L!("emit"),
-        L!("end"),
-        L!("eval"),
         L!("exec"),
         L!("fg"),
-        L!("fish_indent"),
         L!("fish_key_reader"),
-        L!("for"),
-        L!("function"),
-        L!("functions"),
         L!("history"),
-        L!("if"),
         L!("jobs"),
-        L!("not"),
-        L!("or"),
-        L!("random"),
-        L!("read"),
-        L!("return"),
         L!("set_color"),
-        L!("source"),
-        L!("status"),
-        L!("string"),
-        L!("switch"),
         L!("time"),
         L!("ulimit"),
         L!("wait"),
-        L!("while"),
     ]
     .contains(&name)
 }
@@ -531,10 +445,10 @@ pub fn builtin_run(parser: &mut Parser, argv: &mut [&wstr], streams: &mut IoStre
     // We can be handed a keyword by the parser as if it was a command. This happens when the user
     // follows the keyword by `-h` or `--help`. Since it isn't really a builtin command we need to
     // handle displaying help for it here.
-    #[cfg(unix)]
     if argv.len() == 2 && argument_is_help(argv[1]) && cmd_needs_help(argv[0]) {
-        builtin_print_help(parser, streams, argv[0]);
-        return ProcStatus::from_exit_code(STATUS_CMD_OK);
+        return ProcStatus::from_exit_code(
+            builtin_print_help(parser, streams, argv[0]).builtin_status_code(),
+        );
     }
 
     let Some(builtin) = builtin_lookup(argv[0]) else {
@@ -542,15 +456,16 @@ pub fn builtin_run(parser: &mut Parser, argv: &mut [&wstr], streams: &mut IoStre
         return ProcStatus::from_exit_code(STATUS_CMD_ERROR);
     };
 
-    #[cfg(windows)]
-    if !native_builtin_options_supported(argv) {
-        err_fmt!("unsupported builtin options on native Windows")
-            .cmd(argv[0])
-            .finish(streams);
-        return ProcStatus::from_exit_code(STATUS_INVALID_ARGS);
-    }
-
+    let exec_count = parser.libdata().exec_count;
     let builtin_ret = (builtin.func)(parser, streams, argv);
+    // A nested handler/eval may request exit with its own status. Direct exit/return
+    // already return their requested status and must not inherit the caller's old one.
+    let builtin_ret =
+        if parser.libdata().exit_current_script && parser.libdata().exec_count != exec_count {
+            BuiltinResult::from_dynamic(parser.last_status())
+        } else {
+            builtin_ret
+        };
 
     // Flush our out and error streams, and check for their errors.
     let out_ret = streams.out.flush_and_check_error();
@@ -688,10 +603,14 @@ pub fn builtin_get_desc(name: &wstr) -> Option<&'static wstr> {
 ///
 /// Process and print help for the specified builtin or function.
 #[cfg(unix)]
-pub fn builtin_print_help(parser: &mut Parser, streams: &mut IoStreams, cmd: &wstr) {
+pub fn builtin_print_help(
+    parser: &mut Parser,
+    streams: &mut IoStreams,
+    cmd: &wstr,
+) -> BuiltinResult {
     // This won't ever work if no_exec is set.
     if no_exec() {
-        return;
+        return Ok(SUCCESS);
     }
     let name_esc = escape(cmd);
     let cmd = sprintf!("__fish_print_help %s ", &name_esc);
@@ -706,13 +625,19 @@ pub fn builtin_print_help(parser: &mut Parser, streams: &mut IoStreams, cmd: &ws
             .cmd(&name_esc)
             .finish(streams);
     }
+    Ok(SUCCESS)
 }
 
 #[cfg(windows)]
-pub fn builtin_print_help(_parser: &mut Parser, streams: &mut IoStreams, cmd: &wstr) {
+pub fn builtin_print_help(
+    _parser: &mut Parser,
+    streams: &mut IoStreams,
+    cmd: &wstr,
+) -> BuiltinResult {
     err_fmt!("help tooling is unsupported on native Windows")
         .cmd(cmd)
         .finish(streams);
+    Err(STATUS_INVALID_ARGS)
 }
 
 /// Perform error reporting for encounter with unknown option.
@@ -1056,7 +981,6 @@ fn parsed_pid(
 
 /// A generic builtin that only supports showing a help message. This is only a placeholder that
 /// prints the help message. Useful for commands that live in the parser.
-#[cfg(unix)]
 fn builtin_generic(
     parser: &mut Parser,
     streams: &mut IoStreams,
@@ -1066,14 +990,13 @@ fn builtin_generic(
     let opts = HelpOnlyCmdOpts::parse(argv, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, argv[0]);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, argv[0]);
     }
 
     // Hackish - if we have no arguments other than the command, we are a "naked invocation" and we
     // just print help.
     if argc == 1 || argv[0] == "time" {
-        builtin_print_help(parser, streams, argv[0]);
+        let _ = builtin_print_help(parser, streams, argv[0]);
         return Err(STATUS_INVALID_ARGS);
     }
 
@@ -1082,7 +1005,6 @@ fn builtin_generic(
 
 /// This function handles both the 'continue' and the 'break' builtins that are used for loop
 /// control.
-#[cfg(unix)]
 pub fn builtin_break_continue(
     parser: &mut Parser,
     streams: &mut IoStreams,
@@ -1094,8 +1016,7 @@ pub fn builtin_break_continue(
     let opts = HelpOnlyCmdOpts::parse(argv, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, argv[0]);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, argv[0]);
     }
 
     if argc != 1 {
@@ -1180,114 +1101,5 @@ impl ColorEnabled {
 
             STATUS_INVALID_ARGS
         })
-    }
-}
-
-#[cfg(windows)]
-pub fn native_builtin_options_supported(argv: &[&wstr]) -> bool {
-    let Some(&cmd) = argv.first() else {
-        return false;
-    };
-    if cmd == "true" || cmd == "false" {
-        return argv.len() == 1;
-    }
-    if cmd == "set" {
-        for arg in &argv[1..] {
-            if *arg == "--" || !arg.starts_with("-") || *arg == "-" {
-                break;
-            }
-            if arg.starts_with("--") {
-                if ![
-                    L!("--local"),
-                    L!("--global"),
-                    L!("--export"),
-                    L!("--unexport"),
-                    L!("--query"),
-                    L!("--erase"),
-                ]
-                .contains(arg)
-                {
-                    return false;
-                }
-            } else if !arg[1..]
-                .chars()
-                .all(|c| matches!(c, 'l' | 'g' | 'x' | 'u' | 'q' | 'e'))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-    if cmd == "echo" {
-        return !argv[1..]
-            .iter()
-            .take_while(|arg| arg.starts_with("-"))
-            .any(|arg| *arg == "--help" || *arg == "-h");
-    }
-    if cmd == "math" {
-        return !argv[1..].iter().any(|arg| {
-            arg.starts_with("--")
-                || (arg.starts_with("-") && arg.len() > 1 && arg.char_at(1).is_ascii_alphabetic())
-        });
-    }
-    if cmd == "printf" || cmd == "exit" {
-        return !argv
-            .get(1)
-            .is_some_and(|arg| *arg == "--help" || *arg == "-h");
-    }
-    builtin_exists(cmd)
-}
-
-#[cfg(all(test, windows))]
-mod native_tests {
-    use super::*;
-
-    #[test]
-    fn native_options_never_downgrade_universal_assignment() {
-        for option in [
-            L!("-U"),
-            L!("-gxU"),
-            L!("--universal"),
-            L!("--show"),
-            L!("--help"),
-        ] {
-            assert!(!native_builtin_options_supported(&[
-                L!("set"),
-                option,
-                L!("value")
-            ]));
-        }
-        for option in [
-            L!("-lx"),
-            L!("-gx"),
-            L!("-u"),
-            L!("-q"),
-            L!("-e"),
-            L!("--local"),
-        ] {
-            assert!(native_builtin_options_supported(&[
-                L!("set"),
-                option,
-                L!("value")
-            ]));
-        }
-        assert!(native_builtin_options_supported(&[
-            L!("set"),
-            L!("value"),
-            L!("-U")
-        ]));
-        assert!(native_builtin_options_supported(&[
-            L!("printf"),
-            L!("%s"),
-            L!("-h")
-        ]));
-        assert!(!native_builtin_options_supported(&[
-            L!("math"),
-            L!("--help")
-        ]));
-        assert!(!native_builtin_options_supported(&[
-            L!("true"),
-            L!("--help")
-        ]));
     }
 }

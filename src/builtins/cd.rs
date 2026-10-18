@@ -1,15 +1,15 @@
 // Implementation of the cd builtin.
 
 use super::prelude::*;
-use crate::{
-    env::Environment as _,
-    err_fmt, err_str,
-    path::path_apply_cdpath,
-    wutil::wreadlink,
-};
 #[cfg(unix)]
-use crate::{env::EnvMode, err_raw, fds::{BEST_O_SEARCH, wopen_dir},
-    parser::ParserEnvSetMode, wutil::{normalize_path, wrealpath}};
+use crate::{
+    env::EnvMode,
+    err_raw,
+    fds::{BEST_O_SEARCH, wopen_dir},
+    parser::ParserEnvSetMode,
+    wutil::{normalize_path, wrealpath},
+};
+use crate::{env::Environment as _, err_fmt, err_str, path::path_apply_cdpath, wutil::wreadlink};
 #[cfg(unix)]
 use fish_widestring::str2wcstring;
 #[cfg(unix)]
@@ -22,7 +22,13 @@ type CdError = Errno;
 type CdError = std::io::Error;
 
 #[derive(Clone, Copy, PartialEq)]
-enum CdErrorClass { Missing, NotDirectory, Loop, Denied, Other }
+enum CdErrorClass {
+    Missing,
+    NotDirectory,
+    Loop,
+    Denied,
+    Other,
+}
 
 fn error_class(error: &CdError) -> CdErrorClass {
     #[cfg(unix)]
@@ -53,7 +59,10 @@ fn error_class(error: &CdError) -> CdErrorClass {
 
 // Return whether a cd path is relative to the current directory.
 fn is_relative_cd_path(path: &wstr) -> bool {
-    path == "." || path == ".." || path.starts_with("./") || path.starts_with("../")
+    path == "."
+        || path == ".."
+        || path.starts_with("./")
+        || path.starts_with("../")
         || cfg!(windows) && (path.starts_with(".\\") || path.starts_with("..\\"))
 }
 
@@ -96,7 +105,9 @@ fn try_chdir(parser: &mut Parser, dir: &wstr, deref_symlink: bool) -> Result<(),
     // Complete every fallible open/name operation before replacing either authoritative state.
     let directory = Arc::new(crate::path::NativeCwd::open(dir, &cwd, deref_symlink)?);
     if parser.vars().set_native_cwd(directory) != crate::env::EnvStackSetResult::Ok {
-        return Err(std::io::Error::other("could not update fish working directory"));
+        return Err(std::io::Error::other(
+            "could not update fish working directory",
+        ));
     }
     Ok(())
 }
@@ -205,8 +216,7 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
             'L' => deref_symlink = false,
             'P' => deref_symlink = true,
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return if cfg!(windows) { Err(STATUS_CMD_ERROR) } else { Ok(SUCCESS) };
+                return builtin_print_help(parser, streams, cmd);
             }
             ';' => {
                 builtin_unexpected_argument(parser, streams, cmd, args[w.wopt_index - 1], false);
@@ -269,11 +279,15 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
                 // A deleted/unnameable cwd can be escaped, but may not redirect a relative open
                 // into an unrelated replacement at its old logical spelling.
                 let escape = crate::path::native_absolute_path(dir_in).is_ok()
-                    || dir_in.starts_with('/') || dir_in.starts_with('\\')
-                    || dir_in == ".." || dir_in.starts_with(L!("../")) || dir_in.starts_with(L!("..\\"));
+                    || dir_in.starts_with('/')
+                    || dir_in.starts_with('\\')
+                    || dir_in == ".."
+                    || dir_in.starts_with(L!("../"))
+                    || dir_in.starts_with(L!("..\\"));
                 if !escape {
                     err_fmt!("Could not resolve current directory: %s", error.to_string())
-                        .cmd(cmd).finish(streams);
+                        .cmd(cmd)
+                        .finish(streams);
                     return Err(STATUS_CMD_ERROR);
                 }
             }
@@ -286,7 +300,11 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
         let physical_pwd = parser.vars().get_working_directory();
         if let Ok(mut real_pwd) = physical_pwd {
             if !real_pwd.ends_with('/') && !(cfg!(windows) && real_pwd.ends_with('\\')) {
-                real_pwd.push(if cfg!(windows) && real_pwd.starts_with(L!("\\\\?\\")) { '\\' } else { '/' });
+                real_pwd.push(if cfg!(windows) && real_pwd.starts_with(L!("\\\\?\\")) {
+                    '\\'
+                } else {
+                    '/'
+                });
             }
             pwd = real_pwd;
         }
@@ -311,7 +329,11 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
         let physical_pwd = parser.vars().get_working_directory();
         if let Ok(mut real_pwd) = physical_pwd {
             if !real_pwd.ends_with('/') && !(cfg!(windows) && real_pwd.ends_with('\\')) {
-                real_pwd.push(if cfg!(windows) && real_pwd.starts_with(L!("\\\\?\\")) { '\\' } else { '/' });
+                real_pwd.push(if cfg!(windows) && real_pwd.starts_with(L!("\\\\?\\")) {
+                    '\\'
+                } else {
+                    '/'
+                });
             }
             if real_pwd != pwd {
                 let dirs = path_apply_cdpath(dir_in, &real_pwd, parser.vars());
@@ -350,7 +372,11 @@ pub fn cd(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
         err_raw!(str2wcstring(errno.to_string()))
             .cmd(L!("cd"))
             .finish(streams);
-        err_fmt!("Could not change directory to '%s': %s", dir_in, errno.to_string())
+        err_fmt!(
+            "Could not change directory to '%s': %s",
+            dir_in,
+            errno.to_string()
+        )
     };
 
     if !parser.is_interactive() {

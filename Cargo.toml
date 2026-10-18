@@ -141,13 +141,13 @@ lru.workspace = true
 macro_rules_attribute = "0.2.2"
 num-traits.workspace = true
 once_cell.workspace = true
+pcre2.workspace = true
 rand.workspace = true
 strum_macros.workspace = true
 xterm-color.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
-pcre2.workspace = true
 
 [target.'cfg(not(target_has_atomic = "64"))'.dependencies]
 portable-atomic.workspace = true
@@ -204,6 +204,10 @@ path = "tests/windows_n1.rs"
 [[test]]
 name = "windows_n2"
 path = "tests/windows_n2.rs"
+
+[[test]]
+name = "windows_n3"
+path = "tests/windows_n3.rs"
 
 [[bin]]
 name = "windows_native_probe"

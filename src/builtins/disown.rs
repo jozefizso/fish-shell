@@ -45,8 +45,7 @@ pub fn disown(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
 
     let cmd = args[0];
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     let mut retval: BuiltinResult;

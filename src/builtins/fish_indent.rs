@@ -5,33 +5,35 @@ use crate::{
     ast::{self, AsNode as _, Ast, Kind, Leaf as _, Node, NodeVisitor, SourceRangeList, Traversal},
     builtins::Error,
     common::{PROGRAM_NAME, get_program_name},
-    env::{EnvStack, Environment as _, env_init},
+    env::{EnvStack, Environment as _},
     err_fmt, err_str,
-    global_safety::RelaxedAtomicBool,
     highlight::{HighlightRole, HighlightSpec, colorize, highlight_shell},
     locale::set_libc_locales,
-    operation_context::OperationContext,
+    operation_context::{EXPANSION_LIMIT_DEFAULT, OperationContext},
     panic::panic_handler,
     parse_constants::{ParseTokenType, ParseTreeFlags, SourceRange},
     parse_util::{SPACES_PER_INDENT, apply_indents, compute_indents},
     prelude::*,
-    print_help::print_help,
     threads,
     tokenizer::{TokFlags, TokenType, Tokenizer},
-    topic_monitor,
     wutil::fish_iswalnum,
 };
+#[cfg(unix)]
+use crate::{env::env_init, print_help::print_help, topic_monitor};
 use assert_matches::assert_matches;
-use fish_common::{ReadExt as _, UnescapeFlags, UnescapeStringStyle, unescape_string};
+#[cfg(unix)]
+use fish_common::ReadExt as _;
+use fish_common::{UnescapeFlags, UnescapeStringStyle, unescape_string};
 use fish_wcstringutil::count_preceding_backslashes;
 use fish_wgetopt::{ArgType, WGetopter, WOption, wopt};
 use fish_widestring::{INTERNAL_SEPARATOR, bytes2wcstring, osstr2wcstring, wcs2bytes};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt as _;
 use std::{
     ffi::OsStr,
     fmt::Write as _,
     fs,
     io::{Read, Write as _},
-    os::unix::ffi::OsStrExt as _,
 };
 
 /// Note: this got somewhat more complicated after introducing the new AST, because that AST no
@@ -933,23 +935,61 @@ fn throwing_main() -> i32 {
     // TODO: Duplicated with fish_key_reader
     use crate::fds::BorrowedFdFile;
     use crate::io::{FdOutputStream, IoChain, OutputStream::Fd};
-    use libc::{STDERR_FILENO, STDOUT_FILENO};
+    const STDOUT_FILENO: i32 = 1;
+    const STDERR_FILENO: i32 = 2;
 
+    #[cfg(unix)]
     topic_monitor::init();
     threads::init();
 
     let mut out = Fd(FdOutputStream::new(STDOUT_FILENO));
     let mut err = Fd(FdOutputStream::new(STDERR_FILENO));
+    #[cfg(windows)]
+    if let Err(error) = crate::io::root_descriptors() {
+        err.appendln(&format!("fish_indent: unable to initialize input: {error}"));
+        let _ = err.flush_and_check_error();
+        return 2;
+    }
     let io_chain = IoChain::new();
     let mut streams = IoStreams::new(&mut out, &mut err, &io_chain);
-    streams.stdin_file = Some(BorrowedFdFile::stdin());
+    #[cfg(unix)]
+    {
+        streams.stdin_file = Some(BorrowedFdFile::stdin());
+    }
+    #[cfg(windows)]
+    {
+        streams.stdin_file = match BorrowedFdFile::stdin() {
+            Ok(input) => Some(input),
+            Err(error) => {
+                streams
+                    .err
+                    .appendln(&format!("fish_indent: unable to read stdin: {error}"));
+                None
+            }
+        };
+    }
     // Safety: single-threaded.
-    unsafe {
+    if !unsafe {
         set_libc_locales(/*log_ok=*/ false)
-    };
+    } {
+        streams
+            .err
+            .appendln("fish_indent: unable to initialize locale");
+        let _ = streams.err.flush_and_check_error();
+        return 2;
+    }
     #[cfg(feature = "localize-messages")]
     crate::localization::initialize_localization();
+    #[cfg(unix)]
     env_init(None, false);
+    #[cfg(windows)]
+    if let Err(error) = EnvStack::globals().initialize_native() {
+        streams.err.appendln(&format!(
+            "fish_indent: unable to initialize environment: {error}"
+        ));
+        let _ = streams.err.flush_and_check_error();
+        return 2;
+    }
 
     // Only set these here so you can't set them via the builtin.
     if let Some(features_var) = EnvStack::globals().get(L!("fish_features")) {
@@ -958,8 +998,30 @@ fn throwing_main() -> i32 {
         }
     }
 
+    #[cfg(unix)]
     let args: Vec<WString> = std::env::args_os().map(osstr2wcstring).collect();
-    do_indent(None, &mut streams, args).builtin_status_code()
+    #[cfg(windows)]
+    let args: Vec<WString> = match std::env::args_os()
+        .map(|arg| osstr2wcstring(arg).map(fish_widestring::native_to_shell_text_owned))
+        .collect()
+    {
+        Ok(args) => args,
+        Err(error) => {
+            streams
+                .err
+                .appendln(&format!("fish_indent: invalid native argument: {error}"));
+            let _ = streams.err.flush_and_check_error();
+            return 2;
+        }
+    };
+    let result = do_indent(None, &mut streams, args);
+    let out_error = streams.out.flush_and_check_error();
+    let err_error = streams.err.flush_and_check_error();
+    if out_error != 0 || err_error != 0 {
+        1
+    } else {
+        result.builtin_status_code()
+    }
 }
 
 pub fn fish_indent(
@@ -976,6 +1038,7 @@ fn do_indent(
     streams: &mut IoStreams,
     args: Vec<WString>,
 ) -> BuiltinResult {
+    let mut dump_parse_tree = false;
     // Types of output we support
     #[derive(PartialEq)]
     enum OutputType {
@@ -1013,14 +1076,23 @@ fn do_indent(
 
     while let Some(c) = w.next_opt() {
         match c {
-            'P' => DUMP_PARSE_TREE.store(true),
+            'P' => dump_parse_tree = true,
             'h' => {
                 if let Some(parser) = parser {
-                    builtin_print_help(parser, streams, L!("fish_indent"));
-                } else {
-                    print_help("fish_indent");
+                    return builtin_print_help(parser, streams, L!("fish_indent"));
                 }
-                return Ok(SUCCESS);
+                #[cfg(unix)]
+                {
+                    print_help("fish_indent");
+                    return Ok(SUCCESS);
+                }
+                #[cfg(windows)]
+                {
+                    streams
+                        .err
+                        .appendln("fish_indent: help delivery requires N9");
+                    return Err(STATUS_INVALID_ARGS);
+                }
             }
             'v' => {
                 streams
@@ -1053,6 +1125,13 @@ fn do_indent(
     }
 
     let args = &w.argv[w.wopt_index..];
+    #[cfg(windows)]
+    let vars: &dyn crate::env::Environment = parser
+        .as_deref()
+        .map(|parser| parser.vars() as &dyn crate::env::Environment)
+        .unwrap_or(EnvStack::globals());
+    #[cfg(unix)]
+    let vars: &dyn crate::env::Environment = EnvStack::globals();
 
     let mut retval = 0;
 
@@ -1072,11 +1151,15 @@ fn do_indent(
                 return Err(STATUS_CMD_ERROR);
             };
             let mut buf = vec![];
-            match stdin_file.read_to_end_interruptible(&mut buf) {
+            #[cfg(unix)]
+            let read_result = stdin_file.read_to_end_interruptible(&mut buf);
+            #[cfg(windows)]
+            let read_result = stdin_file.read_to_end(&mut buf);
+            match read_result {
                 Ok(_) => {}
                 Err(err) => {
                     return if err.kind() == std::io::ErrorKind::Interrupted {
-                        Err(128 + libc::SIGINT)
+                        Err(130)
                     } else {
                         Err(STATUS_CMD_ERROR)
                     };
@@ -1085,11 +1168,22 @@ fn do_indent(
             src = bytes2wcstring(&buf);
         } else {
             let arg = args[i];
-            match fs::File::open(OsStr::from_bytes(&wcs2bytes(arg))) {
+            let path = match formatter_path(arg, parser.as_deref()) {
+                Ok(path) => path,
+                Err(error) => {
+                    err_fmt!("Opening \"%s\" failed: %s", arg, error.to_string()).finish(streams);
+                    return Err(STATUS_CMD_ERROR);
+                }
+            };
+            match fs::File::open(path) {
                 Ok(file) => {
                     match read_file(file) {
                         Ok(s) => src = s,
-                        Err(()) => return Err(STATUS_CMD_ERROR),
+                        Err(error) => {
+                            err_fmt!("Reading \"%s\" failed: %s", arg, error.to_string())
+                                .finish(streams);
+                            return Err(STATUS_CMD_ERROR);
+                        }
                     }
                     output_location = arg;
                 }
@@ -1101,7 +1195,7 @@ fn do_indent(
         }
 
         if output_type == OutputType::PygmentsCsv {
-            let output = make_pygments_csv(&src);
+            let output = make_pygments_csv(&src, vars);
             streams.out.append(&bytes2wcstring(&output));
             i += 1;
             continue;
@@ -1144,16 +1238,16 @@ fn do_indent(
                 }
             }
         } else {
-            prettify(streams, &src, do_indent)
+            prettify(streams, &src, do_indent, dump_parse_tree)
         };
 
         // Maybe colorize.
         let mut colors = vec![];
-        if output_type != OutputType::PlainText {
+        if matches!(output_type, OutputType::Ansi | OutputType::Html) {
             highlight_shell(
                 &output_wtext,
                 &mut colors,
-                &mut OperationContext::globals(),
+                &mut OperationContext::background(vars, EXPANSION_LIMIT_DEFAULT),
                 false,
                 None,
             );
@@ -1166,9 +1260,32 @@ fn do_indent(
             }
             OutputType::File => {
                 if output_wtext != src {
-                    match fs::File::create(OsStr::from_bytes(&wcs2bytes(output_location))) {
+                    let path = match formatter_path(output_location, parser.as_deref()) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            err_fmt!(
+                                "Opening \"%s\" failed: %s",
+                                output_location,
+                                error.to_string()
+                            )
+                            .finish(streams);
+                            return Err(STATUS_CMD_ERROR);
+                        }
+                    };
+                    match fs::File::create(path) {
                         Ok(mut file) => {
-                            _ = file.write_all(&wcs2bytes(&output_wtext));
+                            if let Err(error) = file
+                                .write_all(&wcs2bytes(&output_wtext))
+                                .and_then(|()| file.flush())
+                            {
+                                err_fmt!(
+                                    "Writing \"%s\" failed: %s",
+                                    output_location,
+                                    error.to_string()
+                                )
+                                .finish(streams);
+                                return Err(STATUS_CMD_ERROR);
+                            }
                         }
                         Err(err) => {
                             err_fmt!(
@@ -1183,7 +1300,7 @@ fn do_indent(
                 }
             }
             OutputType::Ansi => {
-                colored_output = colorize(&output_wtext, &colors, EnvStack::globals());
+                colored_output = colorize(&output_wtext, &colors, vars);
             }
             OutputType::Html => {
                 colored_output = html_colorize(&output_wtext, &colors);
@@ -1211,12 +1328,10 @@ fn do_indent(
     }
 }
 
-static DUMP_PARSE_TREE: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
-
 // Read the entire contents of a file into the specified string.
-fn read_file(mut f: impl Read) -> Result<WString, ()> {
+fn read_file(mut f: impl Read) -> std::io::Result<WString> {
     let mut buf = vec![];
-    f.read_to_end(&mut buf).map_err(|_| ())?;
+    f.read_to_end(&mut buf)?;
     Ok(bytes2wcstring(&buf))
 }
 
@@ -1226,12 +1341,12 @@ fn read_file(mut f: impl Read) -> Result<WString, ()> {
 // start and end is the half-open token range, value is a string from highlight_role_t.
 // Example:
 // 3,7,command
-fn make_pygments_csv(src: &wstr) -> Vec<u8> {
+fn make_pygments_csv(src: &wstr, vars: &dyn crate::env::Environment) -> Vec<u8> {
     let mut colors = vec![];
     highlight_shell(
         src,
         &mut colors,
-        &mut OperationContext::globals(),
+        &mut OperationContext::background(vars, EXPANSION_LIMIT_DEFAULT),
         false,
         None,
     );
@@ -1274,8 +1389,13 @@ fn make_pygments_csv(src: &wstr) -> Vec<u8> {
 }
 
 // Entry point for prettification.
-fn prettify(streams: &mut IoStreams, src: &wstr, do_indent: bool) -> WString {
-    if DUMP_PARSE_TREE.load() {
+fn prettify(
+    streams: &mut IoStreams,
+    src: &wstr,
+    do_indent: bool,
+    dump_parse_tree: bool,
+) -> WString {
+    if dump_parse_tree {
         let flags = ParseTreeFlags {
             leave_unterminated: true,
             include_comments: true,
@@ -1354,4 +1474,23 @@ fn html_colorize(text: &wstr, colors: &[HighlightSpec]) -> Vec<u8> {
 
 fn no_colorize(text: &wstr) -> Vec<u8> {
     wcs2bytes(text)
+}
+
+fn formatter_path(path: &wstr, parser: Option<&Parser>) -> std::io::Result<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        let _ = parser;
+        Ok(std::path::PathBuf::from(OsStr::from_bytes(&wcs2bytes(
+            path,
+        ))))
+    }
+    #[cfg(windows)]
+    {
+        crate::path::native_resolve_path_for_environment(
+            path,
+            parser
+                .map(|parser| parser.vars() as &dyn crate::env::Environment)
+                .unwrap_or(EnvStack::globals()),
+        )
+    }
 }

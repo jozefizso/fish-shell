@@ -20,7 +20,7 @@ use crate::{
         CharEvent, ImplicitEvent, InputEventQueue, InputEventQueuer as _, KeyEvent,
         QueryResultEvent, match_key_event_to_key,
     },
-    key::{Key, char_to_symbol},
+    key::Key,
     nix::isatty,
     panic::panic_handler,
     prelude::*,
@@ -30,6 +30,7 @@ use crate::{
         check_exit_loop_maybe_warning, reader_init, set_shell_modes,
         signal_safe_reader_set_exit_signal, terminal_init,
     },
+    text_helpers::char_to_symbol,
     threads, topic_monitor,
     tty_handoff::TtyHandoff,
 };
@@ -206,10 +207,13 @@ fn parse_flags(
             }
             'h' => {
                 if let Some(parser) = parser {
-                    builtin_print_help(parser, streams, L!("fish_key_reader"));
-                } else {
-                    print_help("fish_key_reader");
+                    return ControlFlow::Break(builtin_print_help(
+                        parser,
+                        streams,
+                        L!("fish_key_reader"),
+                    ));
                 }
+                print_help("fish_key_reader");
                 return ControlFlow::Break(Ok(SUCCESS));
             }
             'v' => {

@@ -12,10 +12,8 @@ pub mod common;
 #[macro_use]
 pub mod wutil;
 
-#[cfg(unix)]
 pub mod abbrs;
 pub mod ast;
-#[cfg(unix)]
 pub mod autoload;
 pub mod builtins;
 pub mod complete;
@@ -43,7 +41,6 @@ pub mod fork_exec;
 pub mod fs;
 pub mod function;
 pub mod global_safety;
-#[cfg(unix)]
 pub mod highlight;
 #[cfg(unix)]
 pub mod history;
@@ -58,10 +55,10 @@ pub mod key;
 pub mod kill;
 pub mod locale;
 pub mod localization;
-#[cfg(unix)]
-pub mod nix;
 #[cfg(windows)]
 pub mod native_fd_bridge;
+#[cfg(unix)]
+pub mod nix;
 pub mod null_terminated_array;
 pub mod operation_context;
 #[cfg(unix)]
@@ -80,9 +77,8 @@ pub mod prelude;
 #[cfg(unix)]
 pub mod print_help;
 pub mod proc;
-#[cfg(unix)]
 pub mod re;
-#[cfg(unix)]
+#[cfg_attr(windows, path = "reader_windows.rs")]
 pub mod reader;
 pub mod redirection;
 #[cfg(unix)]
@@ -94,8 +90,8 @@ pub mod stdx;
 pub mod terminal;
 #[cfg(unix)]
 pub mod termsize;
-#[cfg(unix)]
 pub mod text_face;
+pub mod text_helpers;
 #[cfg_attr(windows, path = "threads/windows.rs")]
 pub mod threads;
 #[cfg(unix)]

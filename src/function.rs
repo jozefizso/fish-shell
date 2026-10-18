@@ -11,23 +11,23 @@ use crate::{
 use fish_common::{FilenameRef, assert_sync};
 use std::{num::NonZeroU32, sync::Arc};
 
-#[cfg(unix)]
 use crate::{
     autoload::{Autoload, AutoloadResult},
+    wutil::dir_iter::DirIter,
+};
+use crate::{
     common::valid_func_name,
     complete::complete_wrap_map,
-    env::{EnvStack, Environment},
+    env::Environment,
     event::{self, EventDescription},
     parser::Parser,
     parser_keywords::parser_keywords_is_reserved,
     proc::Pid,
-    wutil::dir_iter::DirIter,
 };
-#[cfg(unix)]
+
 use fish_common::escape;
-#[cfg(unix)]
 use fish_widestring::wcs2bytes;
-#[cfg(unix)]
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{LazyLock, Mutex},
@@ -68,7 +68,7 @@ const _: () = assert_sync::<FunctionProperties>();
 
 /// Type wrapping up the set of all functions.
 /// There's only one of these; it's managed by a lock.
-#[cfg(unix)]
+
 struct FunctionSet {
     /// The map of all functions by name.
     funcs: HashMap<WString, Arc<FunctionProperties>>,
@@ -80,7 +80,6 @@ struct FunctionSet {
     autoloader: Autoload,
 }
 
-#[cfg(unix)]
 impl FunctionSet {
     /// Remove a function.
     /// Return true if successful, false if it doesn't exist.
@@ -111,7 +110,7 @@ impl FunctionSet {
 }
 
 /// The big set of all functions.
-#[cfg(unix)]
+
 static FUNCTION_SET: LazyLock<Mutex<FunctionSet>> = LazyLock::new(|| {
     Mutex::new(FunctionSet {
         funcs: HashMap::new(),
@@ -120,20 +119,30 @@ static FUNCTION_SET: LazyLock<Mutex<FunctionSet>> = LazyLock::new(|| {
     })
 });
 
+/// Native batch prerequisites supplied by real embedded fish source. General
+/// disk and builtin-wrapper autoload exposure awaits N4 state/bootstrap support.
+#[cfg(windows)]
+pub(crate) const CORE_BUILTIN_FUNCTIONS: &[(&wstr, &str)] =
+    &[(L!("_validate_int"), "functions/_validate_int.fish")];
+
 /// Make sure that if the specified function is a dynamically loaded function, it has been fully
 /// loaded. Note this executes fish script code.
-#[cfg(unix)]
 pub fn load(name: &wstr, parser: &mut Parser) -> bool {
+    #[cfg(windows)]
+    if !CORE_BUILTIN_FUNCTIONS.iter().any(|(core, _)| *core == name) {
+        return false;
+    }
     let mut path_to_autoload: Option<_> = None;
     // Note we can't autoload while holding the funcset lock.
     // Lock around a local region.
     {
         let mut funcset: std::sync::MutexGuard<FunctionSet> = FUNCTION_SET.lock().unwrap();
         if funcset.allow_autoload(name) {
-            if let AutoloadResult::Path(path) = funcset
-                .autoloader
-                .resolve_command(name, EnvStack::globals())
-            {
+            #[cfg(unix)]
+            let resolved = funcset.autoloader.resolve_command(name, parser.vars());
+            #[cfg(windows)]
+            let resolved = funcset.autoloader.resolve_core_command(name);
+            if let AutoloadResult::Path(path) = resolved {
                 path_to_autoload = Some(path);
             }
         }
@@ -153,13 +162,18 @@ pub fn load(name: &wstr, parser: &mut Parser) -> bool {
 }
 
 /// Insert a list of all dynamically loaded functions into the specified list.
-#[cfg(unix)]
 fn autoload_names(names: &mut HashSet<WString>, vars: &dyn Environment, get_hidden: bool) {
     let Some(path_var) = vars.get_unless_empty(L!("fish_function_path")) else {
         return;
     };
     let path_list = path_var.as_list();
+    #[cfg(windows)]
+    let pwd = vars.get_pwd_slash();
     for ndir_str in path_list {
+        #[cfg(windows)]
+        let absolute_dir = crate::path::path_apply_working_directory(ndir_str, &pwd);
+        #[cfg(windows)]
+        let ndir_str = absolute_dir.as_utfstr();
         let Ok(mut dir) = DirIter::new(ndir_str) else {
             continue;
         };
@@ -187,7 +201,7 @@ fn autoload_names(names: &mut HashSet<WString>, vars: &dyn Environment, get_hidd
 }
 
 /// Add a function. This may mutate `props` to set is_autoload.
-#[cfg(unix)]
+
 pub fn add(name: WString, props: Arc<FunctionProperties>) {
     let mut funcset = FUNCTION_SET.lock().unwrap();
 
@@ -213,7 +227,7 @@ pub fn add(name: WString, props: Arc<FunctionProperties>) {
 }
 
 /// Return the properties for a function, or None. This does not trigger autoloading.
-#[cfg(unix)]
+
 pub fn get_props(name: &wstr) -> Option<Arc<FunctionProperties>> {
     if parser_keywords_is_reserved(name) {
         None
@@ -223,7 +237,7 @@ pub fn get_props(name: &wstr) -> Option<Arc<FunctionProperties>> {
 }
 
 /// Return the properties for a function, or None, perhaps triggering autoloading.
-#[cfg(unix)]
+
 pub fn get_props_autoload(name: &wstr, parser: &mut Parser) -> Option<Arc<FunctionProperties>> {
     if parser_keywords_is_reserved(name) {
         return None;
@@ -234,7 +248,7 @@ pub fn get_props_autoload(name: &wstr, parser: &mut Parser) -> Option<Arc<Functi
 
 /// Returns true if the function named `cmd` exists.
 /// This may autoload.
-#[cfg(unix)]
+
 pub fn exists(cmd: &wstr, parser: &mut Parser) -> bool {
     if !valid_func_name(cmd) {
         return false;
@@ -244,7 +258,7 @@ pub fn exists(cmd: &wstr, parser: &mut Parser) -> bool {
 
 /// Returns true if the function `cmd` either is loaded, or exists on disk in an autoload
 /// directory.
-#[cfg(unix)]
+
 pub fn exists_no_autoload(cmd: &wstr) -> bool {
     if !valid_func_name(cmd) {
         return false;
@@ -255,21 +269,35 @@ pub fn exists_no_autoload(cmd: &wstr) -> bool {
     let mut funcset = FUNCTION_SET.lock().unwrap();
     // Check if we either have the function, or it could be autoloaded.
     let tombstoned = funcset.autoload_tombstones.contains(cmd);
-    if funcset.funcs.contains_key(cmd) || (!tombstoned && funcset.autoloader.can_autoload(cmd)) {
+    if funcset.funcs.contains_key(cmd) {
         return true;
     }
+    #[cfg(unix)]
+    if !tombstoned && funcset.autoloader.can_autoload(cmd) {
+        return true;
+    }
+    if tombstoned {
+        return false;
+    }
+    #[cfg(windows)]
+    return CORE_BUILTIN_FUNCTIONS
+        .iter()
+        .any(|(name, asset)| *name == cmd && crate::autoload::has_asset(asset));
 
-    let narrow = wcs2bytes(cmd);
-    if let Ok(cmdstr) = std::str::from_utf8(&narrow) {
-        let cmd = "functions/".to_owned() + cmdstr + ".fish";
-        crate::autoload::has_asset(&cmd)
-    } else {
-        false
+    #[cfg(unix)]
+    {
+        let narrow = wcs2bytes(cmd);
+        if let Ok(cmdstr) = std::str::from_utf8(&narrow) {
+            let cmd = "functions/".to_owned() + cmdstr + ".fish";
+            crate::autoload::has_asset(&cmd)
+        } else {
+            false
+        }
     }
 }
 
 /// Remove the function with the specified name.
-#[cfg(unix)]
+
 pub fn remove(name: &wstr) {
     let mut funcset = FUNCTION_SET.lock().unwrap();
     funcset.remove(name);
@@ -278,7 +306,7 @@ pub fn remove(name: &wstr) {
 }
 
 // Return the body of a function (everything after the header, up to but not including the 'end').
-#[cfg(unix)]
+
 fn get_function_body_source(props: &FunctionProperties) -> &wstr {
     // We want to preserve comments that the AST attaches to the header (#5285).
     // Take everything from the end of the header to the 'end' keyword.
@@ -304,7 +332,7 @@ fn get_function_body_source(props: &FunctionProperties) -> &wstr {
 
 /// Sets the description of the function with the name \c name.
 /// This triggers autoloading.
-#[cfg(unix)]
+
 pub(crate) fn set_desc(name: &wstr, desc: WString, parser: &mut Parser) {
     load(name, parser);
     let mut funcset = FUNCTION_SET.lock().unwrap();
@@ -321,8 +349,10 @@ pub(crate) fn set_desc(name: &wstr, desc: WString, parser: &mut Parser) {
 
 /// Creates a new function using the same definition as the specified function. Returns true if copy
 /// is successful.
-#[cfg(unix)]
+
 pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
+    let definition_file = parser.current_filename();
+    let definition_lineno = parser.lineno();
     let mut funcset = FUNCTION_SET.lock().unwrap();
     let Some(props) = funcset.get_props(name) else {
         // No such function.
@@ -331,8 +361,8 @@ pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
     // Copy the function's props.
     let mut new_props = props.as_ref().clone();
     new_props.is_autoload.store(false);
-    new_props.definition_file = parser.current_filename();
-    new_props.copy_definition_lineno = parser.lineno();
+    new_props.definition_file = definition_file;
+    new_props.copy_definition_lineno = definition_lineno;
 
     // Note this will NOT overwrite an existing function with the new name.
     // TODO: rationalize if this behavior is desired.
@@ -343,10 +373,11 @@ pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
 /// Returns all function names.
 ///
 /// \param get_hidden whether to include hidden functions, i.e. ones starting with an underscore.
-#[cfg(unix)]
+
 pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
     let mut names = HashSet::<WString>::new();
     let funcset = FUNCTION_SET.lock().unwrap();
+    #[cfg(unix)]
     autoload_names(&mut names, vars, get_hidden);
     for name in funcset.funcs.keys() {
         // Maybe skip hidden.
@@ -356,6 +387,7 @@ pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
         names.insert(name.clone());
     }
 
+    #[cfg(unix)]
     for name in crate::autoload::Asset::iter() {
         let Some(bname) = name.strip_prefix("functions/") else {
             continue;
@@ -368,12 +400,21 @@ pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
         };
         names.insert(fname.into());
     }
+    #[cfg(windows)]
+    for &(name, asset) in CORE_BUILTIN_FUNCTIONS {
+        if (get_hidden || !name.starts_with('_'))
+            && !funcset.autoload_tombstones.contains(name)
+            && crate::autoload::has_asset(asset)
+        {
+            names.insert(name.to_owned());
+        }
+    }
 
     names.into_iter().collect()
 }
 
 /// Observes that fish_function_path has changed.
-#[cfg(unix)]
+
 pub fn invalidate_path() {
     // Remove all autoloaded functions and update the autoload path.
     let mut funcset = FUNCTION_SET.lock().unwrap();
@@ -418,7 +459,7 @@ impl FunctionProperties {
     /// Return a definition of the function, annotated with properties like event handlers and wrap
     /// targets. This is to support the 'functions' builtin.
     /// Note callers must provide the function name, since the function does not know its own name.
-    #[cfg(unix)]
+
     pub fn annotated_definition(&self, name: &wstr) -> WString {
         let mut out = WString::new();
         let desc = self.description.localize();
@@ -453,6 +494,7 @@ impl FunctionProperties {
         for handler in handlers {
             let d = &handler.desc;
             match d {
+                #[cfg(unix)]
                 EventDescription::Signal { signal } => {
                     sprintf!(=> &mut out, " --on-signal %s", signal.name());
                 }
@@ -512,5 +554,74 @@ impl FunctionProperties {
         }
         out.push_str("end\n");
         out
+    }
+}
+
+#[cfg(all(test, windows))]
+mod native_tests {
+    use super::*;
+    use crate::env::{EnvMode, EnvVar};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct EnumerationEnvironment {
+        values: HashMap<WString, EnvVar>,
+    }
+    impl Environment for EnumerationEnvironment {
+        fn getf(&self, name: &wstr, _mode: EnvMode) -> Option<EnvVar> {
+            self.values.get(name).cloned()
+        }
+        fn get_names(&self, _mode: EnvMode) -> Vec<WString> {
+            self.values.keys().cloned().collect()
+        }
+    }
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn native_relative_function_enumeration_uses_owned_pwd() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fish-native-function-enumeration-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let root = Directory(root);
+        std::fs::write(
+            root.0.join("n3_visible.fish"),
+            b"function n3_visible; end\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.0.join("_n3_hidden.fish"),
+            b"function _n3_hidden; end\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.0.join("not_a_function.fish")).unwrap();
+        let pwd = fish_widestring::native_to_shell_text_owned(
+            fish_widestring::osstr2wcstring(root.0.as_os_str()).unwrap(),
+        );
+        let vars = EnumerationEnvironment {
+            values: HashMap::from([
+                (L!("PWD").to_owned(), EnvVar::new_from_name(L!("PWD"), pwd)),
+                (
+                    L!("fish_function_path").to_owned(),
+                    EnvVar::new_from_name(L!("fish_function_path"), L!(".").to_owned()),
+                ),
+            ]),
+        };
+        let mut names = HashSet::new();
+        autoload_names(&mut names, &vars, false);
+        assert_eq!(names, HashSet::from([L!("n3_visible").to_owned()]));
+        names.clear();
+        autoload_names(&mut names, &vars, true);
+        assert_eq!(
+            names,
+            HashSet::from([L!("n3_visible").to_owned(), L!("_n3_hidden").to_owned()])
+        );
     }
 }

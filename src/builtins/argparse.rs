@@ -1175,8 +1175,7 @@ pub fn argparse(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]
     }
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     parse_exclusive_args(&mut opts, streams)?;

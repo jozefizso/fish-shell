@@ -152,6 +152,7 @@ impl Drop for Fixture {
 pub(super) fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
 }
+#[track_caller]
 pub(super) fn exact(result: Captured, code: u32, out: &[u8], err: &[u8]) {
     assert_eq!(
         result.code,

@@ -448,6 +448,14 @@ struct ChildIo {
 impl ChildIo {
     fn prepare(io_chain: &IoChain, bridge_allowed: bool) -> io::Result<(Self, bool)> {
         let bindings = io_chain.child_bindings()?;
+        // Materialize buffered/overlapped standard endpoints into synchronous
+        // child handles before deciding whether the private fish bridge is needed.
+        // Extra logical descriptors still require the same-image bridge below.
+        for binding in &bindings {
+            if let Some(endpoint) = &binding.endpoint {
+                endpoint.child_handle()?;
+            }
+        }
         let needs_bridge = bindings.iter().any(|binding| {
             binding
                 .endpoint

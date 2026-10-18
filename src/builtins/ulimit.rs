@@ -313,8 +313,7 @@ pub fn ulimit(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             'P' => opts.what = limits::NPTS,
             'T' => opts.what = limits::NTHR,
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return builtin_print_help(parser, streams, cmd);
             }
             ':' => {
                 builtin_missing_argument(

@@ -1,4 +1,7 @@
 use super::prelude::*;
+use crate::event::{self, Event};
+#[cfg(unix)]
+use crate::history::{History, history_id};
 use crate::{
     builtins::Error,
     common::valid_var_name,
@@ -8,11 +11,6 @@ use crate::{
     parse_execution::varname_error,
     parser::ParserEnvSetMode,
     wutil::wcstoi::{self, wcstoi_partial},
-};
-#[cfg(unix)]
-use crate::{
-    event::{self, Event},
-    history::{History, history_id},
 };
 use fish_common::{EscapeFlags, EscapeStringStyle, escape, escape_string, help_section};
 use fish_widestring::ELLIPSIS_CHAR;
@@ -129,10 +127,9 @@ impl Options {
         while let Some(c) = w.next_opt() {
             match c {
                 #[cfg(windows)]
-                'U' | 'f' | 'h' | 'n' | 'L' | 'S' | 'a' | 'p' | PATH_ARG | UNPATH_ARG
-                | NO_EVENT_ARG => {
+                'U' => {
                     err_fmt!(
-                        "unsupported option on native Windows: %s",
+                        "universal persistence is unavailable on native Windows (N4): %s",
                         args[w.wopt_index - 1]
                     )
                     .cmd(cmd)
@@ -235,7 +232,7 @@ impl Options {
         let optind = w.wopt_index;
 
         if opts.print_help {
-            builtin_print_help(parser, streams, cmd);
+            builtin_print_help(parser, streams, cmd)?;
             return Ok(None);
         }
 
@@ -808,7 +805,6 @@ fn erase(
                 if retval != EnvStackSetResult::NotFound {
                     handle_env_return(retval, cmd, split.varname, streams);
                 }
-                #[cfg(unix)]
                 if retval == EnvStackSetResult::Ok && !opts.no_event {
                     event::fire(parser, Event::variable_erase(split.varname.to_owned()));
                 }

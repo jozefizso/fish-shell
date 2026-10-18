@@ -248,8 +248,7 @@ pub fn history(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr])
     };
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     // Use the default history if we have none (which happens if invoked non-interactively, e.g.

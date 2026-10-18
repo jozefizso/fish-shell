@@ -388,8 +388,7 @@ pub fn commandline(
                 jump_target = Some(w.woptarg.unwrap().to_owned());
             }
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return builtin_print_help(parser, streams, cmd);
             }
             ':' => {
                 builtin_missing_argument(

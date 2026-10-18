@@ -2,6 +2,8 @@
 // to support highlighting.
 // Because this may perform blocking I/O, we compute results in a separate thread,
 // and provide them optimistically.
+#[cfg(windows)]
+use crate::wutil::AccessFlags;
 use crate::{
     expand::{ExpandFlags, expand_one, expand_tilde},
     operation_context::OperationContext,
@@ -11,19 +13,20 @@ use crate::{
     wutil::{dir_iter::DirIter, fish_wcstoi, normalize_path, waccess, wbasename, wdirname, wstat},
 };
 use fish_common::{UnescapeFlags, UnescapeStringStyle, unescape_string};
-use fish_wcstringutil::{
-    string_prefixes_string, string_prefixes_string_case_insensitive, string_suffixes_string,
-};
+use fish_wcstringutil::{string_prefixes_string, string_prefixes_string_case_insensitive};
 use fish_widestring::{
     ANY_CHAR, ANY_STRING, ANY_STRING_RECURSIVE, BRACE_BEGIN, BRACE_END, BRACE_SEP, HOME_DIRECTORY,
     INTERNAL_SEPARATOR, L, PROCESS_EXPAND_SELF, SLICE_BEGIN, SLICE_END, VARIABLE_EXPAND,
     VARIABLE_EXPAND_SINGLE, WExt as _, WString, wstr,
 };
+#[cfg(unix)]
 use libc::PATH_MAX;
+#[cfg(unix)]
 use nix::unistd::AccessFlags;
 use std::collections::{HashMap, hash_map};
 #[cfg(apple)]
 use std::os::fd::AsRawFd as _;
+#[cfg(unix)]
 use std::os::fd::BorrowedFd;
 
 // This is used only internally to this file, and is exposed only for testing.
@@ -48,6 +51,10 @@ pub struct IsErr;
 /// The result of a file test.
 pub type FileTestResult = Result<IsFile, IsErr>;
 
+fn has_trailing_separator(path: &wstr) -> bool {
+    path.ends_with('/') || (cfg!(windows) && path.ends_with('\\'))
+}
+
 pub struct FileTester<'src, 'wd, 'opctx> {
     // The working directory, for resolving paths against.
     working_directory: &'wd wstr,
@@ -70,6 +77,7 @@ impl<'src, 'wd, 'opctx> FileTester<'src, 'wd, 'opctx> {
     pub fn test_path(&self, token: &wstr, prefix: bool) -> bool {
         // Skip strings exceeding PATH_MAX. See #7837.
         // Note some paths may exceed PATH_MAX, but this is just for highlighting.
+        #[cfg(unix)]
         if token.len() > (PATH_MAX as usize) {
             return false;
         }
@@ -137,6 +145,7 @@ impl<'src, 'wd, 'opctx> FileTester<'src, 'wd, 'opctx> {
         mode: RedirectionMode,
     ) -> FileTestResult {
         // Skip targets exceeding PATH_MAX. See #7837.
+        #[cfg(unix)]
         if target.len() > (PATH_MAX as usize) {
             return Err(IsErr);
         }
@@ -172,7 +181,7 @@ impl<'src, 'wd, 'opctx> FileTester<'src, 'wd, 'opctx> {
                 }
             }
             RedirectionMode::Overwrite | RedirectionMode::Append | RedirectionMode::NoClob => {
-                if string_suffixes_string(L!("/"), &target) {
+                if has_trailing_separator(&target) {
                     // Redirections to things that are directories is definitely not
                     // allowed.
                     return Err(IsErr);
@@ -190,15 +199,23 @@ impl<'src, 'wd, 'opctx> FileTester<'src, 'wd, 'opctx> {
                             && waccess(&target_path, AccessFlags::W_OK).is_ok();
                     }
                     Err(err) => {
-                        if err.raw_os_error() == Some(libc::ENOENT) {
+                        if err.kind() == std::io::ErrorKind::NotFound {
                             // File does not exist. Check if its parent directory is writable.
                             let mut parent = wdirname(&target_path).to_owned();
 
                             // Ensure that the parent ends with the path separator. This will ensure
                             // that we get an error if the parent directory is not really a
                             // directory.
-                            if !string_suffixes_string(L!("/"), &parent) {
-                                parent.push('/');
+                            if !has_trailing_separator(&parent) {
+                                #[cfg(windows)]
+                                let separator = if parent.starts_with(L!("\\\\?\\")) {
+                                    '\\'
+                                } else {
+                                    '/'
+                                };
+                                #[cfg(unix)]
+                                let separator = '/';
+                                parent.push(separator);
                             }
 
                             // Now the file is considered writable if the parent directory is
@@ -286,7 +303,8 @@ fn is_potential_path(
     // TODO This should be a HashSet https://github.com/rust-lang/rust/issues/60896.
     let mut checked_paths = HashMap::new();
 
-    // Keep a cache of which paths / filesystems are case sensitive.
+    // Keep a cache where the platform needs a separate filesystem query.
+    #[cfg(unix)]
     let mut case_sensitivity_cache = CaseSensitivityCache::new();
 
     for wd in directories {
@@ -294,7 +312,7 @@ fn is_potential_path(
             return false;
         }
         let mut abs_path = path_apply_working_directory(&path_fragment, wd);
-        let must_be_full_dir = abs_path.chars().next_back() == Some('/');
+        let must_be_full_dir = has_trailing_separator(&abs_path);
         if flags.for_cd {
             abs_path = normalize_path(&abs_path, /*allow_leading_double_slashes=*/ true);
         }
@@ -319,6 +337,10 @@ fn is_potential_path(
         //    so we can skip the prefix-match.
         if must_be_full_dir || !at_cursor {
             if let Ok(md) = wstat(abs_path) {
+                #[cfg(windows)]
+                if require_dir && !md.file_type().is_dir() {
+                    continue;
+                }
                 if !at_cursor || md.file_type().is_dir() {
                     return true;
                 }
@@ -334,8 +356,11 @@ fn is_potential_path(
 
             if let Ok(mut dir) = DirIter::new(dir_name) {
                 // Check if we're case insensitive.
+                #[cfg(unix)]
                 let do_case_insensitive =
                     fs_is_case_insensitive(dir_name, dir.fd(), &mut case_sensitivity_cache);
+                #[cfg(windows)]
+                let do_case_insensitive = !dir.case_sensitive();
 
                 // We opened the dir_name; look for a string where the base name prefixes it.
                 while let Some(entry) = dir.next() {
@@ -367,6 +392,7 @@ fn is_potential_path(
 
 // Given a string, return whether it prefixes a path that we could cd into. Return that path in
 // out_path. Expects path to be unescaped.
+#[cfg(unix)]
 fn is_potential_cd_path(
     path: &wstr,
     at_cursor: bool,
@@ -413,12 +439,39 @@ fn is_potential_cd_path(
     is_potential_path(path, at_cursor, &directories, ctx, flags)
 }
 
+#[cfg(windows)]
+fn is_potential_cd_path(
+    path: &wstr,
+    at_cursor: bool,
+    working_directory: &wstr,
+    ctx: &OperationContext<'_>,
+    mut flags: PathFlags,
+) -> bool {
+    // Reuse native root, separator, tilde and CDPATH policy instead of applying Unix
+    // directory rules to drive-qualified, UNC or extended paths.
+    let mut expanded;
+    let path = if flags.expand_tilde && path.starts_with('~') {
+        expanded = path.to_owned();
+        expand_tilde(&mut expanded, ctx.vars());
+        expanded.as_utfstr()
+    } else {
+        path
+    };
+    flags.expand_tilde = false;
+    flags.require_dir = true;
+    flags.for_cd = true;
+    crate::path::path_apply_cdpath(path, working_directory, ctx.vars())
+        .iter()
+        .any(|candidate| is_potential_path(candidate, at_cursor, &[working_directory], ctx, flags))
+}
+
 /// Determine if the filesystem containing the given fd is case insensitive for lookups regardless
 /// of whether it preserves the case when saving a pathname.
 ///
 /// Returns:
 ///     false: the filesystem is not case insensitive
 ///     true: the file system is case insensitive
+#[cfg(unix)]
 type CaseSensitivityCache = HashMap<WString, bool>;
 
 #[cfg(apple)]
@@ -439,7 +492,7 @@ fn fs_is_case_insensitive(
     icase
 }
 
-#[cfg(not(apple))]
+#[cfg(all(unix, not(apple)))]
 fn fs_is_case_insensitive(
     _path: &wstr,
     _fd: Option<BorrowedFd<'_>>,
@@ -449,7 +502,7 @@ fn fs_is_case_insensitive(
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{FileTester, IsErr, IsFile, PathFlags, is_potential_path};
     use crate::{

@@ -7,11 +7,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "windows_native/provenance.rs"]
-mod provenance;
 #[path = "windows_native/fixture.rs"]
 mod fixture;
-use fixture::{exact, quote, run, Captured, Fixture};
+#[path = "windows_native/provenance.rs"]
+mod provenance;
+use fixture::{Captured, Fixture, exact, quote, run};
 
 const CASES: &[&str] = &[
     "W2-RUNTIME",
@@ -102,11 +102,16 @@ fn no_config(f: &Fixture) {
         b"long-option\n",
         b"",
     );
-    for args in [
-        vec![],
-        vec![OsStr::new("-N")],
-        vec![OsStr::new("-N"), OsStr::new("-i")],
-    ] {
+    exact(
+        run(
+            &mut f.command(&[OsStr::new("-N")]),
+            b"printf stdin-no-config",
+        ),
+        0,
+        b"stdin-no-config",
+        b"",
+    );
+    for args in [vec![], vec![OsStr::new("-N"), OsStr::new("-i")]] {
         let result = run(&mut f.command(&args), b"");
         assert!(
             result.out.is_empty(),
@@ -124,12 +129,10 @@ fn no_config(f: &Fixture) {
 fn reject(f: &Fixture) {
     let jobs = [
         "echo forbidden &",
-        "echo (set -g mutated yes; echo forbidden)",
         "exec echo forbidden",
         "fg",
         "bg",
         "set -U forbidden yes",
-        "source missing.fish",
     ];
     for job in jobs {
         let result = f.eval(job);
@@ -140,9 +143,8 @@ fn reject(f: &Fixture) {
         rejected(result);
     }
     for job in [
-        "echo (set -g mutated yes; echo forbidden) | echo discarded",
         "exec echo (set -g mutated yes; echo forbidden)",
-        "echo (set -g mutated yes; echo forbidden) > ignored",
+        "exec echo (set -g mutated yes; echo forbidden) > excluded-exec-output",
         "echo (set -g mutated yes; echo forbidden) &",
     ] {
         let result = f.eval(&format!("set -g mutated no; {job}; echo $mutated"));
@@ -152,7 +154,7 @@ fn reject(f: &Fixture) {
         );
         assert!(!result.err.is_empty());
     }
-    assert!(!f.root.join("ignored").exists());
+    assert!(!f.root.join("excluded-exec-output").exists());
 }
 fn paths(f: &Fixture) {
     let pwd = f.eval("printf '%s\\n' $PWD");
@@ -163,7 +165,10 @@ fn paths(f: &Fixture) {
     let result = f.eval(&format!("{} report", f.probe()));
     assert_eq!(result.code, 0);
     assert!(result.err.is_empty());
-    assert_eq!(check_report_cwd(&String::from_utf8(result.out).unwrap(), &f.root), "");
+    assert_eq!(
+        check_report_cwd(&String::from_utf8(result.out).unwrap(), &f.root),
+        ""
+    );
     // N1 namespace resolution, drive-relative execution and UNC fixtures are now
     // positive/failure coverage in the mandatory windows_n1 acceptance gates.
     let root = f.root.ancestors().last().unwrap();
@@ -335,7 +340,6 @@ fn boundary(f: &Fixture) {
         format!("exec {command}"),
         format!("fg {command}"),
         format!("bg {command}"),
-        format!("echo ({command})"),
         format!("{command} &"),
     ] {
         let result = f.eval(&job);

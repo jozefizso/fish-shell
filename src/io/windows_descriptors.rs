@@ -1,4 +1,5 @@
 //! Logical descriptor bindings; native handles never double as descriptor numbers.
+use super::deferred::{NativeInputPayload, NativeInputReadiness};
 use super::{
     BufferedOutputStream, FdOutputStream, IoBuffer, NativeCapture, NativeOutput, OutputStream,
     SeparatedBuffer,
@@ -39,8 +40,43 @@ impl AsHandle for NativeHandle {
 enum EndpointKind {
     Native(NativeHandle),
     Capture(Arc<NativeCapture>),
-    Buffer(IoBuffer),
-    Memory(Mutex<Option<MemoryInput>>),
+    Buffer {
+        buffer: IoBuffer,
+        capture: OnceLock<Result<Arc<NativeCapture>, StoredError>>,
+    },
+    Memory {
+        input: Mutex<Option<MemoryInput>>,
+        native: OnceLock<MaterializedInput>,
+    },
+}
+
+struct MaterializedInput {
+    endpoint: Arc<NativeEndpoint>,
+    writer: Mutex<Option<super::NativeDeferredWriter>>,
+    readiness: Arc<NativeInputReadiness>,
+}
+impl MaterializedInput {
+    fn read(&self, output: &mut [u8]) -> io::Result<usize> {
+        self.finish_read(self.endpoint.read(output)?)
+    }
+    fn peek(&self, output: &mut [u8]) -> io::Result<usize> {
+        let handle = self
+            .endpoint
+            .native_handle()
+            .expect("materialized native input pipe");
+        self.finish_read(self.readiness.peek(handle, output)?)
+    }
+    fn finish_read(&self, count: usize) -> io::Result<usize> {
+        if count == 0 {
+            if let Some(writer) = self.writer.lock().unwrap().take() {
+                writer.finish()?;
+            }
+        }
+        Ok(count)
+    }
+    fn source_error(&self) -> Option<Arc<io::Error>> {
+        self.writer.lock().unwrap().as_ref()?.source_error()
+    }
 }
 
 struct MemoryInput {
@@ -83,8 +119,12 @@ pub struct NativeEndpoint {
     direction: NativeIoDirection,
     overlapped: bool,
     input: Mutex<NativeInputBuffer>,
-    async_io: OnceLock<Result<super::pipe::NativeOverlappedFile, StoredError>>,
-    sync_input: OnceLock<Result<super::pipe::NativeSynchronousInput, StoredError>>,
+    async_io: OnceLock<Arc<super::pipe::NativeOverlappedFile>>,
+    sync_input: OnceLock<Arc<super::pipe::NativeSynchronousInput>>,
+    replay: OnceLock<MaterializedInput>,
+    forward: OnceLock<Result<Arc<NativeCapture>, StoredError>>,
+    materialization: Mutex<()>,
+    io_initialization: Mutex<()>,
 }
 
 impl NativeEndpoint {
@@ -96,6 +136,10 @@ impl NativeEndpoint {
             input: Mutex::new(NativeInputBuffer::default()),
             async_io: OnceLock::new(),
             sync_input: OnceLock::new(),
+            replay: OnceLock::new(),
+            forward: OnceLock::new(),
+            materialization: Mutex::new(()),
+            io_initialization: Mutex::new(()),
         })
     }
     pub fn from_file(file: File, direction: NativeIoDirection) -> Arc<Self> {
@@ -132,20 +176,26 @@ impl NativeEndpoint {
     }
     pub(crate) fn buffer(buffer: IoBuffer) -> Arc<Self> {
         Self::new(
-            EndpointKind::Buffer(buffer),
+            EndpointKind::Buffer {
+                buffer,
+                capture: OnceLock::new(),
+            },
             NativeIoDirection::Output,
             false,
         )
     }
     pub(crate) fn deferred_input() -> Arc<Self> {
         Self::new(
-            EndpointKind::Memory(Mutex::new(None)),
+            EndpointKind::Memory {
+                input: Mutex::new(None),
+                native: OnceLock::new(),
+            },
             NativeIoDirection::Input,
             false,
         )
     }
     pub(crate) fn complete_buffered_input(&self, buffer: SeparatedBuffer) -> io::Result<()> {
-        let EndpointKind::Memory(input) = &self.kind else {
+        let EndpointKind::Memory { input, .. } = &self.kind else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "not a deferred internal input",
@@ -169,16 +219,193 @@ impl NativeEndpoint {
         self.direction
     }
     pub fn is_overlapped(&self) -> bool {
+        if self.forward.get().is_some() {
+            return false;
+        }
+        if let Some(replay) = self.replay.get() {
+            return replay.endpoint.is_overlapped();
+        }
+        if let EndpointKind::Memory { native, .. } = &self.kind {
+            if let Some(native) = native.get() {
+                return native.endpoint.is_overlapped();
+            }
+        }
         self.overlapped
     }
     pub fn native_handle(&self) -> Option<BorrowedHandle<'_>> {
+        if let Some(forward) = self.forward.get() {
+            return forward.as_ref().ok().map(|capture| capture.writer_handle());
+        }
+        if let Some(replay) = self.replay.get() {
+            return replay.endpoint.native_handle();
+        }
         match &self.kind {
             EndpointKind::Native(handle) => Some(handle.as_handle()),
             EndpointKind::Capture(capture) => Some(capture.writer_handle()),
-            EndpointKind::Buffer(_) | EndpointKind::Memory(_) => None,
+            EndpointKind::Buffer { capture, .. } => capture
+                .get()
+                .and_then(|capture| capture.as_ref().ok())
+                .map(|capture| capture.writer_handle()),
+            EndpointKind::Memory { native, .. } => native
+                .get()
+                .and_then(|native| native.endpoint.native_handle()),
         }
     }
     pub fn child_handle(&self) -> io::Result<BorrowedHandle<'_>> {
+        if let EndpointKind::Native(handle) = &self.kind {
+            if self.direction == NativeIoDirection::Input {
+                let _materialization = self.materialization.lock().unwrap();
+                let mut pending = self.input.lock().unwrap();
+                if let Some(replay) = self.replay.get() {
+                    pending.discard_peeked();
+                    return replay.endpoint.child_handle();
+                }
+                if self.overlapped || pending.has_pending() {
+                    self.prepare_input_io()?;
+                    let source = Self::new(
+                        EndpointKind::Native(handle.clone()),
+                        self.direction,
+                        self.overlapped,
+                    );
+                    if let Some(io) = self.async_io.get() {
+                        let _ = source.async_io.set(io.clone());
+                    }
+                    if let Some(input) = self.sync_input.get() {
+                        let _ = source.sync_input.set(input.clone());
+                    }
+                    let (endpoint, target) = super::pipe::native_output_pipe()?;
+                    let prepared =
+                        super::NativeDeferredWriter::prepare_input(Some(source), target)?;
+                    let readiness = Arc::clone(&prepared.readiness);
+                    let payload = NativeInputPayload::Replay {
+                        prefix: pending.take_pending(),
+                    };
+                    let writer = match prepared.commit(payload) {
+                        Ok(writer) => writer,
+                        Err((error, NativeInputPayload::Replay { prefix })) => {
+                            pending.restore_pending(prefix);
+                            return Err(error);
+                        }
+                        Err(_) => unreachable!("native replay payload"),
+                    };
+                    assert!(
+                        self.replay
+                            .set(MaterializedInput {
+                                endpoint,
+                                writer: Mutex::new(Some(writer)),
+                                readiness,
+                            })
+                            .is_ok()
+                    );
+                    return self
+                        .replay
+                        .get()
+                        .expect("published replay")
+                        .endpoint
+                        .child_handle();
+                }
+            }
+            if self.direction == NativeIoDirection::Output && self.overlapped {
+                let forward = self
+                    .forward
+                    .get_or_init(|| {
+                        self.overlapped_file().map_err(StoredError::from)?;
+                        let target =
+                            Self::new(EndpointKind::Native(handle.clone()), self.direction, true);
+                        if let Some(io) = self.async_io.get() {
+                            let _ = target.async_io.set(io.clone());
+                        }
+                        NativeCapture::forwarding(target).map_err(StoredError::from)
+                    })
+                    .as_ref()
+                    .map_err(StoredError::to_error)?;
+                return Ok(forward.writer_handle());
+            }
+        }
+        match &self.kind {
+            EndpointKind::Buffer { buffer, capture } => {
+                let capture = capture
+                    .get_or_init(|| {
+                        NativeCapture::with_buffer(
+                            buffer.clone(),
+                            crate::threads::NativeRuntime::new()?,
+                        )
+                        .map_err(StoredError::from)
+                    })
+                    .as_ref()
+                    .map_err(StoredError::to_error)?;
+                return Ok(capture.writer_handle());
+            }
+            EndpointKind::Memory { input, native } => {
+                let _materialization = self.materialization.lock().unwrap();
+                let mut pending = self.input.lock().unwrap();
+                if let Some(native) = native.get() {
+                    pending.discard_peeked();
+                    return native.endpoint.child_handle();
+                }
+                let mut memory = input.lock().unwrap();
+                let current = memory.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "internal producer has not completed",
+                    )
+                })?;
+                if current.buffer.discarded() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::FileTooLarge,
+                        "buffered pipeline exceeds fish_read_limit",
+                    ));
+                }
+                let (endpoint, target) = super::pipe::native_output_pipe()?;
+                let prepared = super::NativeDeferredWriter::prepare_input(None, target)?;
+                let readiness = Arc::clone(&prepared.readiness);
+                let current = memory
+                    .take()
+                    .expect("memory cursor retained until prepared");
+                let payload = NativeInputPayload::Buffer {
+                    prefix: pending.take_pending(),
+                    buffer: current.buffer,
+                    element: current.element,
+                    offset: current.offset,
+                };
+                let writer = match prepared.commit(payload) {
+                    Ok(writer) => writer,
+                    Err((
+                        error,
+                        NativeInputPayload::Buffer {
+                            prefix,
+                            buffer,
+                            element,
+                            offset,
+                        },
+                    )) => {
+                        pending.restore_pending(prefix);
+                        *memory = Some(MemoryInput {
+                            buffer,
+                            element,
+                            offset,
+                        });
+                        return Err(error);
+                    }
+                    Err(_) => unreachable!("memory input payload"),
+                };
+                assert!(
+                    native
+                        .set(MaterializedInput {
+                            endpoint,
+                            writer: Mutex::new(Some(writer)),
+                            readiness,
+                        })
+                        .is_ok()
+                );
+                return native
+                    .get()
+                    .expect("published memory input")
+                    .endpoint
+                    .child_handle();
+            }
+            _ => {}
+        }
         self.native_handle().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -186,28 +413,92 @@ impl NativeEndpoint {
             )
         })
     }
+    pub(crate) fn has_materialized_input(&self) -> bool {
+        self.replay.get().is_some()
+            || matches!(&self.kind, EndpointKind::Memory { native, .. } if native.get().is_some())
+    }
+    pub(crate) fn input_error(&self) -> Option<Arc<io::Error>> {
+        if let Some(replay) = self.replay.get() {
+            return replay.source_error();
+        }
+        if let EndpointKind::Memory { native, .. } = &self.kind {
+            if let Some(native) = native.get() {
+                return native.source_error();
+            }
+        }
+        None
+    }
+    pub(crate) fn peek_input(&self, output: &mut [u8]) -> io::Result<Option<usize>> {
+        if let Some(replay) = self.replay.get() {
+            return replay.peek(output).map(Some);
+        }
+        if let EndpointKind::Memory { native, .. } = &self.kind {
+            if let Some(native) = native.get() {
+                return native.peek(output).map(Some);
+            }
+        }
+        Ok(None)
+    }
+    pub(crate) fn prepare_input_io(&self) -> io::Result<()> {
+        if self.overlapped {
+            self.overlapped_file()?;
+        } else if let EndpointKind::Native(owner) = &self.kind {
+            if super::pipe::is_pipe(owner.as_handle()) {
+                self.synchronous_input(owner)?;
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn prepare_output_io(&self) -> io::Result<()> {
+        self.overlapped_file().map(|_| ())
+    }
     pub(crate) fn input_buffer(&self) -> &Mutex<NativeInputBuffer> {
         &self.input
     }
     fn overlapped_file(&self) -> io::Result<&super::pipe::NativeOverlappedFile> {
-        self.async_io
-            .get_or_init(|| {
+        if self.async_io.get().is_none() {
+            let _initialization = self.io_initialization.lock().unwrap();
+            if self.async_io.get().is_none() {
                 let EndpointKind::Native(handle) = &self.kind else {
-                    return Err(StoredError::from(io::Error::new(
+                    return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
                         "overlapped endpoint requires a native handle owner",
-                    )));
+                    ));
                 };
-                super::pipe::NativeOverlappedFile::new(handle.clone()).map_err(StoredError::from)
-            })
-            .as_ref()
-            .map_err(StoredError::to_error)
+                let io = Arc::new(super::pipe::NativeOverlappedFile::new(handle.clone())?);
+                assert!(self.async_io.set(io).is_ok());
+            }
+        }
+        Ok(self.async_io.get().expect("initialized native IO").as_ref())
+    }
+    fn synchronous_input(
+        &self,
+        owner: &NativeHandle,
+    ) -> io::Result<&super::pipe::NativeSynchronousInput> {
+        if self.sync_input.get().is_none() {
+            let _initialization = self.io_initialization.lock().unwrap();
+            if self.sync_input.get().is_none() {
+                let input = Arc::new(super::pipe::NativeSynchronousInput::new(owner.clone())?);
+                assert!(self.sync_input.set(input).is_ok());
+            }
+        }
+        Ok(self
+            .sync_input
+            .get()
+            .expect("initialized native input")
+            .as_ref())
     }
     pub(crate) fn read(&self, output: &mut [u8]) -> io::Result<usize> {
         if output.is_empty() {
             return Ok(0);
         }
-        if let EndpointKind::Memory(input) = &self.kind {
+        if let Some(replay) = self.replay.get() {
+            return replay.read(output);
+        }
+        if let EndpointKind::Memory { input, native } = &self.kind {
+            if let Some(native) = native.get() {
+                return native.read(output);
+            }
             let mut input = input.lock().unwrap();
             let input = input.as_mut().ok_or_else(|| {
                 io::Error::new(
@@ -226,23 +517,26 @@ impl NativeEndpoint {
         if self.overlapped {
             return self.overlapped_file()?.read(output);
         }
-        let handle = self.child_handle()?;
+        let handle = self.native_handle().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "input endpoint has no native handle",
+            )
+        })?;
         if super::pipe::is_pipe(handle) {
             if let EndpointKind::Native(owner) = &self.kind {
-                return self
-                    .sync_input
-                    .get_or_init(|| {
-                        super::pipe::NativeSynchronousInput::new(owner.clone())
-                            .map_err(StoredError::from)
-                    })
-                    .as_ref()
-                    .map_err(StoredError::to_error)?
-                    .read(output);
+                return self.synchronous_input(owner)?.read(output);
             }
         }
         super::pipe::read_synchronous(handle, output)
     }
     pub(crate) fn write(&self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(forward) = self.forward.get() {
+            forward
+                .as_ref()
+                .map_err(StoredError::to_error)?
+                .synchronize()?;
+        }
         if self.overlapped {
             return self.overlapped_file()?.write(bytes);
         }
@@ -257,11 +551,30 @@ impl NativeEndpoint {
             io.cancel();
         }
     }
+    pub(crate) fn cancel_input_io(&self) {
+        if self.overlapped {
+            self.cancel_overlapped_io();
+        } else if let EndpointKind::Native(owner) = &self.kind {
+            if super::pipe::is_pipe(owner.as_handle()) {
+                if let Ok(input) = self.synchronous_input(owner) {
+                    input.cancel();
+                }
+            }
+        }
+    }
     fn output_stream(self: &Arc<Self>) -> io::Result<OutputStream> {
         match &self.kind {
-            EndpointKind::Buffer(buffer) => Ok(OutputStream::Buffered(BufferedOutputStream::new(
-                buffer.clone(),
-            ))),
+            EndpointKind::Buffer { buffer, capture } => {
+                if let Some(capture) = capture.get() {
+                    capture
+                        .as_ref()
+                        .map_err(StoredError::to_error)?
+                        .synchronize()?;
+                }
+                Ok(OutputStream::Buffered(BufferedOutputStream::new(
+                    buffer.clone(),
+                )))
+            }
             EndpointKind::Capture(capture) => {
                 capture.synchronize()?;
                 Ok(OutputStream::Buffered(BufferedOutputStream::new(
@@ -272,6 +585,47 @@ impl NativeEndpoint {
                 self,
             )))),
         }
+    }
+    pub(crate) fn finish_forwarding(&self) -> io::Result<()> {
+        if let Some(forward) = self.forward.get() {
+            let (interrupted, error) = forward
+                .as_ref()
+                .map_err(StoredError::to_error)?
+                .finish_in_place()?;
+            if let Some(error) = error {
+                return Err(error);
+            }
+            if interrupted {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Finish only the buffer owned by this internal pipeline stage, not an
+    /// enclosing evaluation's capture. The same buffer retains explicit elements.
+    pub(crate) fn finish_buffered_output(&self) -> io::Result<()> {
+        if let EndpointKind::Buffer { buffer, capture } = &self.kind {
+            if let Some(capture) = capture.get() {
+                let (interrupted, error) = capture
+                    .as_ref()
+                    .map_err(StoredError::to_error)?
+                    .finish_in_place()?;
+                if let Some(error) = error {
+                    return Err(error);
+                }
+                if interrupted {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+            }
+            if buffer.discarded() {
+                return Err(io::Error::new(
+                    io::ErrorKind::FileTooLarge,
+                    "buffered pipeline exceeds fish_read_limit",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -500,6 +854,7 @@ fn is_null_target(target: &wstr) -> bool {
             .eq(r"\\.\nul".chars())
 }
 
+#[derive(Clone)]
 struct StoredError {
     code: Option<i32>,
     kind: io::ErrorKind,
@@ -586,4 +941,99 @@ fn load_root_descriptors() -> Result<IoChain, StoredError> {
         }
     }
     Ok(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::deferred::{InputSetupFailure, fail_next_input_setup};
+    use std::io::Read as _;
+
+    #[test]
+    fn input_setup_failures_preserve_owned_native_and_memory_cursors() {
+        let bytes = b"one\0two\0three\0";
+        for failure in [InputSetupFailure::Worker, InputSetupFailure::Commit] {
+            for memory in [false, true] {
+                let input = if memory {
+                    let mut buffer = SeparatedBuffer::new(1024);
+                    assert!(buffer.append(bytes, super::super::SeparationType::Inferred));
+                    let input = NativeEndpoint::deferred_input();
+                    input.complete_buffered_input(buffer).unwrap();
+                    input
+                } else {
+                    let (input, output) = super::super::pipe::native_input_pipe().unwrap();
+                    assert_eq!(output.write(bytes).unwrap(), bytes.len());
+                    drop(output);
+                    input
+                };
+                let mut reader = BorrowedFdFile::from_endpoint(Arc::clone(&input));
+                assert_eq!(&*reader.fill_buf().unwrap(), bytes);
+                let mut first = [0; 4];
+                reader.read_exact(&mut first).unwrap();
+                assert_eq!(&first, b"one\0");
+                fail_next_input_setup(failure);
+                assert!(input.child_handle().is_err());
+                // Neither fallible resource creation nor commit may publish an
+                // error cell, cancel shared IO, or lose the already-read prefix.
+                let mut rest = Vec::new();
+                reader.read_to_end(&mut rest).unwrap();
+                assert_eq!(rest, b"two\0three\0");
+            }
+        }
+    }
+
+    #[test]
+    fn materialized_input_peeks_chunks_without_consuming_child_input() {
+        let mut buffer = SeparatedBuffer::new(1024);
+        assert!(buffer.append(
+            b"dir/a\0dir/b\0dir/c\0",
+            super::super::SeparationType::Inferred
+        ));
+        let input = NativeEndpoint::deferred_input();
+        input.complete_buffered_input(buffer).unwrap();
+        input.child_handle().unwrap();
+        let mut reader = BorrowedFdFile::from_endpoint(Arc::clone(&input));
+        assert_eq!(&*reader.fill_buf().unwrap(), b"dir/a\0dir/b\0dir/c\0");
+        // Handing the endpoint to another child invalidates lookahead only.
+        input.child_handle().unwrap();
+        let mut first = [0; 6];
+        reader.read_exact(&mut first).unwrap();
+        assert_eq!(&first, b"dir/a\0");
+        assert_eq!(&*reader.fill_buf().unwrap(), b"dir/b\0dir/c\0");
+        input.child_handle().unwrap();
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"dir/b\0dir/c\0");
+    }
+
+    #[test]
+    fn first_materialization_exposes_only_unread_bytes_to_native_handle() {
+        let bytes = b"dir/first\ndir/second\n";
+        for memory in [false, true] {
+            let input = if memory {
+                let mut buffer = SeparatedBuffer::new(1024);
+                assert!(buffer.append(bytes, super::super::SeparationType::Inferred));
+                let input = NativeEndpoint::deferred_input();
+                input.complete_buffered_input(buffer).unwrap();
+                input
+            } else {
+                let (input, output) = super::super::pipe::native_input_pipe().unwrap();
+                assert_eq!(output.write(bytes).unwrap(), bytes.len());
+                drop(output);
+                input
+            };
+            let mut builtin = BorrowedFdFile::from_endpoint(Arc::clone(&input));
+            assert_eq!(&*builtin.fill_buf().unwrap(), bytes);
+            let mut first = Vec::new();
+            builtin.read_until(b'\n', &mut first).unwrap();
+            assert_eq!(first, b"dir/first\n");
+            // Use the actual exposed HANDLE, with a fresh adapter/cache, rather
+            // than continuing through the original logical endpoint.
+            let handle = input.child_handle().unwrap();
+            let mut native = crate::fds::BorrowedInput::from_handle(handle);
+            let mut rest = Vec::new();
+            native.read_to_end(&mut rest).unwrap();
+            assert_eq!(rest, b"dir/second\n");
+        }
+    }
 }

@@ -13,7 +13,7 @@ use crate::reader::{
     reader_set_transient_prompt,
 };
 use crate::screen::{IS_DUMB, ONLY_GRAYSCALE, screen_set_midnight_commander_hack};
-use crate::terminal::ColorSupport;
+use crate::text_face::ColorSupport;
 use crate::wutil::fish_wcstoi;
 use fish_wcstringutil::{bool_from_string, string_prefixes_string};
 use std::collections::HashMap;

@@ -172,8 +172,7 @@ pub fn jobs(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
                 print_last = true;
             }
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return builtin_print_help(parser, streams, cmd);
             }
             ':' => {
                 builtin_missing_argument(parser, streams, cmd, None, argv[w.wopt_index - 1], true);

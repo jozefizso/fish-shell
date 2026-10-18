@@ -1,4 +1,5 @@
 use crate::common::CancelChecker;
+#[cfg(unix)]
 use crate::env::EnvDyn;
 use crate::env::{EnvStack, Environment};
 use crate::parser::Parser;
@@ -63,8 +64,10 @@ impl<'a> OperationContext<'a> {
         OperationContext::background(&*NULL_ENV, EXPANSION_LIMIT_DEFAULT)
     }
 
-    // Return an operation context that contains only global variables, no parser, and never
-    // cancels.
+    /// Return a context with global variables, no parser, and no cancellation.
+    ///
+    /// Native batch entry points must initialize `EnvStack::globals()` with
+    /// `initialize_native()` first to import inherited variables and the native working directory.
     pub fn globals() -> OperationContext<'static> {
         OperationContext::background(EnvStack::globals(), EXPANSION_LIMIT_DEFAULT)
     }

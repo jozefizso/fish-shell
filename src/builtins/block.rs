@@ -78,8 +78,7 @@ pub fn block(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -
     let (opts, _) = parse_options(args, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     if opts.erase {

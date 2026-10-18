@@ -7,9 +7,8 @@ use crate::{
     err_fmt, err_raw, err_str,
     highlight::{colorize, highlight_and_colorize, highlight_shell},
     input::{Binding, BindingSet, KeyNameStyle, bindings, input_function_get_names},
-    key::{
-        self, KEY_NAMES, Key, MAX_FUNCTION_KEY, Modifiers, char_to_symbol, function_key, parse_keys,
-    },
+    key::{self, KEY_NAMES, Key, MAX_FUNCTION_KEY, Modifiers, function_key, parse_keys},
+    text_helpers::char_to_symbol,
 };
 use fish_common::{EscapeFlags, EscapeStringStyle, escape, escape_string, help_section};
 use fish_widestring::bytes2wcstring;
@@ -562,8 +561,7 @@ impl BuiltinBind {
         }
 
         if self.opts.print_help {
-            builtin_print_help(parser, streams, cmd);
-            return Ok(SUCCESS);
+            return builtin_print_help(parser, streams, cmd);
         }
 
         // Default to user mode

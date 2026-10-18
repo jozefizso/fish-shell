@@ -416,6 +416,12 @@ pub fn run(mode: &str, args: Vec<OsString>) {
                 .spawn()
                 .unwrap();
             std::fs::write(&args[2], child.id().to_string()).unwrap();
+            if let Some(name) = args.get(3) {
+                signal(&named_event(name));
+            }
+            if let Some(name) = args.get(4) {
+                wait(&named_event(name));
+            }
             wait(&ready);
             // Dropping std Child releases only this root's process handle. The
             // acceptance harness opens its own handle and releases/reaps the child.

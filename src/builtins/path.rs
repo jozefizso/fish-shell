@@ -9,19 +9,17 @@ use std::time::SystemTime;
 use super::prelude::*;
 #[cfg(unix)]
 use crate::path::path_apply_working_directory;
-use crate::wutil::{
-    file_id_for_path, lwstat, normalize_path, waccess, wbasename, wdirname, wstat,
-};
+#[cfg(windows)]
+use crate::wutil::AccessFlags;
 #[cfg(unix)]
 use crate::wutil::wrealpath;
+use crate::wutil::{file_id_for_path, lwstat, normalize_path, waccess, wbasename, wdirname, wstat};
 use fish_util::wcsfilecmp_glob;
 use fish_wcstringutil::split_string_tok;
 #[cfg(unix)]
 use libc::{PATH_MAX, S_ISGID, S_ISUID, mode_t};
 #[cfg(unix)]
 use nix::unistd::{AccessFlags, Gid, Uid};
-#[cfg(windows)]
-use crate::wutil::AccessFlags;
 
 // How many bytes we read() at once.
 // We use PATH_MAX here so we always get at least one path,
@@ -645,9 +643,9 @@ fn path_resolve(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]
     });
     for InputValue { arg, .. } in arguments {
         #[cfg(windows)]
-        let mut real = match native_operand(&arg, parser.vars()).and_then(|path| {
-            crate::wutil::native_realpath_with_cwd(&path, &path, true)
-        }) {
+        let mut real = match native_operand(&arg, parser.vars())
+            .and_then(|path| crate::wutil::native_realpath_with_cwd(&path, &path, true))
+        {
             Ok(path) => path,
             Err(_) => continue,
         };
@@ -897,7 +895,9 @@ fn path_filter_maybe_is(
     // Unix special-file kinds and ownership/mode bits have no native Windows
     // predicate. Reject them before inversion rather than inventing metadata.
     #[cfg(windows)]
-    if opts.types.is_some_and(|t| t.block || t.char || t.fifo || t.sock)
+    if opts
+        .types
+        .is_some_and(|t| t.block || t.char || t.fifo || t.sock)
         || opts.perms.is_some_and(PermFlags::is_special)
     {
         err_fmt!("Unix file types and ownership/mode predicates are unsupported on native Windows")
@@ -1016,8 +1016,7 @@ pub fn path(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) ->
     }
 
     if args[1] == "-h" || args[1] == "--help" {
-        builtin_print_help(parser, streams, cmd);
-        return if cfg!(windows) { Err(STATUS_INVALID_ARGS) } else { Ok(SUCCESS) };
+        return builtin_print_help(parser, streams, cmd);
     }
 
     let subcmd_name = args[1];
@@ -1044,8 +1043,7 @@ pub fn path(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) ->
 
     if argc >= 3 && (args[2] == "-h" || args[2] == "--help") {
         // Unlike string, we don't have separate docs (yet)
-        builtin_print_help(parser, streams, cmd);
-        return if cfg!(windows) { Err(STATUS_INVALID_ARGS) } else { Ok(SUCCESS) };
+        return builtin_print_help(parser, streams, cmd);
     }
     let args = &mut args[1..];
     subcmd(parser, streams, args)

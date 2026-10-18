@@ -1,11 +1,14 @@
 //! The eval builtin.
 
 use super::prelude::*;
+#[cfg(unix)]
 use crate::io::IoBufferfill;
 use crate::parser::BlockType;
 use fish_wcstringutil::join_strings;
+#[cfg(unix)]
 use libc::{STDERR_FILENO, STDOUT_FILENO};
 
+#[cfg(unix)]
 pub fn eval(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> BuiltinResult {
     let argc = args.len();
     if argc <= 1 {
@@ -76,4 +79,25 @@ pub fn eval(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) ->
     }
 
     status
+}
+
+#[cfg(windows)]
+pub fn eval(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> BuiltinResult {
+    if args.len() <= 1 {
+        return Ok(SUCCESS);
+    }
+    // Native IoChain endpoints already retain buffers/captures for deferred pipelines.
+    // Copying a POSIX pipe adapter here would lose the shared endpoint ownership.
+    let command = join_strings(&args[1..], ' ');
+    let result = parser.eval_with(
+        &command,
+        streams.io_chain,
+        streams.job_group.as_ref(),
+        BlockType::Top,
+    );
+    if result.was_empty {
+        Ok(SUCCESS)
+    } else {
+        BuiltinResult::from_dynamic(result.status.status_value())
+    }
 }

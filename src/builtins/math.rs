@@ -281,8 +281,7 @@ pub fn math(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     let (opts, mut optind) = parse_cmd_opts(argv, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     let mut expression = WString::new();

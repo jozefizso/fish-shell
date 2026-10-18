@@ -52,7 +52,6 @@ fn parse_options(
 }
 
 /// Function for handling the return builtin.
-#[cfg(unix)]
 pub fn r#return(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> BuiltinResult {
     let mut retval = match parse_return_value(args, parser, streams) {
         ControlFlow::Continue(r) => r,
@@ -96,8 +95,7 @@ pub fn parse_return_value(
     let (opts, optind) = parse_options(args, parser, streams).map_break(BuiltinResult::Err)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return ControlFlow::Break(Ok(SUCCESS));
+        return ControlFlow::Break(builtin_print_help(parser, streams, cmd));
     }
     if optind + 1 < args.len() {
         err_str!(Error::TOO_MANY_ARGUMENTS)

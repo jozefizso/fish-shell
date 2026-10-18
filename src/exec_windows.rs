@@ -1,7 +1,7 @@
 //! Native launch and deferred internal scheduling for the shared process model.
 use crate::builtins::{
     ErrorCode, STATUS_CMD_ERROR, STATUS_CMD_UNKNOWN, STATUS_INVALID_ARGS, STATUS_NOT_EXECUTABLE,
-    builtin_run,
+    STATUS_READ_TOO_MUCH, builtin_run,
 };
 use crate::env::{EnvMode, Environment as _, READ_BYTE_LIMIT};
 use crate::io::{
@@ -16,6 +16,12 @@ use fish_common::ScopeGuard;
 use fish_widestring::shell_text_to_osstring;
 use std::io;
 use std::sync::{Arc, atomic::Ordering};
+
+#[path = "exec/shared.rs"]
+mod shared;
+use shared::{
+    function_prepare_environment, function_restore_environment, populate_subshell_output,
+};
 
 #[path = "exec/windows_launch.rs"]
 mod native_launch;
@@ -62,6 +68,9 @@ fn run_internal(
     job: &Job,
     io: &IoChain,
 ) -> io::Result<ProcStatus> {
+    if !process.is_block_node() {
+        parser.libdata_mut().exec_count += 1;
+    }
     with_process_assignments(parser, process, |parser| {
         match &process.typ {
             ProcessType::Builtin => {
@@ -78,6 +87,7 @@ fn run_internal(
                             .iter()
                             .any(|spec| spec.fd == 0 && !spec.is_close()));
                 let mut argv: Vec<&wstr> = process.argv().iter().map(|s| s.as_utfstr()).collect();
+                crate::trace::trace_if_enabled_with_args(parser, L!(""), process.argv());
                 let status = builtin_run(parser, &mut argv, &mut streams);
                 if let Some(error) = streams
                     .stdin_file
@@ -91,7 +101,11 @@ fn run_internal(
                     // builtin_run already owns output flushing and its empty
                     // preserve-status result. Only an actual input failure overrides it.
                     return Ok(if status.is_empty() || status.is_success() {
-                        ProcStatus::from_exit_code(STATUS_CMD_ERROR)
+                        ProcStatus::from_exit_code(if error.kind() == io::ErrorKind::FileTooLarge {
+                            STATUS_READ_TOO_MUCH
+                        } else {
+                            STATUS_CMD_ERROR
+                        })
                     } else {
                         status
                     });
@@ -101,6 +115,23 @@ fn run_internal(
             ProcessType::BlockNode(node) => Ok(parser
                 .eval_node(node, io, job.group.as_ref(), BlockType::Top)
                 .status),
+            ProcessType::Function { props } => {
+                let props = props
+                    .as_ref()
+                    .expect("function properties resolved before execution");
+                crate::trace::trace_if_enabled_with_args(parser, L!(""), process.argv());
+                let block = function_prepare_environment(parser, process.argv().clone(), props);
+                let parser = &mut **ScopeGuard::new(&mut *parser, |parser| {
+                    function_restore_environment(parser, block);
+                });
+                let body = props.func_node.child_ref(|node| &node.jobs);
+                let result = parser.eval_node(&body, io, job.group.as_ref(), BlockType::Top);
+                Ok(if result.was_empty {
+                    ProcStatus::from_exit_code(0)
+                } else {
+                    result.status
+                })
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "native internal process type is unavailable",
@@ -112,10 +143,12 @@ fn run_internal(
 enum DeferredOutput {
     Internal {
         buffer: IoBuffer,
+        output: Arc<NativeEndpoint>,
         input: Arc<NativeEndpoint>,
     },
     Native {
         buffer: IoBuffer,
+        output: Arc<NativeEndpoint>,
         target: Arc<NativeEndpoint>,
     },
 }
@@ -124,8 +157,10 @@ struct NativeStage {
     io: Option<IoChain>,
     plan: Option<NativeLaunchPlan>,
     deferred: Option<DeferredOutput>,
+    forwarded_output: Option<Arc<NativeEndpoint>>,
     writer: Option<NativeDeferredWriter>,
     child: Option<Arc<NativeChild>>,
+    native_input: Option<Arc<NativeEndpoint>>,
 }
 
 enum NativeExecutionFailure {
@@ -145,7 +180,11 @@ impl NativeExecutionFailure {
         match self {
             Self::Io(error) => failure(
                 format_args!("cannot redirect or execute job: {error}"),
-                STATUS_CMD_ERROR,
+                if error.kind() == io::ErrorKind::FileTooLarge {
+                    STATUS_READ_TOO_MUCH
+                } else {
+                    STATUS_CMD_ERROR
+                },
             ),
             Self::Invalid(error) => failure(error, STATUS_INVALID_ARGS),
             Self::Launch { index, error } => {
@@ -166,6 +205,29 @@ impl NativeExecutionFailure {
     }
 }
 
+/// Runtime IO belongs to the stage that performed it. Other stages may already
+/// have real retained exit codes, or still need to consume EOF and be waited.
+fn record_stage_io_error(process: &Process, error: io::Error) {
+    diagnostic(format_args!("cannot complete pipeline stage: {error}"));
+    let status = process.status.get();
+    if status.is_empty() || status.is_success() {
+        process.status.set(ProcStatus::from_exit_code(
+            if error.kind() == io::ErrorKind::FileTooLarge {
+                STATUS_READ_TOO_MUCH
+            } else {
+                STATUS_CMD_ERROR
+            },
+        ));
+    }
+}
+
+fn record_deferred_read_limit(parser: &mut Parser, buffer: &IoBuffer) {
+    if buffer.discarded() {
+        let data = parser.libdata_mut();
+        data.native_capture_limit_generation = data.native_capture_limit_generation.wrapping_add(1);
+    }
+}
+
 /// Native stages start before main-thread evaluation. An internal producer must
 /// defer whenever any later internal consumer exists, including across relays.
 fn execute_pipeline(
@@ -180,8 +242,10 @@ fn execute_pipeline(
             io: Some(block_io.clone()),
             plan: None,
             deferred: None,
+            forwarded_output: None,
             writer: None,
             child: None,
+            native_input: None,
         })
         .collect();
     let last_internal = processes
@@ -199,9 +263,14 @@ fn execute_pipeline(
                 if last_internal.is_some_and(|last| index < last) {
                     let buffer = IoBuffer::new_bounded(READ_BYTE_LIMIT.load(Ordering::Relaxed));
                     let output = NativeEndpoint::buffer(buffer.clone());
-                    stages[index].deferred = Some(DeferredOutput::Native { buffer, target });
+                    stages[index].deferred = Some(DeferredOutput::Native {
+                        buffer,
+                        target,
+                        output: Arc::clone(&output),
+                    });
                     (read, output)
                 } else {
+                    stages[index].forwarded_output = Some(Arc::clone(&target));
                     (read, target)
                 }
             }
@@ -212,6 +281,7 @@ fn execute_pipeline(
                 stages[index].deferred = Some(DeferredOutput::Internal {
                     buffer,
                     input: Arc::clone(&input),
+                    output: Arc::clone(&output),
                 });
                 (input, output)
             }
@@ -268,10 +338,16 @@ fn execute_pipeline(
             })
             .map_err(|error| NativeExecutionFailure::Launch { index, error })?,
         );
-        // Only the plan's explicit duplicates survive this parent map.
+        stage.native_input = io
+            .endpoint(0)?
+            .filter(|input| input.has_materialized_input());
+        // Keep only replayed logical cursors for read-error accounting. Holding
+        // ordinary native read ends would hide a downstream child's closure.
     }
     for (index, stage) in stages.iter_mut().enumerate().rev() {
         if let Some(plan) = stage.plan.take() {
+            parser.libdata_mut().exec_count += 1;
+            crate::trace::trace_if_enabled_with_args(parser, L!(""), processes[index].argv());
             let child = group
                 .as_mut()
                 .unwrap()
@@ -290,38 +366,73 @@ fn execute_pipeline(
             continue;
         }
         let io = stage.io.take().unwrap();
-        let status = run_internal(parser, process, job, &io)?;
+        match run_internal(parser, process, job, &io) {
+            Ok(status) => process.status.set(status),
+            Err(error) => record_stage_io_error(process, error),
+        }
         drop(io);
-        process.status.set(status);
-        process.completed.store(true);
         match stage.deferred.take() {
-            Some(DeferredOutput::Internal { buffer, input }) => {
-                input.complete_buffered_input(buffer.take_buffer())?;
+            Some(DeferredOutput::Internal {
+                buffer,
+                input,
+                output,
+            }) => {
+                if let Err(error) = output.finish_buffered_output() {
+                    record_stage_io_error(process, error);
+                }
+                record_deferred_read_limit(parser, &buffer);
+                if let Err(error) = input.complete_buffered_input(buffer.take_buffer()) {
+                    record_stage_io_error(process, error);
+                }
             }
-            Some(DeferredOutput::Native { buffer, target }) => {
-                stage.writer = Some(NativeDeferredWriter::start(buffer.take_buffer(), target)?);
+            Some(DeferredOutput::Native {
+                buffer,
+                target,
+                output,
+            }) => {
+                if let Err(error) = output.finish_buffered_output() {
+                    record_stage_io_error(process, error);
+                }
+                record_deferred_read_limit(parser, &buffer);
+                match NativeDeferredWriter::start(buffer.take_buffer(), target) {
+                    Ok(writer) => stage.writer = Some(writer),
+                    Err(error) => record_stage_io_error(process, error),
+                }
             }
             None => {}
         }
+        if let Some(output) = stage.forwarded_output.take() {
+            if let Err(error) = output.finish_forwarding() {
+                record_stage_io_error(process, error);
+            }
+        }
+        process.completed.store(true);
     }
     for (stage, process) in stages.iter_mut().zip(processes) {
         if let Some(writer) = stage.writer.take() {
-            if writer.finish().is_err()
-                && (process.status.get().is_empty() || process.status.get().is_success())
-            {
-                process
-                    .status
-                    .set(ProcStatus::from_exit_code(STATUS_CMD_ERROR));
+            if let Err(error) = writer.finish() {
+                record_stage_io_error(process, error);
             }
         }
         if let Some(child) = stage.child.take() {
-            let raw = child.wait(None)?;
-            if raw > 255 {
-                diagnostic(format_args!(
-                    "native process exited with status 0x{raw:08X}"
-                ));
+            match child.wait(None) {
+                Ok(raw) => {
+                    if raw > 255 {
+                        diagnostic(format_args!(
+                            "native process exited with status 0x{raw:08X}"
+                        ));
+                    }
+                    process.status.set(ProcStatus::native(raw));
+                }
+                Err(error) => record_stage_io_error(process, error),
             }
-            process.status.set(ProcStatus::native(raw));
+            if let Some(error) = stage
+                .native_input
+                .take()
+                .and_then(|input| input.input_error())
+            {
+                record_stage_io_error(process, io::Error::new(error.kind(), error));
+            }
             process.completed.store(true);
         }
     }
@@ -333,26 +444,25 @@ fn execute_pipeline(
 
 pub fn exec_job(parser: &mut Parser, job: &Job, block_io: IoChain) -> bool {
     let unsupported = job.is_initially_background()
-        || job.processes().iter().any(|process| {
-            matches!(
-                process.typ,
-                ProcessType::Exec | ProcessType::Function { .. }
-            )
-        });
+        || job
+            .processes()
+            .iter()
+            .any(|process| matches!(process.typ, ProcessType::Exec));
     let result = if unsupported {
         Err(NativeExecutionFailure::Invalid(io::Error::new(
             io::ErrorKind::Unsupported,
-            "background jobs, exec and shell functions are unavailable",
+            "background jobs and exec are unavailable",
         )))
     } else if job.processes().iter().any(|process| {
-        process
-            .argv()
-            .iter()
-            .any(|argument| argument.contains('\0'))
+        matches!(process.typ, ProcessType::External | ProcessType::Exec)
+            && process
+                .argv()
+                .iter()
+                .any(|argument| argument.contains('\0'))
     }) {
         Err(NativeExecutionFailure::Invalid(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "NUL in command arguments is unsupported",
+            "NUL in native child arguments is unsupported",
         )))
     } else {
         execute_pipeline(parser, job, &block_io)
@@ -371,24 +481,95 @@ pub fn exec_job(parser: &mut Parser, job: &Job, block_io: IoChain) -> bool {
     true
 }
 
-/// Command substitution is rejected by the evaluator before expansion. Keep an explicit
-/// error at this shared expansion entry point as well; never evaluate the command.
 pub fn exec_subshell_for_expand(
-    _cmd: &wstr,
-    _parser: &mut Parser,
-    _job_group: Option<&JobGroupRef>,
-    _outputs: &mut Vec<WString>,
+    cmd: &wstr,
+    parser: &mut Parser,
+    job_group: Option<&JobGroupRef>,
+    outputs: &mut Vec<WString>,
 ) -> Result<(), ErrorCode> {
-    diagnostic("command substitution is unsupported on native Windows");
-    Err(STATUS_INVALID_ARGS)
+    let (result, break_expand) =
+        exec_subshell_internal(cmd, parser, job_group, Some(outputs), true, true);
+    if break_expand { result } else { Ok(()) }
 }
 
 pub fn exec_subshell(
-    _cmd: &wstr,
-    _parser: &mut Parser,
-    _outputs: Option<&mut Vec<WString>>,
-    _apply_exit_status: bool,
+    cmd: &wstr,
+    parser: &mut Parser,
+    outputs: Option<&mut Vec<WString>>,
+    apply_exit_status: bool,
 ) -> Result<(), ErrorCode> {
-    diagnostic("subshell execution is unsupported on native Windows");
-    Err(STATUS_CMD_ERROR)
+    exec_subshell_internal(cmd, parser, None, outputs, apply_exit_status, false).0
+}
+
+fn exec_subshell_internal(
+    cmd: &wstr,
+    parser: &mut Parser,
+    job_group: Option<&JobGroupRef>,
+    outputs: Option<&mut Vec<WString>>,
+    apply_exit_status: bool,
+    is_subcmd: bool,
+) -> (Result<(), ErrorCode>, bool) {
+    let _scope = parser.push_scope(move |scope| {
+        scope.is_subshell = true;
+        scope.read_limit = if is_subcmd {
+            READ_BYTE_LIMIT.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+    });
+    let previous_statuses = parser.last_statuses();
+    let limit_generation = parser.libdata().native_capture_limit_generation;
+    let parser = &mut **ScopeGuard::new(parser, |parser| {
+        if !apply_exit_status {
+            parser.set_last_statuses(previous_statuses);
+        }
+    });
+    let split_output = parser.vars().get_unless_empty(L!("IFS")).is_some();
+    let capture = match crate::threads::NativeRuntime::new()
+        .and_then(|runtime| crate::io::NativeCapture::new(parser.scope().read_limit, runtime))
+    {
+        Ok(capture) => capture,
+        Err(error) => {
+            diagnostic(format_args!(
+                "cannot create command-substitution capture: {error}"
+            ));
+            return (Err(STATUS_CMD_ERROR), true);
+        }
+    };
+    let io = capture.io_chain();
+    let result = parser.eval_with(cmd, &io, job_group, BlockType::Subst);
+    let captured = match capture.finish() {
+        Ok(captured) => captured,
+        Err(error) => {
+            diagnostic(format_args!(
+                "cannot finish command-substitution capture: {error}"
+            ));
+            return (Err(STATUS_CMD_ERROR), true);
+        }
+    };
+    if captured.buffer.discarded()
+        || parser.libdata().native_capture_limit_generation != limit_generation
+    {
+        return (Err(STATUS_READ_TOO_MUCH), true);
+    }
+    if let Some(error) = captured.error {
+        diagnostic(format_args!(
+            "cannot read command-substitution output: {error}"
+        ));
+        return (Err(STATUS_CMD_ERROR), true);
+    }
+    if captured.interrupted {
+        return (Err(STATUS_CMD_ERROR), true);
+    }
+    let status = match result.status.status_value() {
+        0 => Ok(()),
+        code => Err(code),
+    };
+    if result.break_expand {
+        return (status, true);
+    }
+    if let Some(outputs) = outputs {
+        populate_subshell_output(outputs, &captured.buffer, split_output);
+    }
+    (status, false)
 }

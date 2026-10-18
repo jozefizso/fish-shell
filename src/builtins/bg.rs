@@ -54,8 +54,7 @@ pub fn bg(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> B
     };
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     if opts.optind == args.len() {

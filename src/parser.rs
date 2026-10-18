@@ -1,5 +1,6 @@
 // The fish parser. Contains functions for parsing and evaluating code.
 
+use crate::function;
 use crate::{
     ast::{self, Node},
     builtins::STATUS_ILLEGAL_CMD,
@@ -29,7 +30,6 @@ use crate::{
 #[cfg(unix)]
 use crate::{
     fds::{BEST_O_SEARCH, open_dir},
-    function,
     wutil::perror_nix,
 };
 use assert_matches::assert_matches;
@@ -40,8 +40,6 @@ use fish_util::get_time;
 use fish_widestring::{WExt as _, wcs2bytes};
 use libc::c_int;
 use std::ffi::OsStr;
-use std::fs::File;
-use std::io::Write as _;
 use std::num::NonZeroU32;
 use std::ops::DerefMut;
 #[cfg(unix)]
@@ -298,6 +296,12 @@ pub struct LibraryData {
 
     /// A counter incremented every time a command produces a $status.
     pub status_count: u64,
+
+    /// Native deferred-buffer faults observed during evaluation. A substitution
+    /// snapshots this generation instead of treating a child's exit 122 as an
+    /// expansion-breaking retention failure.
+    #[cfg(windows)]
+    pub(crate) native_capture_limit_generation: u64,
 
     /// Last reader run count.
     pub last_exec_run_counter: u64,
@@ -739,6 +743,7 @@ impl Parser {
         self.pop_block(scope_block);
 
         job_reap(self, false, Some(block_io)); // reap again
+        event::fire_delayed(self);
 
         let sig = signal_check_cancel();
         if sig != 0 {
@@ -976,7 +981,6 @@ impl Parser {
         vals: Vec<WString>,
     ) -> EnvStackSetResult {
         let res = self.set_var(key, mode, vals);
-        #[cfg(unix)]
         if res == EnvStackSetResult::Ok {
             event::fire(self, Event::variable_set(key.to_owned()));
         }
@@ -1078,28 +1082,20 @@ impl Parser {
                     _ => None,
                 });
         }
+        let frame = usize::try_from(level).ok()?.checked_sub(1)?;
 
         self.blocks_iter_rev()
             // Historical: If we want the topmost function, but we are really in a file sourced by a
             // function, don't consider ourselves to be in a function.
             .take_while(|b| !(level == 1 && b.typ() == BlockType::Source))
-            .map(|b| (b, 0))
-            .map(|(b, level)| {
-                if b.is_function_call() {
-                    (b, level + 1)
-                } else {
-                    (b, level)
-                }
-            })
-            .skip_while(|(_, l)| *l != level)
-            .inspect(|(b, _)| debug_assert!(b.is_function_call()))
-            .map(|(b, _)| {
+            .filter(|b| b.is_function_call())
+            .nth(frame)
+            .map(|b| {
                 let Some(BlockData::Function { name, .. }) = b.data() else {
                     unreachable!()
                 };
                 name.clone()
             })
-            .next()
     }
 
     /// Promotes a job to the front of the list.
@@ -1170,9 +1166,17 @@ impl Parser {
                 return;
             }
         };
-        let profile_items = &mut self.profile_items;
-        print_profile(&*profile_items, &mut f);
-        profile_items.clear();
+        if let Err(err) = self.write_profiling(&mut f) {
+            flog!(warning, "Could not write profiling information: ", err);
+        }
+    }
+
+    /// Write the shared profile format, retaining data if the sink fails.
+    pub fn write_profiling(&mut self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        print_profile(&self.profile_items, out)?;
+        out.flush()?;
+        self.profile_items.clear();
+        Ok(())
     }
 
     pub fn get_backtrace(&self, src: &wstr, errors: &ParseErrorList) -> WString {
@@ -1225,7 +1229,6 @@ impl Parser {
     pub fn current_filename(&self) -> Option<FilenameRef> {
         self.blocks_iter_rev()
             .find_map(|b| match b.data() {
-                #[cfg(unix)]
                 Some(BlockData::Function { name, .. }) => {
                     function::get_props(name).and_then(|props| props.definition_file.clone())
                 }
@@ -1336,15 +1339,15 @@ fn user_presentable_path(path: &wstr, vars: &dyn Environment) -> WString {
 }
 
 /// Print profiling information to the specified stream.
-fn print_profile(items: &[ProfileItem], out: &mut File) {
+fn print_profile(items: &[ProfileItem], out: &mut impl std::io::Write) -> std::io::Result<()> {
     let col_width = 10;
-    _ = out.write_all(
+    out.write_all(
         format!(
             "{:^col_width$} {:^col_width$} Command\n",
             "Time (μs)", "Sum (μs)",
         )
         .as_bytes(),
-    );
+    )?;
     for (idx, item) in items.iter().enumerate() {
         if item.skipped || item.cmd.is_empty() {
             continue;
@@ -1372,21 +1375,22 @@ fn print_profile(items: &[ProfileItem], out: &mut File) {
         }
 
         let level = item.level.unsigned_abs().saturating_add(1);
-        _ = out.write_all(
+        out.write_all(
             format!(
                 "{:>col_width$} {:>col_width$} {:->level$} ",
                 self_time, total_time, '>'
             )
             .as_bytes(),
-        );
+        )?;
         let indentation_level = col_width + 1 + col_width + 1 + level + 1;
         let indented_cmd = item.cmd.replace(
             L!("\n"),
             &(WString::from("\n") + &wstr::repeat(L!(" "), indentation_level)[..]),
         );
-        _ = out.write_all(&wcs2bytes(&indented_cmd));
-        _ = out.write_all(b"\n");
+        out.write_all(&wcs2bytes(&indented_cmd))?;
+        out.write_all(b"\n")?;
     }
+    Ok(())
 }
 
 /// Append stack trace info for the block `b` to `trace`.

@@ -3,12 +3,13 @@ use crate::{
     abbrs::{self, Abbreviation, Position},
     builtins::Error,
     common::valid_func_name,
-    env::{EnvMode, EnvStackSetResult},
+    env::EnvStackSetResult,
     err_fmt, err_str,
     highlight::highlight_and_colorize,
-    parser::ParserEnvSetMode,
-    re::{regex_make_anchored, to_boxed_chars},
+    re::regex_make_anchored,
 };
+#[cfg(unix)]
+use crate::{env::EnvMode, parser::ParserEnvSetMode};
 use fish_common::{EscapeStringStyle, escape, escape_string, help_section};
 use fish_widestring::bytes2wcstring;
 use pcre2::utf32::{Regex, RegexBuilder};
@@ -341,7 +342,7 @@ fn abbr_add(opts: Options, streams: &mut IoStreams) -> BuiltinResult {
         let mut builder = RegexBuilder::new();
         builder.caseless(false).block_utf_pattern_directive(true);
 
-        let result = builder.build(to_boxed_chars(&regex_pattern));
+        let result = builder.build(regex_pattern.as_char_slice());
 
         if let Err(error) = result {
             let mut err = err_fmt!(Error::REGEX_COMPILE, error.error_message());
@@ -359,7 +360,7 @@ fn abbr_add(opts: Options, streams: &mut IoStreams) -> BuiltinResult {
         let anchored = regex_make_anchored(&regex_pattern);
         let re = Box::new(
             builder
-                .build(to_boxed_chars(&anchored))
+                .build(anchored.as_char_slice())
                 .expect("Anchored compilation should have succeeded"),
         );
 
@@ -445,6 +446,7 @@ fn abbr_erase(opts: Options, parser: &mut Parser) -> BuiltinResult {
                 result = EnvStackSetResult::NotFound.into();
             }
             // Erase the old uvar - this makes `abbr -e` work.
+            #[cfg(unix)]
             if opts.commands.is_empty() {
                 let esc_src = escape(arg);
                 if !esc_src.is_empty() {
@@ -593,8 +595,7 @@ pub fn abbr(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
                 .finish(streams);
             }
             'h' => {
-                builtin_print_help(parser, streams, cmd);
-                return Ok(SUCCESS);
+                return builtin_print_help(parser, streams, cmd);
             }
             ':' => {
                 builtin_missing_argument(parser, streams, cmd, None, argv[w.wopt_index - 1], true);

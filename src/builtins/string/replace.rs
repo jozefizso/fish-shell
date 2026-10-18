@@ -141,8 +141,9 @@ impl<'args> StringSubCommand<'args> for Replace<'args> {
 #[allow(clippy::large_enum_variant)]
 enum StringReplacer<'args, 'opts> {
     Regex {
-        replacement: WString,
+        replacement: Cow<'args, wstr>,
         regex: Regex,
+        literal_replacement: bool,
         opts: &'opts Replace<'args>,
     },
     Literal {
@@ -198,19 +199,33 @@ impl<'args, 'opts> StringReplacer<'args, 'opts> {
                     })?
                 };
                 Self::Regex {
-                    replacement,
+                    replacement: Cow::Owned(replacement),
                     regex,
+                    literal_replacement: false,
                     opts,
                 }
             }
-            (false, true) => Self::Literal {
-                // previously we used wcsncasecmp but there is no equivalent function in Rust widestring
-                // this should likely be handled by a using the `literal` option on our regex
-                pattern: Cow::Owned(pattern.to_lowercase()),
-                replacement: Cow::Owned(replacement.to_owned()),
-                opts,
-            },
-            (false, false) => Self::Literal {
+            (false, true) if !pattern.is_empty() => {
+                // Match case-insensitively without lowercasing the subject: Unicode
+                // lowercase mappings can change its length and corrupt capture offsets.
+                let escaped =
+                    fish_common::escape_string(pattern, fish_common::EscapeStringStyle::Regex);
+                let regex = RegexBuilder::new()
+                    .caseless(true)
+                    .utf(true)
+                    .build(escaped.as_char_slice())
+                    .map_err(|error| RegexError::Compile {
+                        pattern: pattern.to_owned(),
+                        error,
+                    })?;
+                Self::Regex {
+                    replacement: Cow::Borrowed(replacement),
+                    regex,
+                    literal_replacement: true,
+                    opts,
+                }
+            }
+            (false, _) => Self::Literal {
                 pattern: Cow::Borrowed(pattern),
                 replacement: Cow::Borrowed(replacement),
                 opts,
@@ -225,8 +240,32 @@ impl<'args, 'opts> StringReplacer<'args, 'opts> {
             StringReplacer::Regex {
                 replacement,
                 regex,
+                literal_replacement,
                 opts,
             } => {
+                if *literal_replacement {
+                    let mut matches = regex.find_iter(arg.as_char_slice());
+                    let Some(mut matched) = matches.next().transpose()? else {
+                        drop(matches);
+                        return Ok((false, arg));
+                    };
+                    let mut result = WString::with_capacity(arg.len());
+                    let mut offset = 0;
+                    loop {
+                        result.push_utfstr(&arg[offset..matched.start()]);
+                        result.push_utfstr(replacement);
+                        offset = matched.end();
+                        if !opts.all {
+                            break;
+                        }
+                        let Some(next) = matches.next().transpose()? else {
+                            break;
+                        };
+                        matched = next;
+                    }
+                    result.push_utfstr(&arg[offset..]);
+                    return Ok((true, Cow::Owned(result)));
+                }
                 let res = if opts.all {
                     regex.replace_all(arg.as_char_slice(), replacement.as_char_slice(), true)
                 } else {
@@ -251,15 +290,11 @@ impl<'args, 'opts> StringReplacer<'args, 'opts> {
                 // a premature optimization would be to alloc larger if we have replacement.len() > pattern.len()
                 let mut result = WString::with_capacity(arg.len());
 
-                let subject = if opts.ignore_case {
-                    arg.to_lowercase()
-                } else {
-                    arg.as_ref().to_owned()
-                };
+                let subject = arg.as_ref();
 
                 let mut offset = 0;
                 while let Some(idx) = subject[offset..].find(pattern.as_char_slice()) {
-                    result.push_utfstr(&subject[offset..offset + idx]);
+                    result.push_utfstr(&arg[offset..offset + idx]);
                     result.push_utfstr(&replacement);
                     offset += idx + pattern.len();
                     if !opts.all {
@@ -277,7 +312,7 @@ impl<'args, 'opts> StringReplacer<'args, 'opts> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use crate::builtins::{STATUS_CMD_ERROR, STATUS_CMD_OK, STATUS_INVALID_ARGS};
     use crate::tests::prelude::*;
@@ -304,6 +339,9 @@ mod tests {
         validate!(["string", "replace", "-i", "z", "X", "_Z_"], STATUS_CMD_OK, "_X_\n");
         validate!(["string", "replace", "-a", "a", "A", "aaa"], STATUS_CMD_OK, "AAA\n");
         validate!(["string", "replace", "-i", "a", "z", "AAA"], STATUS_CMD_OK, "zAA\n");
+        validate!(["string", "replace", "-ai", "a", "X", "aBA"], STATUS_CMD_OK, "XBX\n");
+        validate!(["string", "replace", "-i", "a", "z", "İA"], STATUS_CMD_OK, "İz\n");
+        validate!(["string", "replace", "-ai", "é", "$1", "É雪é"], STATUS_CMD_OK, "$1雪$1\n");
         validate!(["string", "replace", "-q", "x", ">x<", "x"], STATUS_CMD_OK, "");
         validate!(["string", "replace", "-a", "x", "", "xxx"], STATUS_CMD_OK, "\n");
         validate!(["string", "replace", "-a", "***", "_", "*****"], STATUS_CMD_OK, "_**\n");

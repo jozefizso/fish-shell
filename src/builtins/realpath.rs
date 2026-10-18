@@ -61,12 +61,11 @@ pub fn realpath(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]
     let (opts, optind) = parse_options(args, parser, streams)?;
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return if cfg!(windows) { Err(STATUS_CMD_ERROR) } else { Ok(SUCCESS) };
+        return builtin_print_help(parser, streams, cmd);
     }
 
     if optind == args.len() {
-        builtin_print_help(parser, streams, cmd);
+        let _ = builtin_print_help(parser, streams, cmd);
         return Err(STATUS_INVALID_ARGS);
     }
 

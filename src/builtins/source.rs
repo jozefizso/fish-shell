@@ -1,15 +1,21 @@
 use super::prelude::*;
+#[cfg(unix)]
 use crate::{
     builtins::Error, err_fmt, err_raw, err_str, fds::wopen_cloexec, nix::isatty, parser::Block,
     reader::reader_read,
 };
+#[cfg(unix)]
 use fish_common::{FilenameRef, escape};
+#[cfg(unix)]
 use fish_widestring::str2wcstring;
+#[cfg(unix)]
 use nix::{fcntl::OFlag, sys::stat::Mode};
+#[cfg(unix)]
 use std::os::fd::AsRawFd as _;
 
 /// The  source builtin, sometimes called `.`. Evaluates the contents of a file in the current
 /// context.
+#[cfg(unix)]
 pub fn source(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> BuiltinResult {
     let argc = args.len();
 
@@ -20,8 +26,7 @@ pub fn source(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
     };
 
     if opts.print_help {
-        builtin_print_help(parser, streams, cmd);
-        return Ok(SUCCESS);
+        return builtin_print_help(parser, streams, cmd);
     }
 
     // If we open a file, this ensures it stays open until the end of scope.
@@ -100,4 +105,75 @@ pub fn source(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             Err(err)
         }
     }
+}
+
+#[cfg(windows)]
+pub fn source(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) -> BuiltinResult {
+    use crate::{
+        builtins::Error, err_fmt, err_str, fds::BorrowedFdFile, parser::Block, reader::reader_read,
+    };
+    use fish_common::FilenameRef;
+    use std::sync::Arc;
+    let opts = HelpOnlyCmdOpts::parse(args, parser, streams)?;
+    let cmd = args[0];
+    if opts.print_help {
+        return builtin_print_help(parser, streams, cmd);
+    }
+    let filename = args.get(opts.optind).copied();
+    let mut input = if filename.is_none() || filename == Some(L!("-")) {
+        let Some(input) = streams.stdin_file.as_ref() else {
+            err_str!(Error::STDIN_CLOSED).cmd(cmd).finish(streams);
+            return Err(STATUS_CMD_ERROR);
+        };
+        if filename.is_none() && input.is_console() {
+            err_str!("missing filename argument or input redirection")
+                .cmd(cmd)
+                .finish(streams);
+            return Err(STATUS_CMD_ERROR);
+        }
+        input.clone()
+    } else {
+        let filename = filename.unwrap();
+        let path = match crate::path::native_resolve_path_for_environment(filename, parser.vars()) {
+            Ok(path) => path,
+            Err(error) => {
+                err_fmt!(
+                    "Error encountered while sourcing file '%s': %s",
+                    filename,
+                    error.to_string()
+                )
+                .cmd(cmd)
+                .finish(streams);
+                return Err(STATUS_CMD_ERROR);
+            }
+        };
+        match std::fs::File::open(path) {
+            Ok(file) => BorrowedFdFile::from_file(Arc::new(file)),
+            Err(error) => {
+                err_fmt!(
+                    "Error encountered while sourcing file '%s': %s",
+                    filename,
+                    error.to_string()
+                )
+                .cmd(cmd)
+                .finish(streams);
+                return Err(STATUS_CMD_ERROR);
+            }
+        }
+    };
+    let filename = FilenameRef::new(filename.unwrap_or(L!("-")).to_owned());
+    let block = parser.push_block(Block::source_block(filename.clone()));
+    let _filename = parser.current_filename.scoped_replace(Some(filename));
+    let remaining = opts.optind + usize::from(args.len() > opts.optind);
+    parser.vars().set_argv(
+        args[remaining..]
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .collect(),
+        parser.is_repainting(),
+    );
+    let result = reader_read(parser, &mut input, streams.io_chain);
+    parser.pop_block(block);
+    result?;
+    BuiltinResult::from_dynamic(parser.last_status())
 }

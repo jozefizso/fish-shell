@@ -23,14 +23,13 @@ use crate::fork_exec::{
         signal_safe_report_exec_error,
     },
 };
-use crate::function::FunctionProperties;
 use crate::io::{
     BufferedOutputStream, FdOutputStream, IoBufferfill, IoChain, IoClose, IoMode, IoPipe,
-    IoStreams, OutputStream, SeparatedBuffer, StringOutputStream,
+    IoStreams, OutputStream, StringOutputStream,
 };
 use crate::nix::isatty;
 use crate::null_terminated_array::OwningNullTerminatedArray;
-use crate::parser::{Block, BlockId, BlockType, EvalRes, Parser, ParserEnvSetMode};
+use crate::parser::{Block, BlockType, EvalRes, Parser, ParserEnvSetMode};
 use crate::prelude::*;
 use crate::proc::{
     InternalProc, Job, JobGroupRef, Pid, ProcStatus, Process, ProcessType, hup_jobs,
@@ -44,7 +43,7 @@ use crate::trace::trace_if_enabled_with_args;
 use crate::tty_handoff::TtyHandoff;
 use crate::wutil::{fish_wcstol, perror_nix};
 use fish_common::{ScopeGuard, exit_without_destructors, truncate_at_nul, write_loop};
-use fish_widestring::{ToWString as _, bytes2wcstring, wcs2bytes, wcs2zstring};
+use fish_widestring::{ToWString as _, wcs2bytes, wcs2zstring};
 use libc::{
     EXIT_FAILURE, EXIT_SUCCESS, SIGINT, SIGQUIT, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO,
 };
@@ -66,6 +65,12 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+};
+
+#[path = "exec/shared.rs"]
+mod shared;
+use shared::{
+    function_prepare_environment, function_restore_environment, populate_subshell_output,
 };
 
 /// The singleton shared exec thread pool.
@@ -939,67 +944,6 @@ fn exec_external_command(
     })
 }
 
-// Given that we are about to execute a function, push a function block and set up the
-// variable environment.
-fn function_prepare_environment(
-    parser: &mut Parser,
-    mut argv: Vec<WString>,
-    props: &FunctionProperties,
-) -> BlockId {
-    // Extract the function name and remaining arguments.
-    let mut func_name = WString::new();
-    if !argv.is_empty() {
-        // Extract and remove the function name from argv.
-        func_name = argv.remove(0);
-    }
-
-    let fb = parser.push_block(Block::function_block(
-        func_name,
-        argv.clone(),
-        props.shadow_scope,
-    ));
-    let vars = parser.vars();
-
-    // Setup the environment for the function. There are three components of the environment:
-    // 1. named arguments
-    // 2. inherited variables
-    // 3. argv
-
-    let mode = parser.convert_env_set_mode(ParserEnvSetMode::user(EnvMode::LOCAL));
-
-    let mut overwrite_argv = false;
-    for (idx, named_arg) in props.named_arguments.iter().enumerate() {
-        if named_arg == L!("argv") {
-            overwrite_argv = true;
-        }
-        if idx < argv.len() {
-            vars.set_one(named_arg, mode, argv[idx].clone());
-        } else {
-            vars.set_empty(named_arg, mode);
-        }
-    }
-
-    for (key, value) in &*props.inherit_vars {
-        if key == L!("argv") {
-            overwrite_argv = true;
-        }
-        vars.set(key, mode, value.clone());
-    }
-
-    if !overwrite_argv {
-        vars.set_argv(argv, mode.is_repainting);
-    }
-    fb
-}
-
-// Given that we are done executing a function, restore the environment.
-fn function_restore_environment(parser: &mut Parser, block: BlockId) {
-    parser.pop_block(block);
-
-    // If we returned due to a return statement, then stop returning now.
-    parser.libdata_mut().returning = false;
-}
-
 // The "performer" function of a block or function process.
 // This accepts a place to execute as `parser` and then executes the result, returning a status.
 // This is factored out in this funny way in preparation for concurrent execution.
@@ -1419,44 +1363,6 @@ fn allow_exec_with_background_jobs(parser: &mut Parser) -> bool {
     } else {
         hup_jobs(parser.jobs());
         true
-    }
-}
-
-/// Populate `lst` with the output of `buffer`, perhaps splitting lines according to `split`.
-fn populate_subshell_output(lst: &mut Vec<WString>, buffer: &SeparatedBuffer, split: bool) {
-    // Walk over all the elements.
-    for elem in buffer.elements() {
-        let data = &elem.contents;
-        if elem.is_explicitly_separated() {
-            // Just append this one.
-            lst.push(bytes2wcstring(data));
-            continue;
-        }
-
-        // Not explicitly separated. We have to split it explicitly.
-        assert!(
-            !elem.is_explicitly_separated(),
-            "should not be explicitly separated"
-        );
-        if split {
-            let mut cursor = 0;
-            while cursor < data.len() {
-                // Look for the next separator.
-                let stop = data[cursor..].iter().position(|c| *c == b'\n');
-                let hit_separator = stop.is_some();
-                // If it's not found, just use the end.
-                let stop = stop.map_or(data.len(), |rel| cursor + rel);
-                // Stop now points at the first character we do not want to copy.
-                lst.push(bytes2wcstring(&data[cursor..stop]));
-
-                // If we hit a separator, skip over it; otherwise we're at the end.
-                cursor = stop + if hit_separator { 1 } else { 0 };
-            }
-        } else {
-            // We're not splitting output, but we still want to trim off a trailing newline.
-            let trailing_newline = if data.last() == Some(&b'\n') { 1 } else { 0 };
-            lst.push(bytes2wcstring(&data[..data.len() - trailing_newline]));
-        }
     }
 }
 

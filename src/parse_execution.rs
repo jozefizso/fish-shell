@@ -49,9 +49,9 @@ use fish_widestring::WExt as _;
 use libc::{EXIT_SUCCESS, c_int};
 const STDOUT_FILENO: i32 = 1;
 const STDERR_FILENO: i32 = 2;
+use crate::function;
 #[cfg(unix)]
 use crate::{
-    function,
     proc::{JobControl, get_job_control_mode},
     reader::fish_is_unwinding_for_exit,
     timer::push_timer,
@@ -597,7 +597,6 @@ impl ExecutionContext {
         }
     }
 
-    #[cfg(unix)]
     fn resolve_function(cmd: &wstr, parser: &mut Parser) -> Option<ProcessType> {
         if !valid_func_name(cmd) {
             return None;
@@ -619,7 +618,6 @@ impl ExecutionContext {
             StatementDecoration::Command => ProcessType::External,
             StatementDecoration::Builtin => ProcessType::Builtin,
             StatementDecoration::None => {
-                #[cfg(unix)]
                 if function::exists(cmd, ctx.parser()) {
                     return ProcessType::Function { props: None };
                 }
@@ -845,17 +843,12 @@ impl ExecutionContext {
             cmd_args = vec![L!("cd").to_owned(), L!("--").to_owned(), cmd];
 
             // If we have defined a wrapper around cd, use it, otherwise use the cd builtin.
-            #[cfg(unix)]
             {
                 process_type = if function::exists(L!("cd"), ctx.parser()) {
                     ProcessType::Function { props: None }
                 } else {
                     ProcessType::Builtin
                 };
-            }
-            #[cfg(windows)]
-            {
-                process_type = ProcessType::Builtin;
             }
         } else {
             // Not implicit cd.
@@ -885,7 +878,6 @@ impl ExecutionContext {
         }
 
         // Populate the process.
-        #[cfg(unix)]
         if let ProcessType::Function { props } = &mut process_type {
             let Some(ProcessType::Function {
                 props: resolved_props,
@@ -947,16 +939,7 @@ impl ExecutionContext {
             BlockStatementHeader::While(wh) => {
                 self.run_while_statement(ctx, wh, contents, associated_block)
             }
-            #[cfg(unix)]
             BlockStatementHeader::Function(fh) => self.run_function_statement(ctx, statement, fh),
-            #[cfg(windows)]
-            BlockStatementHeader::Function(_) => report_error!(
-                self,
-                ctx,
-                STATUS_INVALID_ARGS,
-                statement,
-                "Function definitions are unsupported in native Windows batch mode"
-            ),
             BlockStatementHeader::Begin(_bh) => self.run_begin_statement(ctx, contents),
         }
     }
@@ -1027,7 +1010,6 @@ impl ExecutionContext {
         trace_if_enabled_with_args(ctx.parser(), L!("for"), &arguments);
 
         // We fire the same event over and over again, just construct it once.
-        #[cfg(unix)]
         let evt = Event::variable_set(for_var_name.clone());
 
         // Now drive the for loop.
@@ -1048,7 +1030,6 @@ impl ExecutionContext {
                 EnvStackSetResult::Ok,
                 "for loop variable should have been successfully set"
             );
-            #[cfg(unix)]
             event::fire(ctx.parser(), evt.clone());
 
             ctx.parser().libdata_mut().loop_status = LoopStatus::Normals;
@@ -1357,7 +1338,6 @@ impl ExecutionContext {
     }
 
     // Define a function.
-    #[cfg(unix)]
     fn run_function_statement(
         &mut self,
         ctx: &mut OperationContext<'_>,
@@ -1618,6 +1598,7 @@ impl ExecutionContext {
         job_node: &ast::JobPipeline,
         associated_block: Option<BlockId>,
     ) -> EndExecutionReason {
+        event::fire_delayed(ctx.parser());
         if let Some(ret) = self.check_end_execution(ctx) {
             return ret;
         }
@@ -2021,10 +2002,33 @@ impl ExecutionContext {
     }
 
     #[cfg(windows)]
-    fn setup_group(&self, _ctx: &mut OperationContext<'_>, job: &mut Job) {
-        job.group = Some(JobGroup::create(job.command().to_owned(), false));
+    fn setup_group(&self, ctx: &mut OperationContext<'_>, job: &mut Job) {
+        if let Some(group) = ctx.job_group.as_ref() {
+            job.group = Some(group.clone());
+        } else {
+            job.group = Some(JobGroup::create(job.command().to_owned(), false));
+            job.flags_mut().is_group_root = true;
+        }
         job.group().is_foreground.store(true);
-        job.flags_mut().is_group_root = true;
+    }
+
+    #[cfg(windows)]
+    fn native_unavailable_function_option(&self, header: &ast::FunctionHeader) -> bool {
+        let mut nodes = Self::get_argument_nodes(&header.args);
+        nodes.insert(0, &header.first_arg);
+        let literals: Vec<_> = nodes
+            .iter()
+            .map(|argument| {
+                let source = self.node_source(*argument);
+                fish_common::unescape_string(source, fish_common::UnescapeStringStyle::default())
+                    .unwrap_or_else(|| source.to_owned())
+            })
+            .collect();
+        let mut argv: Vec<_> = literals
+            .iter()
+            .map(|argument| argument.as_utfstr())
+            .collect();
+        builtins::function::has_unavailable_event_option(&mut argv)
     }
 
     /// Validate the entire affected job before assignment or argument expansion. In particular,
@@ -2040,23 +2044,12 @@ impl ExecutionContext {
                 ast::Kind::JobPipeline(pipeline) if pipeline.bg.is_some() => {
                     return Some((node, "background execution"));
                 }
-                ast::Kind::JobPipeline(pipeline) if !pipeline.continuation.is_empty() => {
-                    let is_block = |mut statement: &ast::Statement| {
-                        while let ast::Statement::Not(not) = statement {
-                            statement = &not.contents;
-                        }
-                        !matches!(statement, ast::Statement::Decorated(_))
-                    };
-                    if is_block(&pipeline.statement)
-                        || pipeline.continuation.iter().any(|next| is_block(&next.statement))
-                    {
-                        return Some((node, "function/block pipelines"));
-                    }
-                }
                 ast::Kind::TimeDecorator(_) => return Some((node, "time")),
-                ast::Kind::WhileHeader(_) => return Some((node, "while")),
-                ast::Kind::FunctionHeader(_) => return Some((node, "function definitions")),
-                ast::Kind::SwitchStatement(_) => return Some((node, "switch")),
+                ast::Kind::FunctionHeader(header)
+                    if self.native_unavailable_function_option(header) =>
+                {
+                    return Some((node, "signal and process/job event handlers"));
+                }
                 ast::Kind::DecoratedStatement(statement) => {
                     if statement.decoration() == StatementDecoration::Exec {
                         return Some((node, "exec (process-image replacement)"));
@@ -2070,23 +2063,6 @@ impl ExecutionContext {
                     }
                 }
                 _ => {}
-            }
-            let text = match node.kind() {
-                ast::Kind::Argument(_) | ast::Kind::VariableAssignment(_) => {
-                    Some(self.node_source(node))
-                }
-                ast::Kind::Token(token) if token.token_type() == ParseTokenType::String => {
-                    Some(self.node_source(node))
-                }
-                _ => None,
-            };
-            if let Some(text) = text {
-                if !matches!(
-                    locate_cmdsubst_range(text, &mut 0, false, None, None),
-                    Ok(None)
-                ) {
-                    return Some((node, "command substitution"));
-                }
             }
         }
         None

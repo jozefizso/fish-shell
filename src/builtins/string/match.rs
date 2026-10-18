@@ -4,8 +4,7 @@ use std::num::NonZeroUsize;
 
 use super::*;
 use crate::{
-    env::EnvVar, flog::flog, parse_util::unescape_wildcards, parser::ParserEnvSetMode,
-    wildcard::wildcard_match,
+    env::EnvVar, parse_util::unescape_wildcards, parser::ParserEnvSetMode, wildcard::wildcard_match,
 };
 use fish_widestring::{ANY_STRING, str2wcstring};
 
@@ -133,7 +132,10 @@ impl<'args> StringSubCommand<'args> for Match<'args> {
 
         for InputValue { arg, .. } in arguments(args, optind, streams) {
             if let Err(e) = matcher.report_matches(arg.as_ref(), streams) {
-                flog!(error, "pcre2_match unexpected error:", e.error_message());
+                err_fmt!("Regular expression match error: %s", e.error_message())
+                    .subcmd(cmd, subcmd)
+                    .finish(streams);
+                return Err(STATUS_INVALID_ARGS);
             }
             let match_count = matcher.match_count();
             if self.quiet && match_count > 0
@@ -301,7 +303,7 @@ impl<'opts, 'args> RegexMatcher<'opts, 'args> {
             // empty/null members so we're going to have to use an empty string as the
             // sentinel value.
 
-            if let Some(m) = cg.as_ref().and_then(|cg| cg.name(&name.clone())) {
+            if let Some(m) = cg.as_ref().and_then(|cg| cg.name(name)) {
                 captures.push(WString::from(m.as_bytes()));
             } else if opts.all {
                 captures.push(WString::new());
@@ -416,7 +418,7 @@ impl<'opts, 'args> WildCardMatcher<'opts, 'args> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use crate::builtins::{STATUS_CMD_ERROR, STATUS_CMD_OK, STATUS_INVALID_ARGS};
     use crate::tests::prelude::*;

@@ -1,15 +1,12 @@
 use nix::sys::termios::SpecialCharacterIndices;
 
+use crate::text_helpers::char_to_symbol;
 use crate::{
     flog::FloggableDebug, localizable_string, reader::get_terminal_mode_on_startup, wgettext_fmt,
     wutil::fish_wcstoul,
 };
 use fish_common::{EscapeFlags, EscapeStringStyle, escape_string};
-use fish_fallback::fish_wcwidth;
-use fish_feature_flags::{FeatureFlag, feature_test};
-use fish_widestring::{
-    L, SPECIAL_KEY_ENCODE_BASE, WExt as _, WString, char_offset, decode_byte_from_char, wstr,
-};
+use fish_widestring::{L, SPECIAL_KEY_ENCODE_BASE, WExt as _, WString, char_offset, wstr};
 
 const fn special_key_char(offset: u8) -> char {
     // TODO: use `u32::from(offset)` once that's available in const fn
@@ -416,63 +413,6 @@ impl From<Key> for WString {
 
         res
     }
-}
-
-fn ctrl_to_symbol(buf: &mut WString, c: char) {
-    // Most ascii control characters like \x01 are canonicalized as ctrl-a, except
-    // 1. if we are explicitly given a codepoint < 32 via CSI u.
-    // 2. key names that are given as raw escape sequence (\e123); those we want to display
-    // similar to how they are given.
-
-    let c = u8::try_from(c).unwrap();
-    let symbolic_name = match c {
-        9 => L!("\\t"),
-        13 => L!("\\r"),
-        27 => L!("\\e"),
-        _ => return sprintf!(=> buf, "\\x%02x", c),
-    };
-    buf.push_utfstr(symbolic_name);
-}
-
-/// Return true if the character must be escaped when used in the sequence of chars to be bound in
-/// a `bind` command.
-fn must_escape(is_first_in_token: bool, c: char) -> bool {
-    "[]()<>{}*\\$;&|'\"".contains(c)
-        || (is_first_in_token && "~#".contains(c))
-        || (c == '?' && !feature_test(FeatureFlag::QuestionMarkNoGlob))
-}
-
-fn ascii_printable_to_symbol(buf: &mut WString, is_first_in_token: bool, c: char) {
-    if must_escape(is_first_in_token, c) {
-        sprintf!(=> buf, "\\%c", c);
-    } else {
-        sprintf!(=> buf, "%c", c);
-    }
-}
-
-/// Convert a wide-char to a symbol that can be used in our output.
-pub fn char_to_symbol(c: char, is_first_in_token: bool) -> WString {
-    let mut buff = WString::new();
-    let buf = &mut buff;
-    if c <= ' ' || c == '\x7F' {
-        ctrl_to_symbol(buf, c);
-    } else if c < '\u{80}' {
-        // ASCII characters that are not control characters
-        ascii_printable_to_symbol(buf, is_first_in_token, c);
-    } else if let Some(byte) = decode_byte_from_char(c) {
-        sprintf!(=> buf, "\\x%02x", byte);
-    } else if ('\u{e000}'..='\u{f8ff}').contains(&c) {
-        // Unmapped key from https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions
-        sprintf!(=> buf, "\\u%04X", u32::from(c));
-    } else if fish_wcwidth(c).is_some_and(|w| w != 0) {
-        sprintf!(=> buf, "%c", c);
-    } else if c <= '\u{FFFF}' {
-        // BMP Unicode character
-        sprintf!(=> buf, "\\u%04X", u32::from(c));
-    } else {
-        sprintf!(=> buf, "\\U%06X", u32::from(c));
-    }
-    buff
 }
 
 #[cfg(test)]
