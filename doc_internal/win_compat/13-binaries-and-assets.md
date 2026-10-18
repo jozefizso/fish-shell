@@ -22,6 +22,28 @@ external-editor tools, help/catalogs and user tools retain ownership. Earlier N3
 the original candidate audit/counts below remain historical. See the
 [N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
 
+## Current N5 binary/lifecycle consumers
+
+`bin/fish/windows.rs` owns native console-control registration through shutdown and real
+`--print-rusage-self` shell-only reporting on stderr. Reports use native elapsed/user/kernel
+seconds, memory bytes, combined faults and I/O operations/bytes, with unavailable POSIX
+categories named explicitly; they are not POSIX rusage fields filled with zero. `time`
+uses actual fish plus completed/live tracked-job CPU at explicit accounting cutoffs.
+
+Native `&`, `jobs`, `wait`, `disown` and process/job/caller/shell-exit functions now have
+retained-handle lifecycle owners. Callbacks dispatch on the evaluator thread; control
+callbacks only hand off atomics/events. Ordinary accepted/disowned processes survive
+fish-owned Job Object closure, but shell-hosted pipe/bridge services do not survive fish.
+This does not certify every shipped process facade/provider: POSIX `fg`/`bg` and suspension
+remain permanently EXCLUDED with no reattachment emulation or external reserved-name fallback;
+arbitrary Unix `kill`/trap delivery and provider dependencies are not supplied by native
+Ctrl-Break support. N6–N11 asset/editor/terminal certification remains unchanged.
+
+See [process contracts](03-process-execution-job-control.md#current-n5-native-lifecycle-contract),
+[control/accounting](04-signals-events-waits.md#current-n5-control-and-accounting-contract)
+and the [N5 implementation and evidence record](coverage.md#n5-implementation-and-evidence-record).
+These source overlays do not declare all N5 gates passed or revise earlier proof.
+
 ## Verified N3 implementation
 
 `bin/fish/windows.rs` now runs repeated command strings, scripts and stdin through the shared

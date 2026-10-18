@@ -2,16 +2,17 @@
 
 ## Scope, state vocabulary and ownership
 
-The **current source ledger** records N1 filesystem, N2 streaming/runtime, N3 batch-language
-and N4 startup/persistent-state delivery on their `platform/windows/` phase branches. It inventories
-native/runtime modules, all 21 workspace crate directories, assets, executable CLI options and
-builtin options. Earlier evidence remains historical; the N4 evidence section records the
-completed development matrix. Compiling Unix code out is not command support.
+The **current source ledger** records N1 filesystem, N2 streaming/runtime, N3 batch language,
+N4 startup/persistent state and N5 jobs/control/accounting on their `platform/windows/`
+phase branches. It inventories native/runtime modules, all 21 workspace crate directories,
+assets, executable CLI options and builtin options. Earlier evidence remains historical;
+each phase's evidence record states its exercised boundary. Compiling Unix code out is not
+command support.
 
 States used throughout the current ledger:
 
 - **S — supported source path:** enabled in the native registry/parser, subject to stated boundaries.
-- **I — implemented N1/N2/N3/N4 path:** enabled with the stated source and evidence boundaries.
+- **I — implemented N1–N5 path:** enabled with the stated source and evidence boundaries.
   Passing development gates certify only the exercised hosts/fixtures, not all Windows volumes.
 - **R — rejected:** the native entrypoint/option gate explicitly diagnoses unsupported use.
 - **U — unavailable:** the service is compiled out, absent or not connected to a native entrypoint.
@@ -36,7 +37,7 @@ Wiring evidence is [`lib.rs`](../../src/lib.rs), [`builtins/mod.rs`](../../src/b
 | Current source files | State and implementation owner | Required native semantics / boundary |
 |---|---|---|
 | `lib.rs`, `prelude.rs`, `common.rs`, `global_safety.rs`, `portable_atomic.rs`, `stdx.rs`, `panic.rs`, `operation_context.rs` | S shared/prototype subset; N1 identity boundaries, N2 runtime ownership, N3 batch consumers | Preserve shared data/algorithms, checked text boundaries, cancellation and main-thread ownership; inclusion is not complete downstream service support. |
-| `ast.rs`, `tokenizer.rs`, `parse_constants.rs`, `parse_tree.rs`, `parser_keywords.rs`, `parse_util.rs`, `parser.rs`, `parse_execution.rs` | I N3 batch language; N1 filesystem callers | Functions, recursion, while/switch, blocks, substitutions, scopes and generic/variable events execute through shared fish semantics; background/jobs N5, interactive N6, exec permanently excluded. |
+| `ast.rs`, `tokenizer.rs`, `parse_constants.rs`, `parse_tree.rs`, `parser_keywords.rs`, `parse_util.rs`, `parser.rs`, `parse_execution.rs` | I N3 batch language and N5 background/time consumers; N1 filesystem callers | Shared control flow, functions, substitutions, scopes and language events; native asynchronous work and real timing do not enable the N6 editor or permanently excluded exec. |
 | `expand.rs`, `wildcard.rs`, `complete.rs` | I N1 paths, discovery and real traversal; U active completion N7 (declarative metadata N3) | Shared fish matching, hidden/no-match rules, cancellation/result limits, directory case policy and identity-based cycles. Completion types compiling is not active editor completion. |
 | `path/windows.rs` | I N1; providers beyond native `.exe` R/U N8 | Namespace-aware paths, CDPATH/implicit cd, authoritative cwd, explicit PATH order and classification shared with launch/predicates; no implicit Win32 cwd search or script fallback. No discovery cache to invalidate. |
 | `path.rs` | U Unix backend on native; N1 equivalent path/discovery, N4 state roots, N8 providers | Not the selected Windows module. Known-folder/config/cache policy cannot be inferred from Unix XDG code. |
@@ -47,15 +48,16 @@ Wiring evidence is [`lib.rs`](../../src/lib.rs), [`builtins/mod.rs`](../../src/b
 | `env/mod.rs`, `env/environment.rs`, `env/var.rs`, `env/impl/mod.rs`, `env/impl/environment.rs`, `env/impl/var.rs`, `env/native.rs`, `env/native_state.rs` | I N1 cwd, N3 scopes/import/export and N4 persistent state | Real universal values/flags and cross-process merge, inherited matching exported-global reconciliation, pending failed mutations and deferred callback replay. Effects/events run outside environment locks; private history does not disable universals. |
 | `env/config_paths.rs`, `path/windows_config.rs`, `env_universal_common.rs` | I N4 native selection and state formats | Install assets are executable-relative and separate from user state. Defaults are LocalAppData/fish/{config,data,cache}; global-exported XDG roots append `fish`; explicit exported HOME falls back to `.config/fish`, `.local/share/fish`, `.cache/fish`, otherwise HOME uses FOLDERID_Profile. Existing universal formats/empty lists/raw bytes/flags persist with a 16 MiB read and serialized-snapshot limit. |
 | `env_dispatch.rs`, `env_dispatch/common.rs`, `env_dispatch/windows.rs` | I N4 native variable effects; N6/N7 editor consumers deferred | Shared read-limit/trace/width hooks, actual function/completion path invalidation, history/private selection and locale/TZ effects; explicit reader-settings generation is an interface, not an editor. POSIX-spawn control diagnoses no native effect. |
-| `exec_windows.rs`, `exec/windows_launch.rs`, `proc_status_windows.rs`, `proc.rs`, `job_group.rs`, `wait_handle.rs` | I N1 resolver/cwd and N2 prepared native pipeline launch/retained ownership; N5 user supervision | Explicit pinned application/argv/env/cwd, suspended creation/owned rollback, exact inheritance allowlists and retained raw DWORD completion. No POSIX pgroup/stopped-state claims. |
+| `exec_windows.rs`, `exec/windows_launch.rs`, `proc_status_windows.rs`, `proc.rs`, `proc_windows.rs`, `job_group.rs`, `wait_handle.rs` | I N1/N2 launch and N5 supervision | Main-thread observation includes under-construction jobs; retained process HANDLEs pin native u32 PIDs. Stable native group IDs, cached waits, event leases, disown and accepted-job survival; raw DWORDs remain intact, without POSIX pgroup/stopped-state claims. |
 | `exec.rs`, `fork_exec/mod.rs`, `fork_exec/flog_safe.rs`, `fork_exec/postfork.rs`, `fork_exec/spawn.rs` | U Unix backend; fork/image replacement X | Native launch extends `exec_windows.rs`; no faithful fork or same-PID exec implementation. |
-| `io_windows.rs`, `fds_windows.rs`, `io/windows_descriptors.rs`, `io/windows_pipe.rs`, `io/windows_deferred.rs`, `native_fd_bridge.rs`, `null_terminated_array.rs`, `redirection.rs` | I N2 typed graph, ordered redirects, real pipelines/capture/input ownership | Logical integers are not HANDLEs. Shared input cursor survives aliases; explicit closed builtin output discards, inherited unavailable output fails when used. Extra-fd bridge is restricted to the actual same executable identity; N3 owns function/block/substitution consumers. |
+| `io_windows.rs`, `fds_windows.rs`, `io/windows_descriptors.rs`, `io/windows_pipe.rs`, `io/windows_deferred.rs`, `native_fd_bridge.rs`, `null_terminated_array.rs`, `redirection.rs` | I N2 graph/streams and N5 cancellation/deferred background output | Logical integers are not HANDLEs. Main-thread physical stdin and blocked output propagate interruption without retry loops; retired operations drain before buffers disappear. Background builtins drain produced bytes asynchronously while final function producers stream. Extra-fd bridge requires the actual same executable identity. |
 | `io_buffer.rs` | I N2 shared separated-buffer storage | Preserve explicit empties and byte provenance; checked size accounting and finite native metadata retention. Unix I/O collection remains Unix-owned. |
 | `io.rs`, `fds.rs`, `fd_monitor.rs`, `fd_readable_set.rs` | U Unix implementations on native; I N2 native counterparts above | Native services do not reinterpret Unix fds, sockets or arbitrary handles as a universal readiness namespace. |
-| `threads/windows.rs`, `threads/windows_workers.rs` | I N2 scalable waits/completion queue, workers/debounce | Main-thread dispatch, monotonic source identity, reset/post synchronization, cancellation/drain, retained child handles and abandoned-result suppression. |
+| `threads/windows.rs`, `threads/windows_workers.rs` | I N2 runtime and N5 process/thread completion consumers | Main-thread publication, monotonic registration identity, reset/post synchronization, retained native waits and cancellation/drain. Deferred writers are joined only after their actual native thread handle signals. |
 | `threads/mod.rs`, `threads/threads.rs`, `threads/debounce.rs` | U Unix-selected implementation on native; I N2 native counterpart | Preserve shared scheduling semantics without Unix masks/atfork. |
-| `signal_windows.rs`, `event.rs` | I N3 generic/variable events and blocking; N5 native control/lifecycle events | In-memory language handlers and queued dispatch work; no fabricated Unix signal delivery. Process/job/shell/control events remain N5. |
-| `signal.rs`, `topic_monitor.rs`, `timer.rs` | U native services; N2 wakeups, N5 cancellation/events/accounting | Actual native completion/timing/counters; do not report unavailable measurements as zero. |
+| `signal_windows.rs`, `event.rs` | I N3 language events and N5 native controls/lifecycle | Bounded atomic console callback handoff; fresh cancellation epochs, main-thread dispatch and targeted one-shot late replay. Deferred native events retain the actual process-object lease; no invented POSIX signals. |
+| `signal.rs`, `topic_monitor.rs`, `timer.rs` | U Unix-selected implementations on native | Native counterparts provide real control/completion/timing services rather than Unix signal masks, wait statuses or getrusage emulation. |
+| `native_accounting.rs`, `timer_windows.rs` | I N5 | GetProcessTimes and disjoint owned Job Object CPU counters in 100-ns units; completed/live totals charge once. Observed root-completion/detach cutoffs exclude later descendant CPU; unavailable POSIX categories are named, not fabricated zeros. |
 | `function.rs`, `autoload.rs` | I N3 functions and N4 full core disk/embedded autoload | Ordered paths, embedded fallback, generated-completion precedence, identity/cwd/path invalidation, override/tombstone/recursion policy and native source provenance. Loading arbitrary shipped assets does not port every helper's dependencies (N9). |
 | `history/mod.rs`, `history/file.rs`, `history/history.rs`, `history/yaml_backend.rs` | I N4 native history | Existing YAML-compatible records and real timestamps; immutable owned baseline survives automatic saves/watcher invalidation. Checked explicit merge captures its transaction snapshot. A committed-generation journal lets clear-session undo only acknowledged own versions still present and restore their actual predecessors, preserving foreign updates/deletions through failed/compacted duplicates. Private selection precedes disk loading; shutdown flushes dirty history. Fish 1.x remains unsupported; same-command/same-second legacy records cannot identify authors uniquely. |
 | `universal_notifier/mod.rs`, `universal_notifier/windows.rs`, `universal_notifier/windows_io.rs` | I N4 directory notification over N2 runtime | Parent/ancestor ReadDirectoryChangesW, full invalidation/rescan after lost detail (including ERROR_MORE_DATA 234), replacement/rebinding and cancel/drain ownership; real UNC fixtures, not a claimed live SMB-server disconnect experiment. Unix `inotify.rs`, `kqueue.rs`, `notifyd.rs`, `test_helpers.rs` remain platform-specific. |
@@ -67,8 +69,8 @@ Wiring evidence is [`lib.rs`](../../src/lib.rs), [`builtins/mod.rs`](../../src/b
 | `re.rs` | I N3 UTF-32 PCRE2 | Shared regex captures/replacements, named variables, offsets and error behavior; not Win32/.NET regex. |
 | `nix.rs` | U Unix glue; N2/N5/N8 replace consumers at their owners | No blanket Win32 errno, fd, identity or signal emulation. |
 | `print_help.rs` | U native help; N9 | Installed/embedded help and native viewer/error policy; existing script-based help is not available. |
-| `builtins/mod.rs`, `builtins/shared/mod.rs`, `builtins/shared/error.rs`, `builtins/shared/misc.rs`, `builtins/native_fs.rs`; every builtin enumerated below | I N1/N3/N4 native registry; R/U deferred families | Option-level boundaries override inclusion. Internal `__fish_native_fs` supplies mkdir/remove/atomic-write for utility-free bootstrap and public funcsave; it is not a general external-utility compatibility layer. |
-| `bin/fish.rs`, `bin/fish/unix.rs`, `bin/fish/windows.rs`, `bin/fish_indent.rs`, `bin/fish_key_reader.rs` | I N3 batch/formatter and N4 normal startup; R key reader N6 | Normal config → ordered init commands → execution, login/private and startup profiling work; syntax-only avoids config/init/state effects. Interactive N6 and installed help N9 remain rejected. |
+| `builtins/mod.rs`, `builtins/shared/mod.rs`, `builtins/shared/error.rs`, `builtins/shared/misc.rs`, `builtins/native_fs.rs`; every builtin enumerated below | I N1/N3/N4/N5 native registry; R/U deferred families | Option-level boundaries override inclusion. Internal `__fish_native_fs` supplies utility-free bootstrap/funcsave filesystem services, not general external-utility compatibility. |
+| `bin/fish.rs`, `bin/fish/unix.rs`, `bin/fish/windows.rs`, `bin/fish_indent.rs`, `bin/fish_key_reader.rs` | I N3 batch/formatter, N4 startup and N5 resource/shutdown lifecycle; R key reader N6 | Startup ordering and syntax-only isolation remain intact. Native controls live through final events/state flush, ordinary live jobs warn, disowned jobs suppress warnings, and accepted work survives exit. Interactive N6 and installed help N9 remain rejected. |
 | `tests/mod.rs`, `tests/prelude.rs` | U root Unix unit harness on native; each owning phase retains applicable cases | Native integration suites do not establish that all shared unit tests were discovered/executed. |
 | `wutil/windows.rs::native_current_exe_path` | I N4 trusted OS-image boundary | Cached absolute OS-reported image path handles literal extended install spelling before ordinary N1 validation; shared by install assets/current-shell identity consumers, never a relaxation for user-supplied paths or a PATH-selected shell. |
 
@@ -142,7 +144,7 @@ is enabled; `-N` skips config, keeps ordered init commands and uses private hist
 | fish `-l`, `--login` | I N4 | Actual native startup/login state, not POSIX login-shell installation. |
 | fish `-P`, `--private` | I N4 | Private history/session persistence without dropping universal semantics. |
 | fish `--profile-startup ARG` | I N4 | Real startup-stage measurements and native file errors. |
-| fish `--print-rusage-self` | R; N5 | Truthful native shell counters/units; unavailable POSIX fields explicit. |
+| fish `--print-rusage-self` | I N5 | Actual native shell CPU, elapsed, memory, I/O and fault counters on stderr with explicit units/unavailable categories; reporting failures do not change command stdout/status. |
 | fish `-i`, `--interactive`; implicit interactivity | R/U; N6 | Actual native reader/terminal selection and mode restoration; not captured echo. |
 | fish `-h`, `--help` | R; N9 | Installed native help and dependency/viewer errors. |
 | fish_indent default stdin/file operands | I standalone and builtin N3 | Shared formatter with checked native paths, input/error/status behavior. |
@@ -188,7 +190,7 @@ actual parser recognizes it, not a new option for argument-only commands.
 | Builtin / complete non-help option or operand surface | State / owner | Required native semantics |
 |---|---|---|
 | `echo`: `-n`, `-s`, `-e`, `-E`; text/escape operands | I N3 | Exact newline/spacing/escape and byte semantics. |
-| `exit`: optional status; shared return-value parser `--` | I N3 batch; N5 job shutdown, N6 console cleanup | Real batch exit/status; no interactive/job shutdown claim. |
+| `exit`: optional status; shared return-value parser `--` | I N3 batch/N5 shutdown; N6 console modes | Preserve the initiating exit status through callbacks and pending native work; deliver eligible exit events, flush state and warn without force-killing accepted jobs. Interactive mode restoration remains N6. |
 | `true`, `false`, `:`: no parsed options | I N3 | Shared success/failure and ignored-operand behavior. |
 | `printf`: FORMAT and operands; no getopt flags | I N3 conversions and N4 numeric locale; full locale parity N9 | Shared conversions, widths, precision, escapes, binary/NUL output and numeric errors; leading `--` is a format operand. |
 | `math`: expression operands | I N3 | Shared arithmetic/errors and argv/stream selection. |
@@ -205,19 +207,19 @@ actual parser recognizes it, not a new option for argument-only commands.
 | `eval`, `emit`, `source`/`.`: no non-help flags; filename/stdin `-`, argv, event/arguments, source operands | I N3 | Same-shell evaluator/reader, scope/filename/line/status; generic/variable events are not OS signals. |
 | `block`: `-e/--erase`, `-l/--local`, `-g/--global` | I N3 | Language-event blocking and queued dispatch at scope boundaries. |
 | `function`: `-d/--description ARG`, `-e/--on-event ARG`, `-v/--on-variable ARG`, `-a/--argument-names ARG`, `-S/--no-scope-shadowing`, `-V/--inherit-variable ARG`, `-w/--wraps ARG` | I N3/N4 | Definitions/scopes/events/wrapping metadata and full core disk/embedded autoload; active completion N7. |
-| `function`: `-s/--on-signal ARG`, `-j/--on-job-exit ARG`, `-p/--on-process-exit ARG` (including caller/self forms) | R/U; N5 | Real native lifecycle/control policy; no fictional Unix signal/pgroup handlers. |
+| `function`: `-s/--on-signal ARG`, `-j/--on-job-exit ARG`, `-p/--on-process-exit ARG` (including caller/%self forms) | I N5 native policy | Real process/job/caller/shell lifecycle and named CTRL_C/CTRL_BREAK/CTRL_CLOSE controls, blocking and targeted late replay. Unsupported Unix signal names/numbers fail; native JobExit uses actual final status, caller's historical status remains zero. |
 | `functions`: `-e/--erase`, `-d/--description ARG`, `-n/--names`, `-a/--all`, `-q/--query`, `-c/--copy`, `-D/--details`, `--no-details`, `-v/--verbose`, `-H/--handlers`, `-t/--handlers-type ARG`, `--color ARG`; names/definitions | I N3 display/metadata and N4 disk/embedded discovery; process handlers N5 | Metadata/copy/tombstones, generic/variable handlers and native definition-file provenance; no validator-only autoload restriction. |
 | `complete`: `-x/--exclusive`, `-f/--no-files`, `-F/--force-files`, `-r/--require-parameter`, `-p/--path ARG`, `-c/--command ARG`, `-s/--short-option ARG`, `-l/--long-option ARG`, `-o/--old-option ARG`, `-d/--description ARG`, `-a/--arguments ARG`, `-e/--erase`, `-u/--unauthoritative`, `-A/--authoritative`, `-n/--condition ARG`, `-w/--wraps ARG`, `-k/--keep-order` | I N3 declarative metadata | Definitions, erase, wrappers and replay; authority aliases retain shared compatibility behavior, not new authority functionality. Active evaluation remains N7. |
 | `complete`: `-C/--do-complete[=ARG]`, `--escape`; `--color ARG` | R/U N7 active completion; I N3 metadata display color | Evaluated completion remains rejected; metadata serialization/display color is available without an editor. |
 | `abbr`: `-a/--add`, `-c/--command ARG`, `--position ARG`, `-r/--regex ARG`, `--set-cursor[=ARG]`, `--description[=ARG]`, `-f/--function ARG`, `--rename`, `-e/--erase`, `-q/--query`, `-s/--show`, `--list`, `-g/--global`, `-U/--universal`, `--color ARG` | I N3 declarative storage/display and shared deprecated-option diagnostics; active expansion N7 | Regex/function/cursor metadata serialize/replay. N4 real universals do not change deprecated abbr-option behavior or make declarations editor expansion. |
 | `history`: `search`, `delete`, `clear`, `merge`, `save`, `clear-session`, `append`; aliases `--search`, `--delete`, `--clear`, `--merge`, `--save` | I N4 storage/session commands; N7 active search UI | Real private/named sessions, immutable initial baseline, checked merge and durable save/error/recovery; session clear journals acknowledged ownership and actual predecessors rather than resurrecting stale baseline records. |
 | `history`: `-p/--prefix`, `-c/--contains`, `-e/--exact`, `-t/--show-time[=ARG]`, `-n/--max ARG`, `-z/--null`, `-C/--case-sensitive`, `-R/--reverse`, `--color ARG` | I N4 batch filtering/time/output; N7 UI, N9 full presentation parity | Real filtering/order/wall-clock timestamps/NUL bytes and storage errors; native time locale/TZ IDs are supported, unsupported GNU format/IANA/POSIX TZ inputs diagnosed. |
-| `jobs`: `-c/--command`, `-g/--group`, `-l/--last`, `-p/--pid`, `-q/--quiet/--query`; targets | R/U; N5 | Real tracked jobs/PIDs/counters; group output must have declared native meaning, never fake POSIX pgroups. |
-| `wait`: `-n/--any`; PID/name targets | R/U; N5 | Retained completion, cached exited targets, multiple targets, cancellation and stable identities. |
-| `disown`: no non-help options; job targets | R/U; N5 | Native tracking/containment/survival policy, no stopped-job resume or fake reparenting. |
+| `jobs`: `-c/--command`, `-g/--group`, `-l/--last`, `-p/--pid`, `-q/--quiet/--query`; targets | I N5 | Real tracked jobs/native u32 PIDs. Group output is the shell's nonrecycled internal native group identity, not a HANDLE or console/POSIX pgroup. Requested Ctrl-Break is still running until observed exit. |
+| `wait`: `-n/--any`; PID/name targets | I N5 | Retained active/background cached completion, multiple/duplicate targets, any-target waits and cancellation. Already acquired observers survive disown; completion returns wait's own success, not the child's exit code. |
+| `disown`: no non-help options; job targets | I N5 | Exclude future lookup/cache/notifications while preserving pending I/O and acquired observers until real completion. Accepted work survives shell exit; no stopped-job resume, reparenting or foreground reattachment. |
 | `bg`, `fg`: no non-help options; job targets | X/R; permanent exclusions (rejection maintained by N5/N6) | No POSIX stop/continue or terminal-pgroup foreground transfer; never external fallback, thread suspension or window focus. |
 | `exec` decorator: no replacement CLI flags | X/R; permanent exclusion | Reject before argument side effects or launch; spawn/wait/exit and CRT `_exec` are not same-PID exec. |
-| `time` decorator: no builtin option parser | R; N5 | Actual elapsed/CPU/resource accounting for commands/pipelines/shell; no fake zero POSIX measurements. |
+| `time` decorator: no builtin option parser | I N5 | Monotonic elapsed time plus real shell and accumulated owned-child CPU, with explicit measurement errors rather than fabricated counters. |
 | `bind`: `-a/--all`, `-e/--erase`, `-f/--function-names`, `-k/--key`, `-K/--key-names`, `-L/--list-modes`, `-M/--mode ARG`, `--preset`, `-m/--sets-mode ARG`, `-s/--silent`, `--user`, `--color ARG`; key/action operands | R/U; N6 core binding dispatch, N7 full modes/actions | Same logical key identity as reader, correct preset/user tables and mode transitions; every advertised action must work. |
 | `breakpoint`: no non-help flags | R/U; N6 | Real nested reader and outer scope/input/mode restoration. |
 | `read`: `-a/--array/--list`, `-d/--delimiter ARG`, `-x/--export`, `-f/--function`, `-g/--global`, `-L/--line`, `-l/--local`, `-n/--nchars ARG`, `-z/--null`, `-t/--tokenize`, `--tokenize-raw`, `-u/--unexport`; variables | I N3 noninteractive | Buffered shared cursor without overread/pipe seeks; delimiters/NUL/limits/EOF and assignment scopes. |
@@ -299,9 +301,9 @@ context; they do not enable job control, terminal negotiation or full installed 
 |---|---|---|
 | Default summary; `basename`/`current-basename`, `dirname`/`current-dirname`, `filename`/`current-filename`, `line-number`/`current-line-number`, `function`/`current-function`, `current-command`, `current-commandline`, `is-block`, `is-command-substitution`, `stack-trace`/`print-stack-trace` | N3 | Actual parser/source/stack context and nesting. Flags `-b/--is-block`, `-c/--is-command-substitution`, `-f/--filename/--current-filename`, `-n/--line/--line-number/--current-line-number`, `-t/--print-stack-trace`, `-L/--level ARG`. |
 | `build-info`/`buildinfo`, `features`, `test-feature`, `fish-path`; `--fish-path` | I N3/N4 (N1 path boundary, N10 installed identity) | Real build/features and trusted OS current-image identity, not a PATH-selected competing shell. |
-| `is-login`; `-l/--is-login`; default login summary | I N4 | Actual native startup mode; summary and explicit query use the same real login state. Native job-control summary remains unavailable at N5/N6. |
+| `is-login`; `-l/--is-login`; default login summary | I N4/N5 | Actual startup/login state and truthful no-POSIX-job-control summary. |
 | `is-interactive`, `is-interactive-read`, `is-breakpoint`; `-i/--is-interactive`, `--is-interactive-read` | N6 | Real reader/context state. |
-| `is-full-job-control`, `is-interactive-job-control`, `is-no-job-control`, `job-control`; `--is-full-job-control`, `--is-interactive-job-control`, `--is-no-job-control`, `-j/--job-control ARG` (`none`, `interactive`, `full`) | N5/N6 truthful native policy; POSIX fg/bg X | Explicit native availability/difference; no successful claim of terminal-pgroup/stopped-job support. |
+| `is-full-job-control`, `is-interactive-job-control`, `is-no-job-control`, `job-control`; `--is-full-job-control`, `--is-interactive-job-control`, `--is-no-job-control`, `-j/--job-control ARG` (`none`, `interactive`, `full`) | I N5 queries/none; POSIX modes X/R | Report none; setting none succeeds. Full/interactive POSIX modes fail, without claiming terminal-pgroup transfer or stopped-job support. |
 | `terminal`, `terminal-os`, `test-terminal-feature` | N6 capability baseline, N7 full negotiation | Actual terminal/protocol capability state and errors. |
 | `get-file`, `list-files` | I N4 core embedded-resource access; N9 full installed help | Real embedded bytes/listing for bootstrap/autoload consumers; no complete help/extraction/tooling certification. |
 | `language` | R/U N9 | Native message-catalog selection remains explicitly unavailable; N4 numeric/time locale is separate. |
@@ -321,7 +323,7 @@ establish every POSIX soft/hard/per-user category. N5 accounting is not quota en
 
 `!`/`not`, `and`, `or`, `begin`/`end`, `for`, `if`/`else`, `while`, `switch`/`case`
 and `function` are I N3 batch syntax, including scope/error/side-effect behavior and substitutions.
-Function event options follow the split above. Background syntax/jobs and `time` remain R N5;
+Function event options follow the split above. Native background syntax/jobs and `time` are I N5;
 `exec` is X/R permanently. Rejection precedes forbidden expansion/launch. POSIX fork has no
 executable CLI/builtin option to enable.
 
@@ -1040,3 +1042,177 @@ shipped assets/help/catalog/locale parity or N10 installation certification. Fai
 same-PID exec and POSIX fg/bg remain permanently excluded. Native flush/replacement makes no
 power-loss directory-metadata or SMB-server durability promise; notification recovery does not
 claim a live SMB-server disconnect experiment.
+
+## N5 implementation and evidence record
+
+Implementation branch: `platform/windows/process-supervision`, based on `3847f13db`.
+Earlier GOAL/N1–N4 evidence and recorded artifact identities are historical and unchanged.
+This section separates native source contracts from completed execution evidence.
+
+### Source authority and required composite gates
+
+| Required gate | Integration families per artifact | Source authority | Additional mandatory owner case |
+|---|---:|---|---|
+| `N5_JOBS` | 12 | `tests/windows_n5/jobs.rs`, `jobs_probe.rs` | `exec::native_launch::tests::assignment_quota_rollback_preserves_host` |
+| `N5_CANCEL` | 4 | `tests/windows_n5/cancel.rs`, `cancel_probe.rs`, `gui_fixture.rs` | Native controls, real GUI/detached/foreign-console children and owned ConPTY close are required fixtures |
+| `N5_ACCOUNT` | 9 | `tests/windows_n5/account.rs`, `account_probe.rs`; `native_accounting.rs`, `timer_windows.rs` | Owning arithmetic/query/fault units are included in the library/probe gates |
+
+`tests/windows_n5.rs` is authoritative for family names. Every integration harness runs
+both debug and release fish artifacts with profile-matched native and GUI probes. Both
+harness profiles are required: 50 family/artifact records in each, 100 total. The private
+assignment-owner unit is additionally discovered and executed exactly in each profile.
+Running only the integration target does not complete N5-JOBS. CI checks these mappings
+in `.github/workflows/test.yml`; missing/ignored cases or unavailable mandatory fixtures fail.
+
+The quota test uses the actual private backend and real Windows assignment rejection,
+not a production injection hook. Its isolated root joins only its own outer Job Object;
+a separate target Job Object already contains one live sentinel when its active-process
+limit is set to one. A new suspended process is created outside that target and rejected
+by actual assignment. Outer accounting proves creation/no orphan; dropping the target
+rolls back its owned members while the unrelated host sentinel stays live. Windows itself
+terminates a quota-rejected process: this does not prove PendingChild issued that call.
+The sentinels receive a controlled environment, not unvalidated inherited drive variables.
+This test does not expose N8 resource-limit configuration.
+
+### Implemented native boundaries
+
+- Main-thread observation services native processes and deferred-writer threads even while
+  an enclosing function/job is under construction. Already completed readiness is not
+  mistaken for a new wait, and pending writers are not joined until their native thread
+  actually signals. Background builtin bytes drain asynchronously; the last function
+  producer still streams while its evaluator runs synchronously.
+- Background default stdin is readable native NUL. Explicit files, pipes and inherited
+  redirects remain explicit. Retained process HANDLEs pin u32 PID identities through
+  active waits, background cache and deferred targeted events. Delivered/removed events
+  release their lease; late registration does not replay to unrelated catch-all handlers.
+- Accepted native Job Objects have kill-on-close cleared. Ordinary/disowned work survives
+  graceful or abrupt fish process exit; graceful shutdown warns for ordinary live work
+  without forcing it. Disown excludes future lookup/cache/notifications while existing
+  observers and owned I/O finish. Shell-owned pipe services are not guaranteed after fish
+  exits. Console-host closure/logoff/shutdown can still terminate attached clients.
+- Console callbacks perform bounded atomic receipt/SetEvent work only. Retiring an epoch
+  cancels its old token permanently; stale callbacks cannot cancel the replacement.
+  Main-thread physical stdin and blocked builtin output propagate interruption instead of
+  retrying forever, and per-request cancellation does not poison later endpoint reuse.
+- Root Ctrl-C/Break cancellation produces shell status 130. Eligible same-console native
+  group roots receive an explicitly native Ctrl-Break request. GUI, detached and foreign
+  console children may remain live; neither request success nor unsupported/ignored
+  delivery fabricates an exit. Raw DWORDs stay intact; ordinary shell mapping is 0–255
+  unchanged and otherwise one. See the [control transition table](04-signals-events-waits.md).
+- The close fixture owns a real ConPTY and calls documented
+  [ClosePseudoConsole](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole),
+  which sends CTRL_CLOSE to connected clients. Output drains concurrently, actual client
+  exit is waited separately, and unrelated work stays live. This covers asynchronous
+  24H2 close return without private conhost arguments, global terminal settings, synthetic
+  callbacks or assuming that a successful HWND message post delivered a close.
+- Native CPU units are 100 ns; disjoint owned Job Objects charge completed/live CPU once.
+  Observed final-root completion or monitoring detach fixes each collection cutoff,
+  excluding later descendant CPU. Sequential snapshots are not an atomic cross-counter
+  observation. `time` and `--print-rusage-self` report actual available measurements and
+  errors, preserve command stdout/status, and name unavailable POSIX categories.
+
+POSIX fork, same-PID exec and POSIX fg/bg remain permanently excluded. N6–N11 are not
+completed by these source contracts; interactive reader/input/protocol ownership is N6.
+
+### Executed stable native and Unix matrix
+
+The implementation tree was committed as `0106034e1`; these artifacts were built from
+that tree before the commit. Local execution of the current native CI gate body,
+including its discovery/count checks, exited zero. This is local evidence, not a claim
+that a GitHub Actions run has completed.
+
+| Executed gate | Observed result |
+|---|---|
+| Native workspace libraries | fish 71, fish-widestring 25, fish-tempfile 4, fish-common 5, fish-util 1 passed; zero failed/ignored |
+| Focused codec/tempfile gates | 5 and 2 passed; zero failed/ignored |
+| Runtime initialization/text provenance | One exact case each in debug and release harnesses; all four passed |
+| Historical prototype registry | Exact 15 required cases against both artifacts: 30 PASS records |
+| N1 and N2 | Three exact IDs in each harness profile against both artifacts; all passed, no ignored cases |
+| N3 | Three IDs and eight families: 16 family/artifact records per harness, 32 total |
+| N4 | Three IDs and eleven families: 22 family/artifact records per harness, 44 total |
+| N5 integration | Three IDs and 25 families: 50 family/artifact records per harness, 100 total; zero failed/ignored |
+| N5 private assignment owner | Exact private owner case passed separately in both harness profiles, in addition to the full library run |
+| Retained Unix library | 183 passed; zero failed/ignored |
+| Retained Unix lifecycle/state checks | 25 selected checks passed; zero skipped |
+
+Native host: Windows `10.0.26300`, x64; Rust `1.95.0 (59807616e 2026-04-14)`,
+MSVC compiler `19.51.36260` (tools directory `14.51.36231`), SDK `10.0.26100.0`.
+Native builds/tests use `--locked --target x86_64-pc-windows-msvc --no-default-features`.
+The UNC fixture was `\\localhost\D$\dev\fish-workspace\fish-n1-unc-fixture`.
+The retained Unix build/check run used WSL `ubuntu-dev`, Rust `1.92.0`; this is Unix
+regression evidence, not the Windows runtime backend.
+
+Local native discovery/results are in `native-windows-results/*-discovery.txt` and
+`native-windows-results/*.txt`. Unix results are in
+`target/n5-gate-results/unix-lifecycle-checks.stdout.log`. Mandatory N5 console/job/GUI
+fixtures ran rather than skipping. The separate minimum-Rust matrix below also
+completed successfully; stable artifacts are not substituted for its debug artifact.
+
+### Actual runtime observations
+
+- Both native artifact profiles ran a real builtin → held native background pipeline.
+  Inspect/release/wait produced `live=0`, `payload`, `waited=0`, with shell exit zero.
+- Direct owned-driver runs terminated actual fish abruptly with status 73. Ordinary
+  and explicitly disowned accepted children remained live, then reached their
+  barrier-controlled normal exit. The private outer owner had no remaining processes.
+- Both profiles ran the real fresh-console request controller and owned ConPTY-close
+  controller outside Cargo. Cooperative, ignored, GUI/detached/foreign-console and forced
+  outcomes satisfied their kernel-handle assertions; unrelated work survived before
+  deliberate cleanup. Requests truthfully warned about two ordinary retained live jobs.
+- `--print-rusage-self -c 'time math 6 x 7; exit 3'` produced stdout `42` and exit 3
+  in each profile, with actual native time/resource counters and named unavailable
+  categories on stderr. Short builtin CPU counters were sometimes zero at native
+  accounting resolution; no fabricated minimum was substituted.
+- Earlier actual-shell regression: a callback's `exit 7` returned before a held
+  foreground child was released, preserving that child alive. The old artifact
+  blocked and eventually returned zero. A separate 2 MiB background builtin-output
+  smoke progressed to the next command and drained after its controlled consumer release.
+
+Local evidence: `target/n5-gate-results/final-runtime-smoke.json`,
+`final-console-smoke.json`, `callback-before.json`, `callback-after-debug.json`,
+`callback-after-release.json`, `streaming-after.json` and `final-artifacts.json`.
+These are local verification artifacts, not files installed with fish.
+
+### Stable native artifact identities
+
+Paths below are relative to `target/x86_64-pc-windows-msvc/`.
+
+| Artifact | SHA-256 |
+|---|---|
+| `debug/fish.exe` | `0103eb5a7c294a9f9a2497b606dbf6131324e0d3f618632c445b04ed0c9db5f4` |
+| `debug/fish_indent.exe` | `2acdb57e643255fba477bcf6c6ce91e12bcf3849856677d234d52bc0014b8de0` |
+| `debug/windows_native_probe.exe` | `b6bb42dbcd06c33589561305cb677dcfcd9038515cde39551017e249a1e651e3` |
+| `debug/windows_n5_gui_probe.exe` | `2c083d647de59071b2a837d5c24adb3f59f531720a785dca9748430a9e6f5710` |
+| `release/fish.exe` | `215471c1faeac4488a7e4455872dfd3fb7eb4066be0770548f5049d8a883140e` |
+| `release/fish_indent.exe` | `82b0f93057a6c1893ce456d006f51a9a8b1cfc2ded69878d35220d6f95fc75a2` |
+| `release/windows_native_probe.exe` | `8bbf6f6817bed8b3239a1365d1c37d30e3568b11a62fd6a4f92a289f2ecb9d07` |
+| `release/windows_n5_gui_probe.exe` | `4f09acbc1c737665a6fd97343df15a98ccaac097a4f26a3bec68f26df2997ac1` |
+
+### Executed minimum-Rust matrix
+
+Rust `1.85.0 (4d91de4e4 2025-02-17)` built all four native binaries and ran the same
+complete discovery/execution gate with `CARGO_TARGET_DIR=target/windows-msrv185` and
+`RUSTFLAGS='-C debuginfo=1'`. The minimum debug artifact and profile-matched probes
+replaced stable debug in every prototype/N1–N5 integration run; release artifact
+overrides remained the stable release binaries listed above. Both debug and release
+**minimum-compiler harnesses** ran, including the exact private assignment-owner case.
+The complete gate exited zero: library counts matched the stable matrix, all required
+IDs were discovered/executed, and N5 emitted 50 family/artifact records per harness,
+100 total, with zero failed/ignored cases. This does not claim that those integration
+runs selected the minimum-built release fish.
+
+Both minimum-built debug **and release fish** additionally ran the actual native
+`time math 6 x 7; exit 3`/self-resource smoke: stdout `42`, exit 3, real diagnostics
+on stderr. Their SHA-256 identities are:
+
+| Minimum artifact | SHA-256 |
+|---|---|
+| `debug/fish.exe` | `a8b491c144fe768a6b13729dec3ef6957b4bb5bc7441701977e4e010bc983595` |
+| `release/fish.exe` | `7ce9f767ac842f94c6c671cc447ad42033798d719a787ba7a3107a82dee51b2d` |
+
+Minimum discovery/results were retained under
+`target/n5-gate-results/msrv185-native-results/`; actual runtime observations and
+identities are in `target/n5-gate-results/final-minimum-smoke.json`.
+All results concern this recorded host and feature selection, not a Windows release
+certification, ARM64, other filesystems/SMB servers or N6 interactive behavior.
+

@@ -46,6 +46,28 @@ Native readers peek chunks, not one byte per kernel call. Descendant-held captur
 stderr ownership so a harness waiting for stderr EOF cannot masquerade as evaluator deadlock.
 Sockets are not implicitly supported by these file/pipe/console endpoint mechanisms.
 
+## Current N5 background I/O lifetime
+
+Native `&` and mixed pipelines now retain I/O ownership without waiting for every native
+root before later commands. A background builtin feeding a native consumer uses bounded
+deferred output and asynchronous draining, including when it is the last internal stage.
+The final function/block producer instead streams while its main-thread evaluator remains
+active; functions/blocks are not evaluated concurrently on a worker. Existing deferral
+before later internal consumers remains necessary across native relays.
+
+Without explicit/inherited stdin redirection, initially background work opens trusted native
+`\\.\NUL` input. Explicit stdin, pipeline edges and ordered fd actions take precedence.
+Cancellation wakes evaluator/I/O waits, not an invented child exit. Existing OVERLAPPED
+storage and buffers stay owned through cancellation/drain.
+
+Disown suppresses future job selection/cache/notifications, not pending native I/O or an
+already-acquired completion observer. Accepted ordinary/disowned processes survive fish's
+job-handle closure, but pipe pumps, deferred writers, descriptor bridges and wait services
+are shell-hosted: they end when fish shuts down or dies. Survival does not promise a daemon
+that maintains these streams. See [N5 lifecycle](03-process-execution-job-control.md#current-n5-native-lifecycle-contract)
+and the [final evidence location](coverage.md#n5-implementation-and-evidence-record);
+this source contract does not assert all gates passed or change N2/N3 evidence.
+
 ## Scope
 
 [`io.rs`](../../src/io.rs), [`fds.rs`](../../src/fds.rs), [`fd_monitor.rs`](../../src/fd_monitor.rs), [`fd_readable_set.rs`](../../src/fd_readable_set.rs), [`redirection.rs`](../../src/redirection.rs), and [`null_terminated_array.rs`](../../src/null_terminated_array.rs) own fish's descriptor model, pipe creation, buffered builtin output, redirection planning, readiness monitoring, and `argv`/`envp` construction. This is source-grounded design analysis, not an executed port.

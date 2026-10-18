@@ -4,7 +4,7 @@ This directory maps fish components to their Linux/POSIX dependencies and native
 
 ## Current status and planning entry points
 
-A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/cwd/discovery/globs, N2 streaming I/O/runtime ownership and N3 portable batch language are verified for the recorded host/volume/feature matrix.** It retains fish's existing evaluator and real native streams/environment/children; it is not yet an interactive Windows shell. See the explicit SMB glob capability limit below.
+A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/cwd/discovery/globs, N2 streaming I/O/runtime ownership, N3 portable batch language, N4 startup/persistence and N5 native jobs/control/accounting are verified for the recorded host/volume/feature matrix.** It retains fish's evaluator and real native streams/environment/children; it is not yet an interactive Windows shell. See the explicit SMB glob capability limit below.
 
 - [GOAL.md](GOAL.md) records the completed prototype contract and its historical native/Unix verification evidence; that record is not rewritten by the N1 integration.
 - [ROADMAP.md](ROADMAP.md) defines the eleven dependency-ordered phases, semantic decisions and mandatory acceptance gates.
@@ -14,6 +14,7 @@ A native `x86_64-pc-windows-msvc` batch runtime is implemented. **N1 filesystem/
 - The [N2 evidence record](coverage.md#n2-verified-evidence-record) records streaming/ordered-redirection/capture/runtime verification and the handoff to batch-language and job consumers.
 - The [N3 evidence record](coverage.md#n3-verified-evidence-record) maps portable options to eight behavioral families and records full batch-language, scripts, UTF-32 PCRE2, buffered read and formatter verification at source commit `861a9bdc6`.
 - [N4 delivery and evidence](GOAL_04.md#runnable-target-and-current-evidence) records verified native startup/state at `c52f6d98a`: three gates, eleven families, both harness profiles, minimum-Rust execution and retained Unix results.
+- [N5 delivery and evidence](coverage.md#n5-implementation-and-evidence-record) records source `0106034e1`: three integration IDs, 25 families, both harness/artifact profiles, real private assignment rejection, minimum-Rust execution and actual native/Unix smokes. Source contracts are in [process ownership](03-process-execution-job-control.md#current-n5-native-lifecycle-contract), [control/accounting](04-signals-events-waits.md#current-n5-control-and-accounting-contract) and [runtime consumers](12-concurrency-and-runtime-support.md#current-n5-lifecycle-consumers).
 
 The component analyses and old file counts describe the original pre-prototype audit. Current-source overlays in [filesystem analysis](07-filesystem-paths-wildcards.md) and [builtin analysis](10-builtins.md) distinguish integrating implementations from historical candidate APIs. Historical counts never establish current support, and proposed future scenarios are not passing tests.
 
@@ -39,12 +40,14 @@ commands, and implies private history; `-P/--private` isolates history;
 config/init/state effects. Syntax-only, feature, version, debug/category/trace/profile
 options and non-help formatter modes are implemented. Durable universal/history
 state, full core autoload and utility-free public `funcsave` are implemented.
-User-visible jobs, interactive/key-reader operation, active `complete -C` and help
-still require their owning phases; this is not a full interactive Windows shell.
+Native `&`, jobs/wait/disown, lifecycle events and accounting are implemented as described below.
+Interactive/key-reader operation, active `complete -C` and help still require their owning
+phases; this is not a full interactive Windows shell.
 
 Ordinary namespace, metadata and native permission options were delivered by N1. Full portable batch
-language/builtins and formatter flags are N3; startup/persistence is implemented and verified in N4; jobs/accounting belong to
-N5; interactive/key-reader flags to N6; advanced editor UX to N7; platform-only identity/device/
+language/builtins and formatter flags are N3; startup/persistence is implemented and verified in N4;
+N5 implements native jobs/control/accounting; interactive/key-reader flags belong to N6;
+advanced editor UX to N7; platform-only identity/device/
 quota options and additional script providers to N8; help/assets/localization to N9; release to
 N10. N11 reconciles completed behavior, not forgotten implementation.
 
@@ -66,7 +69,7 @@ internal scheduling; same-image fish children can receive extra logical descript
 private bridge. Arbitrary native children cannot inherit fish-numbered extra fds.
 Capture, substitutions, nested functions/blocks and buffered noninteractive reads use the same owned
 I/O infrastructure. Capture completion cancels/drains one available-byte snapshot instead of waiting
-for descendant EOF. User-visible job/control events remain N5. `cd -` uses shipped
+for descendant EOF. N5 now supplies user-visible native job/control events. `cd -` uses shipped
 directory-history functions; N4 now loads the normal core bootstrap and full
 embedded/disk autoload rather than only the N3 `_validate_int` dependency.
 
@@ -76,6 +79,44 @@ adds the actual native workflow-body run, native/Unix regression counts, minimum
 verification and real Unicode BOM/CRLF script/substitution/formatter smokes. No remote CI run is claimed.
 Required fixture absence still **hard-fails**, never skips. Development builds remain `--no-default-features`;
 N10 owns default-feature release/install certification.
+
+### Native jobs, cancellation and accounting
+
+Native `&` and mixed pipelines make real progress while later commands run. Function/block
+evaluation remains synchronous on the main evaluator thread; backgrounding is not a concurrent
+parser. Background builtins can defer already-produced output to an asynchronous writer;
+a final function/block producer still streams. Background stdin defaults to native NUL only
+when not explicitly redirected.
+
+`jobs` lists tracked jobs with command/group/last/PID/query options. Group is shell-local
+identity, not a POSIX pgid. `wait` supports all/PID/basename selection, `--any`, and cached
+completion; success means waiting succeeded, not that the child exited zero. `disown` removes
+future selection/cache/events and suppresses graceful-exit warnings; acquired observers can
+finish. Full unsigned PIDs remain pinned by retained process HANDLEs through live/cached and
+deferred event ownership. JobExit reports final job status; CallerExit keeps historical zero.
+
+Accepted ordinary and disowned work survives fish-owned Job Object closure on graceful or
+abrupt shell death, because acceptance clears kill-on-close while work is live. Ordinary
+graceful exit warns about running jobs. Host/console policies remain independent, and
+shell-hosted pipe, deferred-writer and bridge services end with fish.
+
+Ctrl-C/Ctrl-Break receipts use bounded atomic callback handoff and main-thread dispatch;
+callbacks never evaluate fish code. Epoch rearm retires the old permanently canceled token
+without letting a stale callback cancel the fresh one. Evaluator interruption returns shell
+130 and explicitly requests native Ctrl-Break only for eligible same-console native process
+groups. Unsupported GUI/detached/foreign topology or ignored requests do not escalate to kill.
+Cancellation/request is not child exit or signal death: real raw DWORD exits are preserved,
+0–255 maps unchanged and other native exits map to shell 1.
+
+`time` measures real wall/user/kernel deltas; `--print-rusage-self` reports actual shell-only
+native CPU/memory/fault/I/O fields with explicit unavailable POSIX categories. Native CPU
+units are 100 ns. Tracked child totals add completed cutoffs and live disjoint jobs once;
+root-observed completion or explicit owner detach ends accounting, excluding later descendant
+work. Sequential snapshots are not atomic or isolated to one timed command.
+
+Fork, same-PID exec and POSIX fg/bg remain permanently EXCLUDED, not deferred job-control
+emulation. Exact contracts, executed counts and artifact identities are linked above;
+N5 evidence does not certify N6–N11 or other host/volume/feature combinations.
 
 ### Native startup/state roots and testing
 
@@ -194,4 +235,4 @@ The original analysis-only audit completed these documentation checks:
 - Matched all 21 then-current workspace crates and the complete 2,247-file audit inventory to analysis ownership, with no missing or extra source paths at that baseline.
 - Checked the critical Windows inheritance, console-control, file-replacement and directory-notification contracts against Microsoft documentation.
 
-These historical checks establish original documentation structure and ownership. N1–N4 evidence is recorded separately in the coverage ledger. Later phases remain unverified until their implementations and exact execution evidence land. GOAL.md remains the unchanged prototype history.
+These historical checks establish original documentation structure and ownership. N1–N5 evidence is recorded separately in the coverage ledger. Later phases remain unverified until their implementations and exact execution evidence land. GOAL.md remains the unchanged prototype history.

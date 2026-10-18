@@ -11,7 +11,7 @@ outside environment locks with deferred failed-mutation replay. History invalida
 owned snapshot stale without implicitly merging another session.
 
 Real UNC fixture behavior is not a live SMB-server disconnect claim. N6/N7 reader-settings
-generation/history-stale interfaces do not enable editor readiness; N5 control/jobs remain deferred.
+generation/history-stale interfaces do not enable editor readiness; N5 control/jobs now consume the runtime below.
 See the [N4 record](coverage.md#n4-implementation-and-evidence-record)
 for final combined results; the original candidate audit remains historical.
 
@@ -36,13 +36,54 @@ See [N2 evidence](coverage.md#n2-verified-evidence-record).
   token cannot publish merely because a newer request is active; completed-result delivery is main-thread work.
 
 N4 watchers now consume these services as described above. N5 user-visible control/job events
-and N7 editor background work retain ownership; N2 does not emulate Unix signal masks/atfork.
+now use the owners below; N7 editor background work retains its own scope. N2 does not emulate Unix signal masks/atfork.
 
 N3 now consumes these services for actual nested capture, source/read and mixed function/block
 pipelines. Main-thread generic/variable event dispatch, wildcard-selected debug categories,
 native file sinks, argv trace hooks and real evaluation profiles are exercised; none claims
 N5 control delivery or N6/N7 editor readiness. [N3 evidence](coverage.md#n3-verified-evidence-record)
 records the tested consumers separately from N2's runtime foundations.
+
+## Current N5 lifecycle consumers
+
+[`signal_windows.rs`](../../src/signal_windows.rs) adds a deliberately separate bounded
+console callback handoff: static receipt-epoch atomics, one nonspinning admission CAS,
+and event signaling only. There is no callback mutex, allocation, parser access or user
+function evaluation. Normal-thread registration/rearm/shutdown owns the HANDLEs and drains
+admitted callbacks before replacement or release. Epoch retirement leaves old cancellation
+tokens canceled forever; a stale callback cannot acquire a newly published token, while
+new receipts are reconciled without losing main-thread delivery.
+
+[`proc_windows.rs`](../../src/proc_windows.rs) observes native runtime notifications on
+the evaluator thread. Process HANDLEs pin full `u32` PID identity in live jobs, acquired wait
+observers, bounded completion caches and deferred lifecycle events. Removal from one consumer
+does not invalidate another consumer's lease. Late completion replay targets only the new
+one-shot handler; event blocking retains both event data and native ownership through dispatch.
+Disown removes future selection/cache/event production but already-acquired observers finish.
+
+True native background/mixed progress does not move the function/block evaluator onto a
+worker thread. A background builtin's retained output can drain asynchronously, whereas
+the last function/block producer streams during synchronous evaluation. Callback-triggered
+shell exit must not be delayed by waiting for an unrelated unreleased foreground child or
+overwrite the callback's shell status with that child's eventual status.
+
+Accepted per-job Job Objects have kill-on-close cleared; ordinary/disowned processes are not
+killed by fish exiting, including abrupt shell death. Graceful shutdown warns only for ordinary
+running jobs and drains shell-owned pipe/wait/bridge services rather than preserving them as
+an external daemon. Explicit rollback is confined to an unaccepted pipeline's owned group.
+Cancellation requests native Ctrl-Break only for eligible same-console native group roots;
+unsupported/ignored requests do not escalate to forced termination.
+
+[`native_accounting.rs`](../../src/native_accounting.rs) serializes completed-plus-live job
+CPU aggregation with cutoff, without double-adding root process CPU. OS counters are sampled
+sequentially, and accounting ends at observed root/internal completion or explicit owner
+release, not at eventual surviving-descendant exit. This does not establish atomic snapshots,
+POSIX rusage equivalence or N6/N7 editor readiness.
+
+See [control/status/accounting details](04-signals-events-waits.md#current-n5-control-and-accounting-contract)
+and [process lifetime policy](03-process-execution-job-control.md#current-n5-native-lifecycle-contract).
+These are source contracts, not a declaration that all gates passed; final execution evidence
+belongs in the [N5 implementation and evidence record](coverage.md#n5-implementation-and-evidence-record).
 
 ## Scope
 

@@ -7,13 +7,103 @@ queues universal callbacks/effects outside environment locks and retains failed-
 deferred replay after a successful retry. Directory changes are invalidation hints delivered by
 `universal_notifier/windows{,_io}.rs` through N2 runtime ownership, not Unix signals or fabricated
 child events. Cancel/drain protects notification storage. Native control/job/shell lifecycle
-events and accounting remain N5; quotas/Unix-only identity policy remain N8. The original
+events and accounting now use the N5 owners below; quotas/Unix-only identity policy remain N8. The original
 candidate audit below is historical; [N4 combined evidence](coverage.md#n4-implementation-and-evidence-record)
 records the completed native/minimum-Rust/retained matrix.
 
+## Current N5 control and accounting contract
+
+[`signal_windows.rs`](../../src/signal_windows.rs), [`proc_windows.rs`](../../src/proc_windows.rs),
+[`proc_status_windows.rs`](../../src/proc_status_windows.rs), [`native_accounting.rs`](../../src/native_accounting.rs)
+and [`timer_windows.rs`](../../src/timer_windows.rs) implement these native contracts.
+This describes current source, not completed acceptance evidence. The
+[N5 implementation and evidence record](coverage.md#n5-implementation-and-evidence-record)
+owns final revisions/artifacts/results; N1–N4 records remain unchanged.
+
+### Callback handoff, epochs and dispatch
+
+`SetConsoleCtrlHandler` receives native Ctrl-C, Ctrl-Break and best-effort console-close
+notifications. The callback uses static atomics, a bounded single-CAS admission gate and
+`SetEvent`; it does not allocate, acquire a mutex, follow an `Arc`/parser pointer, spin,
+evaluate functions or dispatch language events. Normal-thread owners retain all callback
+HANDLEs, unregister and drain admitted callbacks before freeing them. A failed checked
+handoff/rearm is an error, not a fabricated successful cancellation.
+
+Per-kind receipt epochs count controls independently; cross-kind ordering is not promised.
+Receipt, cancellation acknowledgement and main-thread event delivery are separate.
+Rearm closes/drains the outgoing generation, cancels its old token permanently, acknowledges
+the cutoff and publishes a new token. A stale callback cannot cancel the replacement token;
+a genuinely newer receipt is reconciled into it. Existing waiters holding the retired token
+remain canceled, and rearming does not discard undelivered event receipts. Main-thread
+dispatch transfers counts to the event subsystem, respecting blocked/reentrant delivery.
+Generic/variable/process/job/caller/shell-exit functions also remain main-thread evaluator work.
+Specific late lifecycle handlers and their deferred process leases are detailed in
+[process ownership](03-process-execution-job-control.md#lookup-completion-and-language-events).
+
+Native control names are `CTRL_C`, `CTRL_BREAK`, `CTRL_CLOSE` (also their `_EVENT`
+spellings), not a POSIX signal-number/disposition table. Registration does not make receipt
+an acknowledgement by a child. Console-close may be followed immediately by Windows
+termination and cannot guarantee parser/history cleanup or shell-exit handlers;
+logoff/shutdown notifications and arbitrary Unix signals are not supported deliveries.
+
+### Cancellation and completion transitions
+
+Evaluator cancellation wakes native waits and returns shell interruption status 130.
+On the main thread, the process owner explicitly requests native Ctrl-Break for eligible
+retained `CREATE_NEW_PROCESS_GROUP` roots sharing fish's current console. It does not
+broadcast Ctrl-C, claim POSIX SIGINT/SIGTERM, or silently escalate when a child ignores a
+request. GUI, detached and foreign-console roots cannot use this cooperative operation;
+they remain live unless they independently exit or are explicitly terminated elsewhere.
+No console attachment change is supported while the handler owner is installed.
+
+| Transition/observation | What is known | Status and ownership consequence |
+|---|---|---|
+| Shell receives Ctrl-C/Ctrl-Break | Cancellation requested; no child response observed | Wake evaluator/native waits; interrupted shell evaluation is 130, not child exit or signal death. |
+| Eligible root's Ctrl-Break API request succeeds | Native request issued, not acknowledged | Root may remain running; jobs can report requested state. No completion/event is invented. |
+| GUI/detached/foreign-console topology, or request API failure | Request unsupported or failed | Diagnose explicitly; keep live ownership and real waits; no forced fallback. |
+| Root ignores a request | Still running at observation | Retain the request provenance and live process; no timeout-to-kill escalation. |
+| Root exits after a request | HANDLE signaled and `GetExitCodeProcess` returned a DWORD | Record actual completion; temporal sequence alone is not proof the control caused the exit. |
+| Unrelated/high native DWORD exit | Actual raw exit, including all high bits | Preserve raw DWORD; map 0–255 unchanged and every other DWORD to shell 1. Never infer cancellation or a Unix signal. |
+| Evaluator stops but child has not exited | Shell cancellation only | Shell result 130 is separate from the child's still-live/native completion status and eventual events. |
+| Explicit forced rollback of an unaccepted owned group | `TerminateJobObject`/retained-root termination requested, then real waits | Abrupt owned-process cleanup, not cooperative acknowledgement; never target enclosing/foreign jobs. Observed DWORD remains the completion source. |
+
+Native raw completion is retained even if the stage's own I/O fails; that failure has
+separate provenance and can make an otherwise successful stage fail. `$status` and
+`$pipestatus` are shell-facing results, not a lossless encoding of native DWORDs.
+Process events carry mapped real completion; JobExit carries actual final job status,
+while CallerExit preserves its historical zero argument. Cancellation alone generates
+neither a child completion nor a synthetic stopped/continued/signal transition.
+
+### Native accounting units and observation scope
+
+`GetProcessTimes` supplies fish/root process user and kernel CPU, creation and exit/current
+timestamps. FILETIME and Job Object CPU values are **100-nanosecond units**:
+10,000,000 ticks per second, not Unix clock ticks or milliseconds. Job Object basic and
+I/O accounting covers OS-attributed members/descendants of each disjoint owned launch job.
+Root process times are not added again to that job aggregate.
+
+The registry sums completed cutoff snapshots plus live registered job CPU exactly once.
+Completion takes a final snapshot when all tracked roots are observed complete and internal
+stage completion permits owner finish; explicit monitoring detach/release takes its own
+cutoff. Disown itself changes lookup/notification policy, not that accounting cutoff.
+Descendant CPU up to that observation is included; later surviving-descendant work is
+excluded even if Windows still has the Job Object. This is not POSIX wait/rusage lifetime
+accounting or per-command isolation. Concurrent background jobs contribute to a timed
+interval. Fish and individual job counters are sampled sequentially, not atomically across
+the system; checked overflow/decreasing counters/query failures are reported, not zeroed.
+
+The `time` decorator uses monotonic `Instant` elapsed time plus real fish and tracked-child
+user/kernel CPU deltas, and writes its report to stderr. `--print-rusage-self` also writes to
+stderr and reports **shell process only**: elapsed/user/kernel seconds, current/peak working
+set bytes, peak pagefile bytes, combined page faults, and read/write/other I/O operation and
+byte counts. It explicitly marks unavailable POSIX minor/major fault split, swaps, block I/O,
+IPC messages, signals, voluntary/involuntary context switches and shared/unshared memory
+integrals. Native I/O operations are not POSIX blocks and pagefile usage is not a swap count.
+These measurements do not implement quotas; resource-limit policy remains N8.
+
 ## Scope and evidence boundary
 
-This source audit covers [`signal.rs`](../../src/signal.rs), [`event.rs`](../../src/event.rs), [`topic_monitor.rs`](../../src/topic_monitor.rs), [`timer.rs`](../../src/timer.rs), and [`builtins/ulimit.rs`](../../src/builtins/ulimit.rs). Process lifecycle and language wait records are detailed in [03](03-process-execution-job-control.md); descriptor wakeups are in [05](05-io-redirection-file-descriptors.md). Windows APIs below are candidates, not an implemented or exercised port.
+This source audit covers [`signal.rs`](../../src/signal.rs), [`event.rs`](../../src/event.rs), [`topic_monitor.rs`](../../src/topic_monitor.rs), [`timer.rs`](../../src/timer.rs), and [`builtins/ulimit.rs`](../../src/builtins/ulimit.rs), with implemented native owners above. Process lifecycle and language wait records are detailed in [03](03-process-execution-job-control.md); descriptor wakeups are in [05](05-io-redirection-file-descriptors.md). The original per-component candidate/scenario table below is historical, not current support or extra executed evidence.
 
 `timer.rs` implements the `time` decorator's elapsed/CPU accounting, not timer scheduling, a timer thread, or timer-driven event delivery. `SIGALRM` in the signal handler is a deliberate no-op used for signal-torture testing, not evidence of a scheduler.
 
@@ -57,4 +147,4 @@ Unsupported categories should reuse explicit unavailability diagnostics rather t
 
 ## Classification
 
-Language event dispatch and generation bookkeeping are **portable logic with platform sources**. Signal reception/dispositions, child waits and resource limits are **POSIX-backed with semantic gaps**. Linux unnamed semaphores and extra RLIMIT categories are **Linux-specialized**. `time` is **POSIX-backed accounting**, not a scheduling subsystem.
+Language event dispatch and generation bookkeeping are **portable logic with platform sources**. Native control reception, retained-handle child waits and measured accounting now use the N5 owners above, without POSIX signal/stop emulation. Resource limits retain **POSIX semantic gaps** for N8. Linux unnamed semaphores and extra RLIMIT categories are **Linux-specialized**. `time` is elapsed/CPU accounting, not a scheduling subsystem.

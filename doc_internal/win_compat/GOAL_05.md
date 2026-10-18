@@ -1,12 +1,14 @@
 # GOAL_05 — Cancellation, asynchronous jobs, events and accounting
 
 **Phase: N5**  
-**Status: planned / not started**  
+**Status: implemented and verified at source `0106034e1`**  
 **Primary native target:** `x86_64-pc-windows-msvc`; ARM64 is a separate extension.
 
-Acceptance IDs below specify future required behavior, not existing test names,
-runnable targets or passing results. This follows the approved roadmap at commit
-`2acbbad4b` and preserves the historical proof-of-concept [GOAL.md](GOAL.md).
+Native source and required acceptance targets now exist on
+`platform/windows/process-supervision`, based on `3847f13db`. The runnable composite
+gate is described below; final execution evidence belongs to the
+[N5 ledger](coverage.md#n5-implementation-and-evidence-record).
+Historical [GOAL.md](GOAL.md) and N1–N4 evidence remain unchanged.
 
 ## Objective
 
@@ -137,9 +139,63 @@ calling an unrelated mock notifier. Required console/job fixtures block exit if 
   missing IDs, zero runs, ignored cases and unavailable required fixtures as success.
 - Record actual implementation names/commands, discovered/executed/nonignored counts,
   toolchain/SDK, target, source revision, results and artifacts when tests land.
-  This planning contract asserts no runnable future Cargo target or passing result.
+  Executed counts, conditions and artifacts belong to the linked N5 ledger.
 - Retain a real runtime smoke launching, inspecting and waiting on a background
   pipeline, cancelling an owned foreground fixture and observing disown survival.
+
+### Runnable targets and native ownership contract
+
+Build native fish, formatter and both real probes in debug and release with
+`--locked --target x86_64-pc-windows-msvc --no-default-features`. The authoritative
+integration registry is `tests/windows_n5.rs`: `N5_JOBS`, `N5_CANCEL`, `N5_ACCOUNT`.
+Set `FISH_NATIVE_TEST_BIN`/`FISH_NATIVE_TEST_RELEASE_BIN`,
+`FISH_NATIVE_TEST_PROBE`/`FISH_NATIVE_TEST_RELEASE_PROBE`, and
+`FISH_NATIVE_N5_GUI_FIXTURE`/`FISH_NATIVE_N5_RELEASE_GUI_FIXTURE` to their respective
+debug/release artifacts. Profile-matched probes and a real GUI PE image are required.
+
+```powershell
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --test windows_n5 -- --nocapture
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --release --test windows_n5 -- --nocapture
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --lib exec::native_launch::tests::assignment_quota_rollback_preserves_host -- --exact --nocapture
+cargo test --locked --target x86_64-pc-windows-msvc --no-default-features --release --lib exec::native_launch::tests::assignment_quota_rollback_preserves_host -- --exact --nocapture
+```
+
+**N5-JOBS is composite:** integration alone is insufficient. Its private production-owner
+test creates a real active-process quota on the target Job Object, rejects an actual
+suspended-process assignment and proves cleanup/host-sentinel survival using a private
+outer job. The test root never joins the limited target. Windows itself terminates a
+quota-rejected process; this is not evidence that PendingChild issued that termination.
+There is no production fault-injection API or assumption that enclosing UI restrictions
+reject assignment into an unrestricted nested job.
+
+The integration registry has 12 JOBS, 4 CANCEL and 9 ACCOUNT families, each run against
+both artifacts in both harness profiles. CI requires the exact registry and the private
+owner test in each profile; unavailable mandatory fixtures fail instead of skipping.
+Real close uses owned `CreatePseudoConsole`/`ClosePseudoConsole`, whose documented action
+sends CTRL_CLOSE to connected clients. Process exit is observed separately, including
+Windows 11 24H2's asynchronous close return. A successful HWND message post is not close
+delivery or an acknowledgement, and no global terminal setting is changed.
+
+N5 keeps parser evaluation on its owning thread. Native background work and deferred
+builtin output progress asynchronously; functions themselves remain synchronous and
+their final producer streams before return. Retained process HANDLEs pin native u32
+PID identities through caches and deferred events. JobExit uses actual final status;
+caller-exit retains its historical zero argument.
+
+Accepted ordinary and disowned native work survives graceful or abrupt shell exit.
+Graceful exit warns for ordinary live work; disown suppresses future lookup/notifications,
+not acquired observers or pending I/O while fish lives. Shell-owned pipe services are not
+promised after fish exits. Console-host closure, logoff and system shutdown can still
+terminate attached clients; this policy concerns fish exit, not immunity to OS controls.
+Ctrl-C/Break interrupts the evaluator with shell status 130,
+and eligible same-console native roots receive an explicitly native Ctrl-Break request.
+Ignored/unsupported requests leave live records; there is no implicit force escalation.
+The [control transition table](04-signals-events-waits.md) distinguishes requests from exits.
+
+`native_accounting.rs`/`timer_windows.rs` implement real shell and disjoint owned-job CPU
+accounting in 100-ns units. Completed/live totals charge once; observed final-root completion
+or monitoring detach fixes the cutoff, excluding later descendant work. This is accounting,
+not N8 quota enforcement. N6 reader/mode ownership and N7 interactive behavior remain deferred.
 
 ## Definition of done and handoff
 

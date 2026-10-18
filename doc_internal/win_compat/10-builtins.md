@@ -12,9 +12,41 @@ without utilities. `status is-login` and its default login summary report real N
 
 N4 numeric/time locale updates have actual printf/history consumers; complete message catalogs
 and locale-format parity remain N9. `complete -C`, commandline/editor/active abbreviation operations
-remain N7/N6; jobs/wait/disown/accounting remain N5. See the
+remain N7/N6; jobs/wait/disown/accounting now use the N5 overlay below. See the
 [N4 record](coverage.md#n4-implementation-and-evidence-record) for final combined results.
 The original audit remains historical; earlier evidence/counts are not changed.
+
+## Current N5 lifecycle and accounting overlay
+
+`jobs` listing/command/group/last/PID/query options now report real tracked native jobs;
+Group is shell-local identity, not a POSIX pgid, and no `/proc` CPU column is fabricated.
+`wait` supports all/PID/basename selection, `--any/-n`, acquired live observers and bounded
+cached completions; successful waiting returns success, not the child's exit status.
+`disown` uses last-job/PID selection, removes future lookup/cache/event production and
+suppresses graceful-exit warnings while existing acquired observers can finish. Ordinary
+accepted and disowned work survives fish-owned Job Object closure on graceful/abrupt exit;
+shell-hosted pipe/bridge services do not survive the shell.
+
+Native `&`/mixed progress retains synchronous function/block evaluation, background-builtin
+deferred output versus final-function streaming, and default native NUL stdin only when
+not explicitly redirected. Full unsigned PID identity remains pinned by retained process
+HANDLEs through caches and blocked/late one-shot events. `JobExit` uses final job status;
+`CallerExit` retains historical zero. Native Ctrl controls request cancellation with shell
+130; they do not themselves prove exit/signal death. Eligible roots can receive explicit
+native Ctrl-Break, without unsupported/ignored-request escalation.
+
+`time` reports monotonic elapsed and actual fish/tracked-child user/kernel CPU using checked
+100-ns native accounting, with completed-plus-live totals and explicit completion/detach
+cutoffs. `--print-rusage-self` reports real shell-only native fields/units and unavailable
+POSIX categories, not fictitious zero counters. Help remains N9; interactive/editor,
+quota/identity and asset certification remain with N6–N11 as already assigned.
+Fork, same-PID `exec` and POSIX `fg`/`bg` remain permanently **EXCLUDED**, with reserved-name
+rejection and no external fallback or Windows suspension/reattachment emulation.
+
+See [process contracts](03-process-execution-job-control.md#current-n5-native-lifecycle-contract),
+[control/accounting transitions](04-signals-events-waits.md#current-n5-control-and-accounting-contract)
+and the [N5 implementation and evidence record](coverage.md#n5-implementation-and-evidence-record).
+This source overlay does not declare all N5 gates passed or revise N1–N4 evidence.
 
 ## Current native registry and option ownership
 
@@ -70,7 +102,7 @@ Rows retain separate command/module identities even when backend work is shared.
 |---|---|---|---|
 | [`abbr.rs::abbr`, `Abbreviation`, `RegexBuilder`](../../src/builtins/abbr.rs) | In-memory abbreviation CRUD and PCRE2 pattern compilation; no builtin-specific Linux syscall. Expansion functions execute elsewhere. | Reuse storage/PCRE2-32 and fish escaping; function-backed expansion delegates evaluation, not an implicit Windows shell. | Regex/function abbreviations, rename/query/erase, non-ASCII names, printed definitions re-evaluate correctly. |
 | [`argparse.rs::argparse`, `exec_subshell`](../../src/builtins/argparse.rs) | Option parsing/variable creation is pure; validation commands evaluate arbitrary fish code. | Preserve parser/env logic; validation inherits process/I/O backend and cancellation semantics. | Exclusive/required flags, validation invoking a native program, validation status/output and local `_flag_*` variables. |
-| [`bg.rs::send_to_bg`, `Job::resume`](../../src/builtins/bg.rs) | Delegated pgroup job control/resume (SIGCONT); rejects jobs without job control. | Background tracking can exist, but no supported general Win32 SIGCONT/stopped-job equivalent. Explicitly reject unsupported resume rather than `SuspendThread`/`ResumeThread` emulation. | Already-running background job; stopped-job operation rejected consistently; invalid PID/job selection. |
+| [`bg.rs::send_to_bg`, `Job::resume`](../../src/builtins/bg.rs) | Delegated pgroup job control/resume (SIGCONT); rejects jobs without job control. | Permanently EXCLUDED on native Windows. Native `&` is separate; no stopped-job resume, `SuspendThread`/`ResumeThread` substitute or external fallback. | Reserved `bg` rejection and no same-named external dispatch; native background positives belong to N5. |
 | [`bind.rs::BuiltinBind`, `bind`](../../src/builtins/bind.rs) | Binding-table manipulation and key parsing; delegates terminal key descriptions/encoding. No direct Linux syscall in builtin. | Reuse logical bindings with terminal transport's key model; console key events and VT encodings need coherent identity. | Preset/user modes, named keys, Unicode modifiers and emitted definitions roundtrip. |
 | [`block.rs::block`](../../src/builtins/block.rs) | Pure parser event-block counters/scope selection; not OS signal masking. | Reuse with platform-neutral event dispatch; no Win32 signal-mask call required. | Local/global event blocking and delayed delivery after leaving scope. |
 | [`break.rs::r#break`](../../src/builtins/break.rs) | Pure wrapper over shared `builtin_break_continue`. | Reuse parser loop state; no native API. | Nested loop exits; error outside loop. |
@@ -83,20 +115,20 @@ Rows retain separate command/module identities even when backend work is shared.
 | [`contains.rs::contains`](../../src/builtins/contains.rs) | Pure string/list membership and index output; no Linux API. | Reuse fish comparison. | Empty needle, Unicode, index and missing arguments. |
 | [`continue.rs::r#continue`](../../src/builtins/continue.rs) | Pure shared loop-control wrapper. | Reuse parser loop state. | Nested loops and outside-loop error. |
 | [`count.rs::count`, `Arguments`](../../src/builtins/count.rs) | Pure counting plus delegated redirected input; counts argv **and newline-terminated stdin records**, excluding incomplete final line. | Native byte-stream reader; no CRLF/text-mode rewriting that changes record count unexpectedly. | Arguments plus pipe data, missing final newline, closed stdin, zero-count status. |
-| [`disown.rs::disown_job`, `add_disowned_job`](../../src/builtins/disown.rs) | Stopped jobs receive `killpg(SIGCONT)`; deferred flag removes from job list safely; Unix still reaps disowned children. | No equivalent stopped-job resume. Release tracking/lifetime policy without killing child; Job Object membership cannot simply be removed, so choose grouping/kill-on-close policy before launch. | Disown nested job, disown then shell exit, no kill-on-close surprise, no later summary or stale wait identity. |
+| [`disown.rs::disown_job`, `add_disowned_job`](../../src/builtins/disown.rs) | Stopped jobs receive `killpg(SIGCONT)`; deferred flag removes from job list safely; Unix still reaps disowned children. | N5 native disown changes future selection/cache/event policy without killing accepted work; acquired observers and shell-side I/O ownership finish normally. No stopped-job resume or removal from Job Object membership. | Disown nested job, graceful/abrupt shell exit, acquired wait versus future lookup, no later summary/cache insertion. |
 | [`echo.rs::echo`](../../src/builtins/echo.rs) | Pure option/escape/output semantics. | Reuse fish byte/text conversion and common output endpoints. | `-n/-s`, escapes/NUL, redirected binary output and broken pipe. |
 | [`emit.rs::emit`, `event::fire_generic`](../../src/builtins/emit.rs) | Pure language-event production; no OS signal sent. | Reuse event queue/parser; no `GenerateConsoleCtrlEvent` for `emit`. | Arguments, nested emit, blocked handler and status preservation. |
 | [`eval.rs::eval`](../../src/builtins/eval.rs) | Parser re-evaluation and inherited I/O/job group; arbitrary evaluated code can use every OS backend. | Reuse evaluation, replacing fd endpoint/group assumptions; never replace fish evaluation with `cmd.exe`/PowerShell. | Nested eval, stdout/stderr redirections, command failure and job cancellation. |
 | [`exit.rs::exit`, `parse_return_value`](../../src/builtins/exit.rs) | Sets shell exit request; shutdown/history/jobs are delegated. No builtin-specific Linux syscall. | Retain exit-status selection; native shutdown cleanup policy belongs to shell/process backend. | Explicit/default status, active-job exit warning, history save and console mode restoration. |
 | [`false.rs::r#false`](../../src/builtins/false.rs) | Pure failure status, no Linux dependency. | No native API. | Always nonzero without output. |
-| [`fg.rs::fg`, `tcsetattr`, `TtyHandoff`](../../src/builtins/fg.rs) | Terminal modes/foreground pgroups, resume and wait delegated to job backend. | `GetConsoleMode`/`SetConsoleMode`, foreground input/wait policy and Ctrl-event routing; **not** window focus or terminal pgroup ownership. | Background pipeline foregrounded; child changes modes; wait cancellation; unsupported stopped state explicit. |
+| [`fg.rs::fg`, `tcsetattr`, `TtyHandoff`](../../src/builtins/fg.rs) | Terminal modes/foreground pgroups, resume and wait delegated to job backend. | Permanently EXCLUDED on native Windows; no native reattachment, pgroup transfer or window-focus emulation. | Reserved `fg` rejection and no same-named external dispatch; do not rename a native wait into foreground job control. |
 | [`fish_indent.rs::fish_indent`, `main`, `do_indent`](../../src/builtins/fish_indent.rs) | Formatting/AST/highlight output largely pure; standalone init, borrowed stdin, Unix `OsStrExt::from_bytes`, file open/create and SIGINT status are not. | Native OsStr/UTF-16 paths, common input endpoints and filesystem sharing policy; reuse formatter rather than fork it. | Builtin and executable input, Unicode file path, overwrite/check modes, HTML/ANSI output, interrupted stdin and write errors. |
 | [`fish_key_reader.rs::fish_key_reader`, `main`](../../src/builtins/fish_key_reader.rs) | `isatty`, termios control chars VEOF/VINTR, reader/input decoder and signal/terminal lifecycle. | Console/ConPTY transport; structured console events may bypass byte decoder, while VT transport preserves it. | Ctrl-C/EOF, escape sequence versus key event, continuous mode, nonterminal rejection and mode restoration. |
 | [`function.rs::function`, `parse_cmd_opts`](../../src/builtins/function.rs) | Parser-special definition; most work pure, but `%self` uses getpid and signal/process/job/caller event options depend on native lifecycle. | `GetCurrentProcessId`; supported logical events and process backend. Do not claim unsupported Unix signals are delivered by Win32. | Inherited variables, wraps, `--on-event`, variable/process/job/caller and unsupported `--on-signal` registration. |
 | [`functions.rs::functions`, `function::get_props_autoload`](../../src/builtins/functions.rs) | Metadata/copy/erase pure; existence/list/definition can autoload from filesystem; color output delegates highlight/terminal. | Native function-path discovery and evaluator, not just an in-memory registry. | Autoload on query/definition, copy and erase handler cleanup, details/path metadata, color redirected to file. |
 | [`gettext.rs::gettext`](../../src/builtins/gettext.rs) | Registered as `_`, not `gettext`; delegates `LocalizableString::from_external_source`. No direct Linux syscall. | Existing localization backend/assets; not automatically a Win32 resource string lookup. | Embedded translation, missing/external text fallback and Unicode output. |
 | [`history.rs::history`](../../src/builtins/history.rs) | Search/append/remove and private/session state partly pure; clear/save/merge call history storage and reader state. | Native file locking/sharing/atomic-replace backend from [09](09-history-functions-autoload.md). | Concurrent shells save/merge, clear-session versus full clear, private mode, timestamp formatting and cancellation. |
-| [`jobs.rs::jobs`](../../src/builtins/jobs.rs) | Logical job/PID/pgroup state and Linux procfs CPU accounting delegated to proc. | Tracked native PIDs plus synthetic job state and `GetProcessTimes`; no fabricated pgroups or stopped status. | Job IDs versus process IDs, multi-process pipeline, completed/hidden jobs and CPU output. |
+| [`jobs.rs::jobs`](../../src/builtins/jobs.rs) | Logical job/PID/pgroup state and Linux procfs CPU accounting delegated to proc. | N5 listing/options use real native tracking, shell-local Group identity and explicit Ctrl-Break-requested running state; no native procfs CPU column or synthetic stopped state. | Job IDs versus unsigned process IDs, native/mixed pipeline, completed/disowned exclusion and requested-versus-exited state. |
 | [`math.rs::math`, `tinyexpr::te_interp`, `Arguments`](../../src/builtins/math.rs) | Pure evaluator/numeric formatting; redirected input uses shared fd reader. | Reuse math implementation and native input; no native calculator/subprocess required. | Pipe/argv expressions, bases/scales, division/domain errors and precision boundaries. |
 | [`path.rs::path`, `path_filter_maybe_is`, `filter_path`](../../src/builtins/path.rs) | Mixed lexical and filesystem operations; Unix MetadataExt/FileTypeExt, PATH_MAX, effective Uid/Gid, mode bits and access checks. Full subcommand split below. | Shared path/metadata backend (`CreateFileW`, `GetFileInformationByHandleEx`, reparse/file-ID policy); do not replace ownership/execute predicates with guessed values. | Every subcommand with argv and newline/NUL input; native root/drive/UNC syntax; permissions/identity/time cases. |
 | [`printf.rs::printf`, `State`, `get_numeric_locale`, `sprintf_locale`](../../src/builtins/printf.rs) | Format/escape/numeric logic pure; decimal parsing/output uses locale backend. | Reuse fish_printf and numeric locale abstraction; no C-runtime `printf` rewrite or automatic text-mode conversion. | Locale decimal point plus C-locale input fallback, invalid number, width/precision, encoded bytes/NUL and partial writes. |
@@ -114,7 +146,7 @@ Rows retain separate command/module identities even when backend work is shared.
 | [`true.rs::r#true`](../../src/builtins/true.rs) | Pure success; also registered as `:`. | No native API. | Both spellings return success without output. |
 | [`type.rs::r#type`, `get_props_autoload`, `path_get_paths`](../../src/builtins/type.rs) | Builtin metadata pure; function query can autoload; external discovery and highlighted definitions delegated. | Same resolver/autoloader as actual execution and completion. | Function/builtin/external shadowing, all/force-path/query options and Unicode executable path. |
 | [`ulimit.rs::ulimit`, `limits`, `RESOURCE_ARR`](../../src/builtins/ulimit.rs) | `getrlimit/setrlimit`, soft/hard and platform resource set. | Job Object limits only approximate selected categories; no general equivalent for file count/size, Unix signals, stack/core/ownership-scoped quotas. Full category mapping in [04](04-signals-events-waits.md). | All categories/unavailable diagnostics; no successful unsupported enforcement; changed limits have documented child scope. |
-| [`wait.rs::wait`, `SigChecker`, `proc_wait_any`](../../src/builtins/wait.rs) | Logical cached wait records and PID/name selection; signal-cancellable child wait loop. Does not directly expose a Win32 HANDLE. | Wait service/process completion plus cancellation event; preserve post-job-removal cache behavior. | `-n`, multiple names/PIDs, already-exited cached child, invalid child and Ctrl-C. |
+| [`wait.rs::wait`, `SigChecker`, `proc_wait_any`](../../src/builtins/wait.rs) | Logical cached wait records and PID/name selection; signal-cancellable child wait loop. Does not directly expose a Win32 HANDLE. | N5 native runtime and retained process leases supply real live/cached completion; success is wait success, cancellation is shell 130, and disown excludes future lookup without invalidating acquired observers. | `-n`, multiple names/PIDs, cache consumption/eviction, invalid child, cancellation and acquired-observer/disown races. |
 | [`mod.rs`, `prelude`](../../src/builtins/mod.rs) | Module inventory/reexports and shared imports (`libc::c_int` included); no Linux syscall itself. | Keep one registry/prelude; remove unconditional Unix type imports at their shared boundary. | Builtin name enumeration agrees with registry, modules and parser-special forms. |
 
 ## Nested `string/` modules: complete inventory
