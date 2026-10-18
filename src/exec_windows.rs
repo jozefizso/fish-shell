@@ -5,8 +5,8 @@ use crate::builtins::{
 };
 use crate::env::{EnvMode, Environment as _, READ_BYTE_LIMIT};
 use crate::io::{
-    IoBuffer, IoChain, IoStreams, NativeDeferredWriter, NativeEndpoint, OutputStream,
-    native_input_pipe, native_output_pipe, native_synchronous_pipe,
+    IoBuffer, IoChain, IoStreams, NativeDeferredWriter, NativeEndpoint, NativeIoDirection,
+    OutputStream, native_input_pipe, native_output_pipe, native_synchronous_pipe,
 };
 use crate::parser::{Block, BlockType, Parser, ParserEnvSetMode};
 use crate::path::{native_absolute_path, native_resolve_executable};
@@ -26,7 +26,8 @@ use shared::{
 #[path = "exec/windows_launch.rs"]
 mod native_launch;
 pub use native_launch::{
-    NativeChild, NativeLaunchGroup, NativeLaunchPlan, initialize_native_image_identity,
+    NativeBreakAttempt, NativeBreakOutcome, NativeChild, NativeLaunchGroup, NativeLaunchPlan,
+    initialize_native_image_identity,
 };
 
 fn diagnostic(message: impl std::fmt::Display) {
@@ -87,8 +88,9 @@ fn run_internal(
                             .iter()
                             .any(|spec| spec.fd == 0 && !spec.is_close()));
                 let mut argv: Vec<&wstr> = process.argv().iter().map(|s| s.as_utfstr()).collect();
+                let exiting_before = parser.libdata().exit_current_script;
                 crate::trace::trace_if_enabled_with_args(parser, L!(""), process.argv());
-                let status = builtin_run(parser, &mut argv, &mut streams);
+                let mut status = builtin_run(parser, &mut argv, &mut streams);
                 if let Some(error) = streams
                     .stdin_file
                     .as_ref()
@@ -100,15 +102,22 @@ fn run_internal(
                     streams.err.flush_and_check_error();
                     // builtin_run already owns output flushing and its empty
                     // preserve-status result. Only an actual input failure overrides it.
-                    return Ok(if status.is_empty() || status.is_success() {
-                        ProcStatus::from_exit_code(if error.kind() == io::ErrorKind::FileTooLarge {
-                            STATUS_READ_TOO_MUCH
-                        } else {
-                            STATUS_CMD_ERROR
-                        })
-                    } else {
-                        status
-                    });
+                    if status.is_empty() || status.is_success() {
+                        status = ProcStatus::from_exit_code(
+                            if error.kind() == io::ErrorKind::FileTooLarge {
+                                STATUS_READ_TOO_MUCH
+                            } else {
+                                STATUS_CMD_ERROR
+                            },
+                        );
+                    }
+                }
+                // `return` outside a function and `exit` stop evaluation before
+                // continue_job may wait or publish a completed pipeline. Publish
+                // the initiating builtin's own result, not a later child's.
+                if !exiting_before && parser.libdata().exit_current_script && !status.is_empty() {
+                    parser.set_last_statuses(crate::env::Statuses::just(status.status_value()));
+                    parser.libdata_mut().status_count += 1;
                 }
                 Ok(status)
             }
@@ -158,9 +167,6 @@ struct NativeStage {
     plan: Option<NativeLaunchPlan>,
     deferred: Option<DeferredOutput>,
     forwarded_output: Option<Arc<NativeEndpoint>>,
-    writer: Option<NativeDeferredWriter>,
-    child: Option<Arc<NativeChild>>,
-    native_input: Option<Arc<NativeEndpoint>>,
 }
 
 enum NativeExecutionFailure {
@@ -207,18 +213,16 @@ impl NativeExecutionFailure {
 
 /// Runtime IO belongs to the stage that performed it. Other stages may already
 /// have real retained exit codes, or still need to consume EOF and be waited.
-fn record_stage_io_error(process: &Process, error: io::Error) {
+pub(crate) fn record_stage_io_error(process: &Process, error: io::Error) {
     diagnostic(format_args!("cannot complete pipeline stage: {error}"));
     let status = process.status.get();
-    if status.is_empty() || status.is_success() {
-        process.status.set(ProcStatus::from_exit_code(
-            if error.kind() == io::ErrorKind::FileTooLarge {
-                STATUS_READ_TOO_MUCH
-            } else {
-                STATUS_CMD_ERROR
-            },
-        ));
-    }
+    process.status.set(
+        status.with_failure(if error.kind() == io::ErrorKind::FileTooLarge {
+            STATUS_READ_TOO_MUCH
+        } else {
+            STATUS_CMD_ERROR
+        }),
+    );
 }
 
 fn record_deferred_read_limit(parser: &mut Parser, buffer: &IoBuffer) {
@@ -236,16 +240,34 @@ fn execute_pipeline(
     block_io: &IoChain,
 ) -> Result<(), NativeExecutionFailure> {
     let processes = job.processes();
+    let background_input = if job.is_initially_background()
+        && !block_io.flags(0).0
+        && !processes[0]
+            .redirection_specs()
+            .iter()
+            .any(|spec| spec.fd == 0)
+    {
+        // Trusted native device, not a user path or a borrowed console reader.
+        Some(NativeEndpoint::from_file(
+            std::fs::File::open(r"\\.\NUL")?,
+            NativeIoDirection::Input,
+        ))
+    } else {
+        None
+    };
     let mut stages: Vec<_> = processes
         .iter()
         .map(|_| NativeStage {
-            io: Some(block_io.clone()),
+            io: Some({
+                let mut io = block_io.clone();
+                if let Some(input) = &background_input {
+                    io.set_endpoint(0, Arc::clone(input), false);
+                }
+                io
+            }),
             plan: None,
             deferred: None,
             forwarded_output: None,
-            writer: None,
-            child: None,
-            native_input: None,
         })
         .collect();
     let last_internal = processes
@@ -260,7 +282,14 @@ fn execute_pipeline(
             (true, false) => native_input_pipe()?,
             (false, true) => {
                 let (read, target) = native_output_pipe()?;
-                if last_internal.is_some_and(|last| index < last) {
+                // A background builtin finishes evaluation now; its already
+                // produced bytes drain asynchronously so the next command can
+                // release a blocked consumer. Functions/blocks still stream
+                // their last producer while their evaluator remains active.
+                if last_internal.is_some_and(|last| index < last)
+                    || (job.is_initially_background()
+                        && matches!(producer.typ, ProcessType::Builtin))
+                {
                     let buffer = IoBuffer::new_bounded(READ_BYTE_LIMIT.load(Ordering::Relaxed));
                     let output = NativeEndpoint::buffer(buffer.clone());
                     stages[index].deferred = Some(DeferredOutput::Native {
@@ -305,13 +334,13 @@ fn execute_pipeline(
     let has_external = processes
         .iter()
         .any(|process| matches!(process.typ, ProcessType::External));
-    let mut group = if has_external {
-        Some(NativeLaunchGroup::new(
-            crate::threads::NativeRuntime::new()?
-        )?)
-    } else {
-        None
-    };
+    let runtime = has_external
+        .then(|| crate::proc::native_runtime(parser))
+        .transpose()?;
+    let mut group = runtime
+        .as_ref()
+        .map(|runtime| NativeLaunchGroup::new(Arc::clone(runtime)))
+        .transpose()?;
     for (index, (stage, process)) in stages.iter_mut().zip(processes).enumerate() {
         if !matches!(process.typ, ProcessType::External) {
             continue;
@@ -338,9 +367,10 @@ fn execute_pipeline(
             })
             .map_err(|error| NativeExecutionFailure::Launch { index, error })?,
         );
-        stage.native_input = io
-            .endpoint(0)?
-            .filter(|input| input.has_materialized_input());
+        process.native_input.replace(
+            io.endpoint(0)?
+                .filter(|input| input.has_materialized_input()),
+        );
         // Keep only replayed logical cursors for read-error accounting. Holding
         // ordinary native read ends would hide a downstream child's closure.
     }
@@ -354,11 +384,15 @@ fn execute_pipeline(
                 .spawn_prepared(plan)
                 .map_err(|error| NativeExecutionFailure::Launch { index, error })?;
             let process = &processes[index];
-            process.set_pid(Pid::from_native(child.pid()));
+            let pid = child.pid();
+            assert!(
+                process.native_child.set(child).is_ok(),
+                "native child published twice"
+            );
+            process.set_pid(Pid::from_native(pid));
             parser
                 .mut_wait_handles()
                 .remove_by_pid(process.pid().unwrap());
-            stage.child = Some(child);
         }
     }
     for (stage, process) in stages.iter_mut().zip(processes) {
@@ -394,64 +428,53 @@ fn execute_pipeline(
                     record_stage_io_error(process, error);
                 }
                 record_deferred_read_limit(parser, &buffer);
-                match NativeDeferredWriter::start(buffer.take_buffer(), target) {
-                    Ok(writer) => stage.writer = Some(writer),
+                match NativeDeferredWriter::start(buffer.take_buffer(), target).and_then(
+                    |mut writer| {
+                        writer.register_completion(runtime.as_ref().unwrap())?;
+                        Ok(writer)
+                    },
+                ) {
+                    Ok(writer) => {
+                        process.native_writer.replace(Some(writer));
+                    }
                     Err(error) => record_stage_io_error(process, error),
                 }
             }
             None => {}
         }
         if let Some(output) = stage.forwarded_output.take() {
-            if let Err(error) = output.finish_forwarding() {
-                record_stage_io_error(process, error);
-            }
-        }
-        process.completed.store(true);
-    }
-    for (stage, process) in stages.iter_mut().zip(processes) {
-        if let Some(writer) = stage.writer.take() {
-            if let Err(error) = writer.finish() {
-                record_stage_io_error(process, error);
-            }
-        }
-        if let Some(child) = stage.child.take() {
-            match child.wait(None) {
-                Ok(raw) => {
-                    if raw > 255 {
-                        diagnostic(format_args!(
-                            "native process exited with status 0x{raw:08X}"
-                        ));
+            if output.has_forwarding() {
+                match NativeDeferredWriter::finish_forwarded(output).and_then(|mut writer| {
+                    writer.register_completion(runtime.as_ref().unwrap())?;
+                    Ok(writer)
+                }) {
+                    Ok(writer) => {
+                        process.native_writer.replace(Some(writer));
                     }
-                    process.status.set(ProcStatus::native(raw));
+                    Err(error) => record_stage_io_error(process, error),
                 }
-                Err(error) => record_stage_io_error(process, error),
             }
-            if let Some(error) = stage
-                .native_input
-                .take()
-                .and_then(|input| input.input_error())
-            {
-                record_stage_io_error(process, io::Error::new(error.kind(), error));
-            }
-            process.completed.store(true);
         }
+        process
+            .completed
+            .store(process.native_writer.borrow().is_none());
     }
-    if let Some(group) = group {
-        group.finish()?;
+    if let Some(mut group) = group {
+        group.accept()?;
+        job.native_group.replace(Some(group));
     }
     Ok(())
 }
 
 pub fn exec_job(parser: &mut Parser, job: &Job, block_io: IoChain) -> bool {
-    let unsupported = job.is_initially_background()
-        || job
-            .processes()
-            .iter()
-            .any(|process| matches!(process.typ, ProcessType::Exec));
+    let unsupported = job
+        .processes()
+        .iter()
+        .any(|process| matches!(process.typ, ProcessType::Exec));
     let result = if unsupported {
         Err(NativeExecutionFailure::Invalid(io::Error::new(
             io::ErrorKind::Unsupported,
-            "background jobs and exec are unavailable",
+            "exec (process-image replacement) is unavailable",
         )))
     } else if job.processes().iter().any(|process| {
         matches!(process.typ, ProcessType::External | ProcessType::Exec)
@@ -467,17 +490,52 @@ pub fn exec_job(parser: &mut Parser, job: &Job, block_io: IoChain) -> bool {
     } else {
         execute_pipeline(parser, job, &block_io)
     };
+    let launched = result.is_ok();
     if let Err(error) = result {
         let status = error.report(job);
+        job.native_failure.set(Some(status.status_value()));
         for process in job.processes() {
             if !process.completed.load() {
                 process.status.set(status);
-                process.completed.store(true);
+                let mut completed = process.native_writer.borrow().is_none();
+                if let Some(child) = process.native_child.get() {
+                    // Rollback failure or observation failure is not proof that
+                    // a native root exited. Keep its capability observable.
+                    match child.status_if_exited() {
+                        Ok(Some(raw)) => process
+                            .status
+                            .set(ProcStatus::native(raw).with_failure(status.status_value())),
+                        Ok(None) => completed = false,
+                        Err(error) => {
+                            completed = false;
+                            diagnostic(format_args!(
+                                "cannot observe native process after failed launch: {error}"
+                            ));
+                        }
+                    }
+                }
+                process.completed.store(completed);
             }
         }
     }
     job.mark_constructed();
-    job.continue_job(parser, Some(&block_io));
+    if launched && !job.is_foreground() {
+        if let Some(pid) = job.last_pid() {
+            parser.set_one(
+                L!("last_pid"),
+                ParserEnvSetMode::new(EnvMode::GLOBAL),
+                pid.to_wstring(),
+            );
+        } else {
+            parser.set_empty(L!("last_pid"), ParserEnvSetMode::new(EnvMode::GLOBAL));
+        }
+    }
+    if launched {
+        job.continue_job(parser, Some(&block_io));
+    } else if let Some(statuses) = job.statuses() {
+        parser.set_last_statuses(statuses);
+        parser.libdata_mut().status_count += 1;
+    }
     true
 }
 

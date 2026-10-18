@@ -1,9 +1,15 @@
 //! Bounded internal output and transactional native-input materialization.
 use super::{NativeEndpoint, SeparatedBuffer};
+use crate::threads::{NativeRuntime, NativeWaitRegistration};
 use std::io;
-use std::os::windows::io::BorrowedHandle;
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, RawHandle};
 use std::sync::{Arc, Condvar, Mutex, Weak, mpsc};
 use std::thread::JoinHandle;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
+}
 
 /// The pump signals only after bytes reach its pipe or its writer closes. A
 /// lookahead can therefore wait without consuming input or polling the kernel.
@@ -91,6 +97,7 @@ pub(crate) struct NativeDeferredWriter {
     target: Weak<NativeEndpoint>,
     source: Weak<NativeEndpoint>,
     source_error: Option<Arc<Mutex<Option<Arc<io::Error>>>>>,
+    completion: Option<NativeWaitRegistration>,
 }
 impl NativeDeferredWriter {
     pub(crate) fn start(buffer: SeparatedBuffer, target: Arc<NativeEndpoint>) -> io::Result<Self> {
@@ -113,6 +120,7 @@ impl NativeDeferredWriter {
                 target: Weak::new(),
                 source: Weak::new(),
                 source_error: None,
+                completion: None,
             });
         }
         let cancellation = Arc::downgrade(&target);
@@ -126,6 +134,7 @@ impl NativeDeferredWriter {
             target: cancellation,
             source: Weak::new(),
             source_error: None,
+            completion: None,
         })
     }
 
@@ -198,11 +207,50 @@ impl NativeDeferredWriter {
                 target: cancellation,
                 source: Weak::new(),
                 source_error,
+                completion: None,
             }),
             sender: Some(sender),
             source: source_cancellation,
             readiness,
         })
+    }
+
+    /// Finalize a live streaming forwarder after evaluation without blocking the
+    /// next main-thread command on the native consumer's backpressure.
+    pub(crate) fn finish_forwarded(target: Arc<NativeEndpoint>) -> io::Result<Self> {
+        let cancellation = Arc::downgrade(&target);
+        let worker = std::thread::Builder::new().spawn(move || target.finish_forwarding())?;
+        Ok(Self {
+            worker: Some(worker),
+            target: cancellation,
+            source: Weak::new(),
+            source_error: None,
+            completion: None,
+        })
+    }
+
+    pub(crate) fn register_completion(&mut self, runtime: &Arc<NativeRuntime>) -> io::Result<()> {
+        if let Some(worker) = &self.worker {
+            let handle = Arc::new(worker.as_handle().try_clone_to_owned()?);
+            self.completion = Some(runtime.register_wait(handle)?);
+        }
+        Ok(())
+    }
+
+    /// The native thread handle, not JoinHandle::is_finished's earlier Rust
+    /// boundary, establishes that a routine reaper may join without blocking.
+    pub(crate) fn is_finished(&self) -> io::Result<bool> {
+        let Some(worker) = &self.worker else {
+            return Ok(true);
+        };
+        match unsafe { WaitForSingleObject(worker.as_handle().as_raw_handle(), 0) } {
+            0 => Ok(true),
+            258 => Ok(false),
+            u32::MAX => Err(io::Error::last_os_error()),
+            result => Err(io::Error::other(format!(
+                "unexpected writer wait result {result}"
+            ))),
+        }
     }
 
     pub(crate) fn source_error(&self) -> Option<Arc<io::Error>> {

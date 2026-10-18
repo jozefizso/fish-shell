@@ -2,69 +2,9 @@
 //! another process's wall clock. Each case runs in its own native evaluator thread.
 use super::*;
 use std::{
-    os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
-    process::{Command, Stdio},
+    os::windows::fs::OpenOptionsExt,
     time::{Duration, UNIX_EPOCH},
 };
-
-fn isolated(name: &str) -> bool {
-    let name = name
-        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
-        .unwrap();
-    if std::env::var("FISH_NATIVE_HISTORY_UNIT_CHILD").as_deref() == Ok(name) {
-        crate::threads::init();
-        return true;
-    }
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
-    }
-    let mut child = Command::new(crate::wutil::native_current_exe_path().unwrap())
-        .args(["--exact", name, "--nocapture"])
-        .env("FISH_NATIVE_HISTORY_UNIT_CHILD", name)
-        .env_remove("RUST_BACKTRACE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let reader = |mut stream: Box<dyn std::io::Read + Send>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stream.read_to_end(&mut bytes).unwrap();
-            bytes
-        })
-    };
-    let out = reader(Box::new(stdout));
-    let err = reader(Box::new(stderr));
-    let waited = unsafe { WaitForSingleObject(child.as_raw_handle(), 30_000) };
-    if waited != 0 {
-        let _ = child.kill();
-    }
-    let status = child.wait().unwrap();
-    let stdout = out.join().unwrap();
-    let stderr = err.join().unwrap();
-    assert_eq!(
-        waited,
-        0,
-        "bounded native history child: {}",
-        String::from_utf8_lossy(&stderr)
-    );
-    assert!(
-        status.success(),
-        "native history child failed:\n{}\n{}",
-        String::from_utf8_lossy(&stdout),
-        String::from_utf8_lossy(&stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&stdout)
-            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
-        "the isolated harness did not execute exactly its required case"
-    );
-    false
-}
 
 fn history(directory: &std::path::Path) -> HistoryImpl {
     let mut history = HistoryImpl::new(
@@ -89,7 +29,7 @@ fn item(command: &wstr, seconds: u64) -> HistoryItem {
 
 #[test]
 fn native_clear_session_after_failed_duplicate_save() {
-    if !isolated(concat!(
+    if !crate::threads::isolated_test(concat!(
         module_path!(),
         "::native_clear_session_after_failed_duplicate_save"
     )) {
@@ -125,7 +65,7 @@ fn native_clear_session_after_failed_duplicate_save() {
 
 #[test]
 fn native_clear_session_does_not_resurrect_foreign_deletion() {
-    if !isolated(concat!(
+    if !crate::threads::isolated_test(concat!(
         module_path!(),
         "::native_clear_session_does_not_resurrect_foreign_deletion"
     )) {
@@ -157,7 +97,7 @@ fn native_clear_session_does_not_resurrect_foreign_deletion() {
 
 #[test]
 fn native_clear_session_restores_foreign_predecessor() {
-    if !isolated(concat!(
+    if !crate::threads::isolated_test(concat!(
         module_path!(),
         "::native_clear_session_restores_foreign_predecessor"
     )) {

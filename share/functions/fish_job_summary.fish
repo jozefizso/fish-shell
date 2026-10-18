@@ -43,7 +43,10 @@ function fish_job_summary -a job_id is_foreground cmd_line signal_or_end_name si
             end
     end
 
-    if test $is_foreground -eq 0; and test $signal_or_end_name != STOPPED
+    # Native batch jobs have no interactive commandline to repaint.
+    if builtin -q __fish_native_fs
+        string join >&2 \n -- $message
+    else if test $is_foreground -eq 0; and test $signal_or_end_name != STOPPED
         __fish_echo string join \n -- $message
     else
         string join >&2 \n -- $message

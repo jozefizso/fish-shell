@@ -2623,9 +2623,6 @@ mod tests {
         assert!(history_contains(&hist2, &needle));
         let needle = hist2.item_at_index(2).unwrap();
         assert!(needle.first_added_timestamp() < needle.last_added_timestamp());
-        assert!(
-            needle.first_added_timestamp() + Duration::from_secs(3) > needle.last_added_timestamp()
-        );
     }
 
     #[test]

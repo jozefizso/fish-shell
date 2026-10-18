@@ -5,16 +5,20 @@ use crate::builtins::Error;
 use crate::builtins::HelpOnlyCmdOpts;
 use crate::io::IoStreams;
 use crate::parser::Parser;
-use crate::proc::{Job, add_disowned_job};
+use crate::proc::Job;
+#[cfg(unix)]
+use crate::proc::add_disowned_job;
 use crate::{err_fmt, err_str};
 use fish_widestring::wstr;
+#[cfg(unix)]
 use nix::sys::signal::{Signal, killpg};
 
 /// Helper for builtin_disown.
-fn disown_job(cmd: &wstr, streams: &mut IoStreams, j: &Job) {
+#[cfg(unix)]
+fn disown_job(_parser: &mut Parser, cmd: &wstr, streams: &mut IoStreams, j: &Job) -> BuiltinResult {
     // Nothing to do if already disowned.
     if j.flags().disown_requested {
-        return;
+        return Ok(SUCCESS);
     }
 
     // Stopped disowned jobs must be manually signaled; explain how to do so.
@@ -37,6 +41,18 @@ fn disown_job(cmd: &wstr, streams: &mut IoStreams, j: &Job) {
     // Instead, we set a flag and the parser removes the job from the jobs list later.
     j.flags_mut().disown_requested = true;
     add_disowned_job(j);
+    Ok(SUCCESS)
+}
+
+#[cfg(windows)]
+fn disown_job(parser: &mut Parser, cmd: &wstr, streams: &mut IoStreams, j: &Job) -> BuiltinResult {
+    crate::proc::native_disown_job(parser, j).map_err(|error| {
+        err_fmt!("Failed to disown job: %s", error.to_string())
+            .cmd(cmd)
+            .finish(streams);
+        STATUS_CMD_ERROR
+    })?;
+    Ok(SUCCESS)
 }
 
 /// Builtin for removing jobs from the job list.
@@ -56,15 +72,14 @@ pub fn disown(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
         // Even jobs that aren't under job control can be disowned!
         let mut job = None;
         for j in parser.jobs() {
-            if j.is_constructed() && !j.is_completed() {
+            if j.is_constructed() && !j.is_completed() && !j.flags().disown_requested {
                 job = Some(j.clone());
                 break;
             }
         }
 
         if let Some(job) = job {
-            disown_job(cmd, streams, &job);
-            retval = Ok(SUCCESS);
+            retval = disown_job(parser, cmd, streams, &job);
         } else {
             err_str!(Error::NO_SUITABLE_JOBS).cmd(cmd).finish(streams);
             retval = Err(STATUS_CMD_ERROR);
@@ -104,7 +119,7 @@ pub fn disown(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
 
         // Disown all target jobs.
         for j in jobs {
-            disown_job(cmd, streams, &j);
+            disown_job(parser, cmd, streams, &j)?;
         }
     }
 

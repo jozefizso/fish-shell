@@ -137,7 +137,7 @@ fn no_config(f: &Fixture) {
     );
 }
 fn reject(f: &Fixture) {
-    let jobs = ["echo forbidden &", "exec echo forbidden", "fg", "bg"];
+    let jobs = ["exec echo forbidden", "fg", "bg"];
     for job in jobs {
         let result = f.eval(job);
         assert!(
@@ -149,7 +149,6 @@ fn reject(f: &Fixture) {
     for job in [
         "exec echo (set -g mutated yes; echo forbidden)",
         "exec echo (set -g mutated yes; echo forbidden) > excluded-exec-output",
-        "echo (set -g mutated yes; echo forbidden) &",
     ] {
         let result = f.eval(&format!("set -g mutated no; {job}; echo $mutated"));
         assert_eq!(
@@ -356,7 +355,6 @@ fn boundary(f: &Fixture) {
         format!("exec {command}"),
         format!("fg {command}"),
         format!("bg {command}"),
-        format!("{command} &"),
     ] {
         let result = f.eval(&job);
         rejected(result);

@@ -184,6 +184,12 @@ pub fn init() {
         .expect("threads::init() must only be called once (at startup)!");
 }
 
+/// Low-level IO can be used before an evaluator is registered. Such callers
+/// must not inherit a different owner's process-wide console cancellation.
+pub(crate) fn is_registered_main_thread() -> bool {
+    MAIN_THREAD_ID.get().is_some_and(|id| *id == thread_id())
+}
+
 pub fn is_main_thread() -> bool {
     thread_id()
         == *MAIN_THREAD_ID
@@ -721,4 +727,65 @@ impl Drop for NativeWaitRegistration {
     fn drop(&mut self) {
         drop(self.remove_and_drain());
     }
+}
+
+/// Run singleton/evaluator owner tests on an isolated registered startup thread.
+#[cfg(test)]
+pub(crate) fn isolated_test(name: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let name = name
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .unwrap();
+    if std::env::var("FISH_NATIVE_OWNER_UNIT_CHILD").as_deref() == Ok(name) {
+        init();
+        return true;
+    }
+    let mut child = Command::new(crate::wutil::native_current_exe_path().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env("FISH_NATIVE_OWNER_UNIT_CHILD", name)
+        .env_remove("RUST_BACKTRACE")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    fn drain(mut stream: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    }
+    let out = drain(child.stdout.take().unwrap());
+    let err = drain(child.stderr.take().unwrap());
+    let waited = unsafe {
+        WaitForSingleObject(
+            std::os::windows::io::AsRawHandle::as_raw_handle(&child),
+            30_000,
+        )
+    };
+    if waited != 0 {
+        let _ = child.kill();
+    }
+    let status = child.wait().unwrap();
+    let stdout = out.join().unwrap();
+    let stderr = err.join().unwrap();
+    assert_eq!(
+        waited,
+        0,
+        "bounded native owner child: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    assert!(
+        status.success(),
+        "native owner child failed:\n{}\n{}",
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&stdout)
+            .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "isolated owner harness must execute exactly its required case"
+    );
+    false
 }

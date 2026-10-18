@@ -54,6 +54,8 @@ pub mod kill;
 pub mod locale;
 pub mod localization;
 #[cfg(windows)]
+pub mod native_accounting;
+#[cfg(windows)]
 pub mod native_fd_bridge;
 #[cfg(unix)]
 pub mod nix;
@@ -92,7 +94,7 @@ pub mod text_face;
 pub mod text_helpers;
 #[cfg_attr(windows, path = "threads/windows.rs")]
 pub mod threads;
-#[cfg(unix)]
+#[cfg_attr(windows, path = "timer_windows.rs")]
 pub mod timer;
 pub mod tinyexpr;
 pub mod tokenizer;

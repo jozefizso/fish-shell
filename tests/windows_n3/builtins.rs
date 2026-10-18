@@ -403,6 +403,23 @@ fn status_and_type(f: &Fixture) {
             b"",
         );
     }
+    for query in [
+        "job-control none",
+        "-j none",
+        "--job-control none",
+        "is-no-job-control",
+        "--is-no-job-control",
+    ] {
+        exact(f.eval(&format!("status {query}")), 0, b"", b"");
+    }
+    for query in [
+        "is-full-job-control",
+        "--is-full-job-control",
+        "is-interactive-job-control",
+        "--is-interactive-job-control",
+    ] {
+        exact(f.eval(&format!("status {query}")), 1, b"", b"");
+    }
     exact(f.eval("type -f -q echo; echo $status"), 0, b"0\n", b"");
 }
 
@@ -452,15 +469,9 @@ fn errors_and_boundaries(f: &Fixture) {
         assert!(!result.err.is_empty());
     }
     for query in [
-        "job-control none",
-        "-j none",
-        "--job-control none",
-        "is-full-job-control",
-        "--is-full-job-control",
-        "is-interactive-job-control",
-        "--is-interactive-job-control",
-        "is-no-job-control",
-        "--is-no-job-control",
+        "job-control all",
+        "-j interactive",
+        "--job-control all",
         "is-breakpoint",
         "terminal",
         "terminal-os",

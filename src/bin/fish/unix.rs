@@ -43,7 +43,7 @@ use fish::{
     prelude::*,
     printf,
     proc::{
-        Pid, get_login, is_interactive_session, mark_login, mark_no_exec, proc_init,
+        get_login, is_interactive_session, mark_login, mark_no_exec, proc_init,
         set_interactive_session,
     },
     reader::{reader_exit_signal, reader_init, reader_read, term_copy_modes},
@@ -57,7 +57,7 @@ use fish_widestring::{bytes2wcstring, osstr2wcstring, wcs2bytes};
 use libc::{STDERR_FILENO, STDIN_FILENO};
 use nix::{
     sys::resource::{UsageWho, getrusage},
-    unistd::{AccessFlags, getpid},
+    unistd::AccessFlags,
 };
 use std::{
     env,
@@ -598,10 +598,7 @@ fn throwing_main() -> i32 {
         parser.last_status()
     };
 
-    event::fire(
-        parser,
-        Event::process_exit(Pid::from_nullable_pid_unchecked(getpid()), exit_status),
-    );
+    event::fire(parser, Event::shell_exit(exit_status));
 
     // Trigger any exit handlers.
     event::fire_generic(

@@ -2,21 +2,14 @@
 use fish::io::NativeOutput;
 use std::ffi::c_void;
 use std::io::{Read, Write};
-use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle};
 use std::sync::mpsc;
 use std::time::Duration;
 
-#[path = "conpty.rs"]
-mod conpty;
+use super::conpty::{self, pipe};
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn CreatePipe(
-        read: *mut *mut c_void,
-        write: *mut *mut c_void,
-        attrs: *mut c_void,
-        size: u32,
-    ) -> i32;
     fn SetStdHandle(which: u32, handle: *mut c_void) -> i32;
     fn GetStdHandle(which: u32) -> *mut c_void;
     fn CloseHandle(handle: *mut c_void) -> i32;
@@ -32,19 +25,6 @@ unsafe extern "system" {
     ) -> i32;
     fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
     fn WaitForSingleObject(handle: *mut c_void, millis: u32) -> u32;
-}
-fn pipe() -> (OwnedHandle, OwnedHandle) {
-    let (mut read, mut write) = (std::ptr::null_mut(), std::ptr::null_mut());
-    assert_ne!(
-        unsafe { CreatePipe(&mut read, &mut write, std::ptr::null_mut(), 0) },
-        0
-    );
-    unsafe {
-        (
-            OwnedHandle::from_raw_handle(read),
-            OwnedHandle::from_raw_handle(write),
-        )
-    }
 }
 pub fn run(mode: &str) {
     match mode {

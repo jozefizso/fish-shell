@@ -288,6 +288,10 @@ pub struct LibraryData {
     #[cfg(unix)]
     pub cwd_fd: Option<Arc<OwnedFd>>,
 
+    /// Process-only registered waits and detached monitors owned by this parser.
+    #[cfg(windows)]
+    pub native_jobs: crate::proc::NativeJobs,
+
     /// Variables supporting the "status" builtin.
     pub status_vars: StatusVars,
 
@@ -377,6 +381,17 @@ impl EvalRes {
             status,
             ..Default::default()
         }
+    }
+
+    fn cancelled(signal: RawSignal) -> Self {
+        #[cfg(unix)]
+        let status = ProcStatus::from_signal(signal);
+        #[cfg(windows)]
+        let status = {
+            let _ = signal;
+            ProcStatus::interrupted()
+        };
+        Self::new(status)
     }
 }
 
@@ -682,7 +697,7 @@ impl Parser {
             if self.cancel_behavior == CancelBehavior::Clear && self.block_list.is_empty() {
                 signal_clear_cancel();
             } else {
-                return EvalRes::new(ProcStatus::from_signal(RawSignal::new(sig)));
+                return EvalRes::cancelled(RawSignal::new(sig));
             }
         }
 
@@ -702,7 +717,7 @@ impl Parser {
 
         // If we have a job group which is cancelled, then do nothing.
         if let Some(sig) = check_cancel_signal() {
-            return EvalRes::new(ProcStatus::from_signal(sig));
+            return EvalRes::cancelled(sig);
         }
 
         job_reap(self, false, Some(block_io)); // not sure why we reap jobs here
@@ -747,9 +762,9 @@ impl Parser {
 
         let sig = signal_check_cancel();
         if sig != 0 {
-            EvalRes::new(ProcStatus::from_signal(RawSignal::new(sig)))
+            EvalRes::cancelled(RawSignal::new(sig))
         } else if let Some(sig) = execution_ctx.cancel_signal() {
-            EvalRes::new(ProcStatus::from_signal(sig))
+            EvalRes::cancelled(sig)
         } else {
             let status = ProcStatus::from_exit_code(self.last_status());
             let break_expand = reason == EndExecutionReason::Error;

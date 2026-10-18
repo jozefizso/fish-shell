@@ -464,7 +464,6 @@ impl FunctionProperties {
         for handler in handlers {
             let d = &handler.desc;
             match d {
-                #[cfg(unix)]
                 EventDescription::Signal { signal } => {
                     sprintf!(=> &mut out, " --on-signal %s", signal.name());
                 }

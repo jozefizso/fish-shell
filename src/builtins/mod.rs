@@ -19,7 +19,6 @@ pub mod complete;
 pub mod contains;
 pub mod r#continue;
 pub mod count;
-#[cfg(unix)]
 pub mod disown;
 pub mod echo;
 pub mod emit;
@@ -35,7 +34,6 @@ pub mod function;
 pub mod functions;
 pub mod r#gettext;
 pub mod history;
-#[cfg(unix)]
 pub mod jobs;
 pub mod math;
 #[cfg(windows)]
@@ -58,7 +56,6 @@ pub mod r#true;
 pub mod r#type;
 #[cfg(unix)]
 pub mod ulimit;
-#[cfg(unix)]
 pub mod wait;
 
 mod prelude {

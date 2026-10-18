@@ -423,6 +423,15 @@ pub struct Process {
     /// Process ID or `None` where not available.
     pub pid: OnceLock<Pid>,
 
+    /// Native observation/IO ownership is reachable before reentrant internal
+    /// evaluation, even while the surrounding job is still under construction.
+    #[cfg(windows)]
+    pub(crate) native_child: OnceLock<Arc<crate::exec::NativeChild>>,
+    #[cfg(windows)]
+    pub(crate) native_input: RefCell<Option<Arc<crate::io::NativeEndpoint>>>,
+    #[cfg(windows)]
+    pub(crate) native_writer: RefCell<Option<crate::io::NativeDeferredWriter>>,
+
     #[cfg(unix)]
     /// If we are an "internal process," that process.
     pub internal_proc: RefCell<Option<Arc<InternalProc>>>,
@@ -598,10 +607,14 @@ impl Process {
     pub fn make_wait_handle(&self, jid: InternalJobId) -> Option<WaitHandleRef> {
         let pid = self.pid()?;
         if self.wait_handle.borrow().is_none() {
+            #[cfg(windows)]
+            let native_child = self.native_child.get()?.clone();
             self.wait_handle.replace(Some(WaitHandle::new(
                 pid,
                 jid,
-                wbasename(&self.actual_cmd.clone()).to_owned(),
+                wbasename(&self.actual_cmd).to_owned(),
+                #[cfg(windows)]
+                native_child,
             )));
         }
         self.wait_handle()
@@ -673,6 +686,11 @@ pub struct Job {
 
     /// Flags associated with the job.
     pub job_flags: RefCell<JobFlags>,
+
+    #[cfg(windows)]
+    pub(crate) native_group: RefCell<Option<crate::exec::NativeLaunchGroup>>,
+    #[cfg(windows)]
+    pub(crate) native_failure: Cell<Option<i32>>,
 }
 
 impl Job {
@@ -961,6 +979,10 @@ impl Job {
         }
         if !has_status {
             return None;
+        }
+        #[cfg(windows)]
+        if let Some(failure) = self.native_failure.get() {
+            laststatus = failure;
         }
         st.status = if self.flags().negate {
             if laststatus == 0 { 1 } else { 0 }
@@ -1712,32 +1734,7 @@ mod unix {
 }
 
 #[cfg(windows)]
-pub fn job_reap(parser: &mut Parser, _interactive: bool, _block_io: Option<&IoChain>) -> bool {
-    parser.jobs_mut().retain(|job| {
-        if !job.is_constructed() || !job.is_completed() {
-            return true;
-        }
-        for process in job.processes() {
-            if let Some(handle) = process.wait_handle() {
-                handle.set_status_and_complete(process.status().status_value());
-            }
-        }
-        false
-    });
-    false
-}
-
+#[path = "proc_windows.rs"]
+mod windows;
 #[cfg(windows)]
-impl Job {
-    /// Native foreground execution has already synchronously waited in exec_job.
-    pub fn continue_job(&self, parser: &mut Parser, _block_io: Option<&IoChain>) {
-        assert!(
-            self.is_completed(),
-            "Native jobs must complete synchronously"
-        );
-        if let Some(statuses) = self.statuses() {
-            parser.set_last_statuses(statuses);
-            parser.libdata_mut().status_count += 1;
-        }
-    }
-}
+pub use windows::*;

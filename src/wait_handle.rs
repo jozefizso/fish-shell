@@ -18,6 +18,27 @@ pub struct WaitHandle {
 
     /// The status, if completed; None if not completed.
     status: Cell<Option<i32>>,
+
+    /// Keep the Windows process object (and therefore its PID) alive until this
+    /// cached completion is consumed or evicted; never retarget a reused PID.
+    #[cfg(windows)]
+    native_child: std::sync::Arc<crate::exec::NativeChild>,
+    #[cfg(windows)]
+    native_job: std::cell::OnceCell<std::sync::Arc<NativeJobCompletion>>,
+}
+
+/// A whole native pipeline completion, shared by its member wait records.
+#[cfg(windows)]
+pub struct NativeJobCompletion {
+    pub status: i32,
+    pub(crate) process: std::sync::Arc<crate::exec::NativeChild>,
+}
+
+#[cfg(windows)]
+impl NativeJobCompletion {
+    pub fn pid(&self) -> Pid {
+        Pid::from_native(self.process.pid())
+    }
 }
 
 impl WaitHandle {
@@ -34,16 +55,43 @@ impl WaitHandle {
     pub fn status(&self) -> Option<i32> {
         self.status.get()
     }
+
+    #[cfg(windows)]
+    pub fn native_job_completion(&self) -> Option<std::sync::Arc<NativeJobCompletion>> {
+        self.native_job.get().cloned()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn mark_native_job_complete(&self, completion: std::sync::Arc<NativeJobCompletion>) {
+        assert!(
+            self.native_job.set(completion).is_ok(),
+            "native job completion published twice"
+        );
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn native_process(&self) -> &std::sync::Arc<crate::exec::NativeChild> {
+        &self.native_child
+    }
 }
 
 impl WaitHandle {
     /// Construct from a pid, job ID, and base name.
-    pub fn new(pid: Pid, internal_job_id: InternalJobId, base_name: WString) -> WaitHandleRef {
+    pub fn new(
+        pid: Pid,
+        internal_job_id: InternalJobId,
+        base_name: WString,
+        #[cfg(windows)] native_child: std::sync::Arc<crate::exec::NativeChild>,
+    ) -> WaitHandleRef {
         Rc::new(WaitHandle {
             pid,
             internal_job_id,
             base_name,
             status: Default::default(),
+            #[cfg(windows)]
+            native_child,
+            #[cfg(windows)]
+            native_job: std::cell::OnceCell::new(),
         })
     }
 }
@@ -125,50 +173,105 @@ mod tests {
 
     #[test]
     fn test_wait_handles() {
-        let limit: usize = 4;
-        let mut whs = WaitHandleStore::new_with_capacity(limit);
-        assert_eq!(whs.size(), 0);
-
-        fn p(pid: i32) -> Pid {
-            Pid::new(pid)
+        #[cfg(windows)]
+        if let Ok(status) = std::env::var("FISH_NATIVE_WAIT_UNIT_EXIT") {
+            std::process::exit(status.parse().expect("controlled native fixture status"));
         }
-
-        assert!(whs.get_by_pid(p(5)).is_none());
-
-        // Duplicate pids drop oldest.
-        let internal_job_id = InternalJobId::default();
-        whs.add(WaitHandle::new(
-            p(5),
-            internal_job_id,
-            L!("first").to_owned(),
-        ));
-        whs.add(WaitHandle::new(
-            p(5),
-            internal_job_id,
-            L!("second").to_owned(),
-        ));
-        assert_eq!(whs.size(), 1);
-        assert_eq!(whs.get_by_pid(p(5)).unwrap().base_name, "second");
-
-        whs.remove_by_pid(p(123));
-        assert_eq!(whs.size(), 1);
-        whs.remove_by_pid(p(5));
-        assert_eq!(whs.size(), 0);
-
-        // Test evicting oldest.
-        whs.add(WaitHandle::new(p(1), internal_job_id, L!("1").to_owned()));
-        whs.add(WaitHandle::new(p(2), internal_job_id, L!("2").to_owned()));
-        whs.add(WaitHandle::new(p(3), internal_job_id, L!("3").to_owned()));
-        whs.add(WaitHandle::new(p(4), internal_job_id, L!("4").to_owned()));
-        whs.add(WaitHandle::new(p(5), internal_job_id, L!("5").to_owned()));
-        assert_eq!(whs.size(), 4);
-
-        let entries = whs.get_list();
-        let mut iter = entries.iter();
-        assert_eq!(iter.next().unwrap().base_name, "5");
-        assert_eq!(iter.next().unwrap().base_name, "4");
-        assert_eq!(iter.next().unwrap().base_name, "3");
-        assert_eq!(iter.next().unwrap().base_name, "2");
-        assert!(iter.next().is_none());
+        let mut cache = WaitHandleStore::new_with_capacity(4);
+        #[cfg(windows)]
+        let (group, children) = {
+            use std::ffi::OsString;
+            let image = crate::wutil::native_current_exe_path().unwrap();
+            let cwd = std::env::current_dir().unwrap();
+            let mut environment = [
+                (
+                    OsString::from("SystemRoot"),
+                    std::env::var_os("SystemRoot").expect("native test requires SystemRoot"),
+                ),
+                (
+                    OsString::from("FISH_NATIVE_WAIT_UNIT_EXIT"),
+                    OsString::new(),
+                ),
+            ];
+            let case = concat!(module_path!(), "::test_wait_handles")
+                .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+                .unwrap();
+            let mut group =
+                crate::exec::NativeLaunchGroup::new(crate::threads::NativeRuntime::new().unwrap())
+                    .unwrap();
+            let children: Vec<_> = (1..=5)
+                .map(|status| {
+                    environment[1].1 = OsString::from(status.to_string());
+                    let argv = [
+                        image.as_os_str().to_owned(),
+                        OsString::from("--exact"),
+                        OsString::from(case),
+                        OsString::from("--nocapture"),
+                    ];
+                    let child = group
+                        .spawn(
+                            &image,
+                            &argv,
+                            &cwd,
+                            &environment,
+                            &crate::io::IoChain::new(),
+                            false,
+                        )
+                        .unwrap();
+                    let observed = child.wait(None).unwrap();
+                    assert_eq!(observed, status);
+                    (child, observed as i32)
+                })
+                .collect();
+            (group, children)
+        };
+        let pid = |index: usize| {
+            #[cfg(unix)]
+            let pid = Pid::new(index as i32 + 1);
+            #[cfg(windows)]
+            let pid = Pid::from_native(children[index].0.pid());
+            pid
+        };
+        let handle = |index: usize| {
+            let handle = WaitHandle::new(
+                pid(index),
+                InternalJobId::default(),
+                L!("process").to_owned(),
+                #[cfg(windows)]
+                std::sync::Arc::clone(&children[index].0),
+            );
+            #[cfg(unix)]
+            let status = index as i32 + 1;
+            #[cfg(windows)]
+            let status = children[index].1;
+            handle.set_status_and_complete(status);
+            handle
+        };
+        let first = handle(0);
+        let replacement = handle(0);
+        cache.add(first.clone());
+        cache.add(replacement.clone());
+        cache.remove(&first);
+        // Consuming an older observer must not erase the newer cached record.
+        assert_eq!(
+            cache.get_by_pid(pid(0)).and_then(|wait| wait.status()),
+            Some(1)
+        );
+        cache.remove(&replacement);
+        assert!(cache.get_by_pid(pid(0)).is_none());
+        for index in 0..5 {
+            cache.add(handle(index));
+        }
+        // Capacity eviction is observable to wait/late-handler selection; the
+        // cache's incidental iterator order and entry representation are not.
+        assert!(cache.get_by_pid(pid(0)).is_none());
+        for index in 1..5 {
+            assert_eq!(
+                cache.get_by_pid(pid(index)).and_then(|wait| wait.status()),
+                Some(index as i32 + 1)
+            );
+        }
+        #[cfg(windows)]
+        group.finish().unwrap();
     }
 }

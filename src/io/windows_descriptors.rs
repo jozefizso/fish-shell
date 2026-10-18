@@ -120,7 +120,7 @@ pub struct NativeEndpoint {
     overlapped: bool,
     input: Mutex<NativeInputBuffer>,
     async_io: OnceLock<Arc<super::pipe::NativeOverlappedFile>>,
-    sync_input: OnceLock<Arc<super::pipe::NativeSynchronousInput>>,
+    sync_io: OnceLock<Arc<super::pipe::NativeSynchronousPipe>>,
     replay: OnceLock<MaterializedInput>,
     forward: OnceLock<Result<Arc<NativeCapture>, StoredError>>,
     materialization: Mutex<()>,
@@ -135,7 +135,7 @@ impl NativeEndpoint {
             overlapped,
             input: Mutex::new(NativeInputBuffer::default()),
             async_io: OnceLock::new(),
-            sync_input: OnceLock::new(),
+            sync_io: OnceLock::new(),
             replay: OnceLock::new(),
             forward: OnceLock::new(),
             materialization: Mutex::new(()),
@@ -270,8 +270,8 @@ impl NativeEndpoint {
                     if let Some(io) = self.async_io.get() {
                         let _ = source.async_io.set(io.clone());
                     }
-                    if let Some(input) = self.sync_input.get() {
-                        let _ = source.sync_input.set(input.clone());
+                    if let Some(input) = self.sync_io.get() {
+                        let _ = source.sync_io.set(input.clone());
                     }
                     let (endpoint, target) = super::pipe::native_output_pipe()?;
                     let prepared =
@@ -444,7 +444,7 @@ impl NativeEndpoint {
             self.overlapped_file()?;
         } else if let EndpointKind::Native(owner) = &self.kind {
             if super::pipe::is_pipe(owner.as_handle()) {
-                self.synchronous_input(owner)?;
+                self.synchronous_pipe(owner)?;
             }
         }
         Ok(())
@@ -471,21 +471,21 @@ impl NativeEndpoint {
         }
         Ok(self.async_io.get().expect("initialized native IO").as_ref())
     }
-    fn synchronous_input(
+    fn synchronous_pipe(
         &self,
         owner: &NativeHandle,
-    ) -> io::Result<&super::pipe::NativeSynchronousInput> {
-        if self.sync_input.get().is_none() {
+    ) -> io::Result<&super::pipe::NativeSynchronousPipe> {
+        if self.sync_io.get().is_none() {
             let _initialization = self.io_initialization.lock().unwrap();
-            if self.sync_input.get().is_none() {
-                let input = Arc::new(super::pipe::NativeSynchronousInput::new(owner.clone())?);
-                assert!(self.sync_input.set(input).is_ok());
+            if self.sync_io.get().is_none() {
+                let pipe = Arc::new(super::pipe::NativeSynchronousPipe::new(owner.clone())?);
+                assert!(self.sync_io.set(pipe).is_ok());
             }
         }
         Ok(self
-            .sync_input
+            .sync_io
             .get()
-            .expect("initialized native input")
+            .expect("initialized native synchronous pipe")
             .as_ref())
     }
     pub(crate) fn read(&self, output: &mut [u8]) -> io::Result<usize> {
@@ -525,7 +525,7 @@ impl NativeEndpoint {
         })?;
         if super::pipe::is_pipe(handle) {
             if let EndpointKind::Native(owner) = &self.kind {
-                return self.synchronous_input(owner)?.read(output);
+                return self.synchronous_pipe(owner)?.read(output);
             }
         }
         super::pipe::read_synchronous(handle, output)
@@ -541,6 +541,11 @@ impl NativeEndpoint {
             return self.overlapped_file()?.write(bytes);
         }
         let handle = self.child_handle()?;
+        if super::pipe::is_pipe(handle) {
+            if let EndpointKind::Native(owner) = &self.kind {
+                return self.synchronous_pipe(owner)?.write(bytes);
+            }
+        }
         NativeOutput::borrowed(handle).write(bytes)
     }
     pub(crate) fn cancel_overlapped_io(&self) {
@@ -556,7 +561,7 @@ impl NativeEndpoint {
             self.cancel_overlapped_io();
         } else if let EndpointKind::Native(owner) = &self.kind {
             if super::pipe::is_pipe(owner.as_handle()) {
-                if let Ok(input) = self.synchronous_input(owner) {
+                if let Ok(input) = self.synchronous_pipe(owner) {
                     input.cancel();
                 }
             }
@@ -586,6 +591,10 @@ impl NativeEndpoint {
             )))),
         }
     }
+    pub(crate) fn has_forwarding(&self) -> bool {
+        self.forward.get().is_some()
+    }
+
     pub(crate) fn finish_forwarding(&self) -> io::Result<()> {
         if let Some(forward) = self.forward.get() {
             let (interrupted, error) = forward

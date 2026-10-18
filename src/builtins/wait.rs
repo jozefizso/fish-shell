@@ -1,12 +1,16 @@
 use super::prelude::*;
 use crate::err_fmt;
-use crate::proc::{Job, Pid, proc_wait_any};
+#[cfg(windows)]
+use crate::proc::native_wait_for_change;
+#[cfg(unix)]
+use crate::proc::proc_wait_any;
+use crate::proc::{Job, Pid};
 use crate::signal::SigChecker;
 use crate::wait_handle::{WaitHandleRef, WaitHandleStore};
 
 /// Return true if we can wait on a job.
 fn can_wait_on_job(j: &Job) -> bool {
-    j.is_constructed() && !j.is_foreground() && !j.is_stopped()
+    j.is_constructed() && !j.is_foreground() && !j.is_stopped() && !j.flags().disown_requested
 }
 
 /// Return true if a wait handle matches a pid or a process name.
@@ -58,6 +62,9 @@ fn find_wait_handles(
 
     // Is there a running job match?
     for j in parser.jobs() {
+        if j.flags().disown_requested {
+            continue;
+        }
         // We want to set 'matched' to true if we could have matched, even if the job was stopped.
         let provide_handle = can_wait_on_job(j);
         let internal_job_id = j.internal_job_id;
@@ -104,6 +111,8 @@ fn is_completed(wh: &WaitHandleRef) -> bool {
 /// Return a status code.
 fn wait_for_completion(
     parser: &mut Parser,
+    _streams: &mut IoStreams,
+    _cmd: &wstr,
     whs: &[WaitHandleRef],
     any_flag: bool,
 ) -> BuiltinResult {
@@ -113,6 +122,15 @@ fn wait_for_completion(
 
     let mut sigint = SigChecker::new_sighupintterm();
     loop {
+        #[cfg(windows)]
+        if parser.libdata().exit_current_script {
+            let status = parser.last_status();
+            return if status == 0 {
+                Ok(SUCCESS)
+            } else {
+                Err(status)
+            };
+        }
         let finished = if any_flag {
             whs.iter().any(is_completed)
         } else {
@@ -132,9 +150,20 @@ fn wait_for_completion(
             return Ok(SUCCESS);
         }
         if sigint.check() {
-            return Err(128 + libc::SIGINT);
+            return Err(130);
         }
+        #[cfg(unix)]
         proc_wait_any(parser);
+        #[cfg(windows)]
+        if let Err(error) = native_wait_for_change(parser) {
+            if sigint.check() {
+                return Err(130);
+            }
+            err_fmt!("Failed to wait for native jobs: %s", error.to_string())
+                .cmd(_cmd)
+                .finish(_streams);
+            return Err(STATUS_CMD_ERROR);
+        }
     }
 }
 
@@ -198,7 +227,13 @@ pub fn wait(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     if w.wopt_index == argc {
         // No jobs specified.
         // Note this may succeed with an empty wait list.
-        return wait_for_completion(parser, &get_all_wait_handles(parser), any_flag);
+        return wait_for_completion(
+            parser,
+            streams,
+            cmd,
+            &get_all_wait_handles(parser),
+            any_flag,
+        );
     }
 
     // Get the list of wait handles for our waiting.
@@ -226,5 +261,5 @@ pub fn wait(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
     if wait_handles.is_empty() {
         return Err(STATUS_INVALID_ARGS);
     }
-    wait_for_completion(parser, &wait_handles, any_flag)
+    wait_for_completion(parser, streams, cmd, &wait_handles, any_flag)
 }

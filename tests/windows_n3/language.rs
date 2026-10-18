@@ -241,42 +241,6 @@ function _n3_hidden; end
 functions --all --names | string match --entire '_n3_hidden'
 "#), 0, b"local-blocked\nlocal-delivered\nEvent generic\nn3_local_event n3_local\nn3_metadata_event n3_metadata\nEvent variable\nn3_metadata_var n3_metadata\nwrapper-retained\nn3_metadata\n_n3_hidden\n", b"");
 
-    let header_marker = f.root.join("n3-deferred-event-option-marker");
-    for option in [
-        "--on-signal",
-        "'--on-signal'",
-        "-s",
-        "--on-process-exit",
-        "-p",
-        "--on-job-exit",
-        "-j",
-        "--on-signal=",
-    ] {
-        let separator = if option.ends_with('=') { "" } else { " " };
-        let result = f.eval(&format!(
-            "function n3_unavailable {option}{separator}(printf 1; {} marker {}); end",
-            f.probe(),
-            quote(header_marker.to_str().unwrap())
-        ));
-        assert_eq!(result.code, 2);
-        assert!(result.out.is_empty());
-        assert!(!result.err.is_empty());
-        assert!(
-            !header_marker.exists(),
-            "deferred header option evaluated arguments"
-        );
-    }
-    let assignment = f.eval(&format!(
-        "n3_assignment=({} marker {}) function n3_unavailable --on-signal INT; end",
-        f.probe(),
-        quote(header_marker.to_str().unwrap())
-    ));
-    assert_eq!(assignment.code, 2);
-    assert!(!assignment.err.is_empty());
-    assert!(
-        !header_marker.exists(),
-        "deferred header option evaluated prefix assignments"
-    );
     exact(f.eval("function n3_option_data --description '--on-signal'; printf literal-option-data; end; n3_option_data"),
         0, b"literal-option-data", b"");
 
@@ -291,7 +255,6 @@ functions --all --names | string match --entire '_n3_hidden'
         "emit",
         "function n3_bad --on-signal INT; end",
         "function n3_bad --on-job-exit caller; end",
-        "function n3_bad --on-process-exit 0; end",
         "function n3_bad --help; end",
         "functions --help",
         "block --help",

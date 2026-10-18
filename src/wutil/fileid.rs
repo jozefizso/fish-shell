@@ -3,7 +3,11 @@ use crate::wutil::wstr;
 use fish_widestring::wcs2zstring;
 use std::fs::File;
 #[cfg(unix)]
-use std::{ffi::{CStr, OsStr}, fs::{self, Metadata}, os::unix::prelude::*};
+use std::{
+    ffi::{CStr, OsStr},
+    fs::{self, Metadata},
+    os::unix::prelude::*,
+};
 
 /// Actual Unix filesystem object identity. Windows uses NativeFileIdentity, not invented inodes.
 #[cfg(unix)]
@@ -33,7 +37,10 @@ impl FileId {
     pub fn from_md(buf: &Metadata) -> Self {
         #[allow(clippy::useless_conversion)]
         FileId {
-            dev_inode: DevInode { device: buf.dev(), inode: buf.ino() },
+            dev_inode: DevInode {
+                device: buf.dev(),
+                inode: buf.ino(),
+            },
             size: buf.size(),
             change_seconds: buf.ctime().into(),
             change_nanoseconds: buf.ctime_nsec().into(),
@@ -45,24 +52,38 @@ impl FileId {
 
 pub fn file_id_for_file(file: &File) -> std::io::Result<FileId> {
     #[cfg(unix)]
-    { file.metadata().map(|md| FileId::from_md(&md)) }
+    {
+        file.metadata().map(|md| FileId::from_md(&md))
+    }
     #[cfg(windows)]
     {
         let native_identity = super::native_identity_for_file(file)?;
         let times: super::NativeBasicInfo = unsafe { super::native_information(file, 0)? };
         // FILETIME has 100ns units from 1601. Euclidean division also preserves pre-1970 times.
-        let split = |ticks: i64| (ticks.div_euclid(10_000_000) - 11_644_473_600,
-            ticks.rem_euclid(10_000_000) * 100);
+        let split = |ticks: i64| {
+            (
+                ticks.div_euclid(10_000_000) - 11_644_473_600,
+                ticks.rem_euclid(10_000_000) * 100,
+            )
+        };
         let (change_seconds, change_nanoseconds) = split(times.change_time);
         let (mod_seconds, mod_nanoseconds) = split(times.last_write_time);
-        Ok(FileId { native_identity, size: file.metadata()?.len(), change_seconds,
-            change_nanoseconds, mod_seconds, mod_nanoseconds })
+        Ok(FileId {
+            native_identity,
+            size: file.metadata()?.len(),
+            change_seconds,
+            change_nanoseconds,
+            mod_seconds,
+            mod_nanoseconds,
+        })
     }
 }
 
 pub fn file_id_for_path(path: &wstr) -> std::io::Result<FileId> {
     #[cfg(unix)]
-    { file_id_for_path_narrow(&wcs2zstring(path)) }
+    {
+        file_id_for_path_narrow(&wcs2zstring(path))
+    }
     #[cfg(windows)]
     {
         let path = super::native_realpath(path)?;

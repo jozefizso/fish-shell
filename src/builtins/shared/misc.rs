@@ -1,5 +1,6 @@
+use crate::proc::Pid;
 #[cfg(unix)]
-use crate::proc::{Pid, no_exec};
+use crate::proc::no_exec;
 use crate::{
     builtins::{prelude::*, *},
     err_fmt,
@@ -213,7 +214,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("count"),
         func: count::count,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("disown"),
         func: disown::disown,
@@ -285,7 +285,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("if"),
         func: builtin_generic,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("jobs"),
         func: jobs::jobs,
@@ -377,7 +376,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("ulimit"),
         func: ulimit::ulimit,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("wait"),
         func: wait::wait,
@@ -396,15 +394,11 @@ pub fn builtin_is_unsupported(name: &wstr) -> bool {
         L!("bind"),
         L!("breakpoint"),
         L!("commandline"),
-        L!("disown"),
         L!("exec"),
         L!("fg"),
         L!("fish_key_reader"),
-        L!("jobs"),
         L!("set_color"),
-        L!("time"),
         L!("ulimit"),
-        L!("wait"),
     ]
     .contains(&name)
 }
@@ -942,6 +936,40 @@ impl<'args> Iterator for Arguments<'args, '_> {
         match &mut self.source {
             ArgvSource::Args { .. } => self.get_arg_argv(),
             ArgvSource::Stdin { .. } => self.get_arg_stdin(),
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn parse_pid(streams: &mut IoStreams, cmd: &wstr, arg: &wstr) -> Result<Pid, ErrorCode> {
+    match parse_pid_may_be_zero(streams, cmd, arg)? {
+        Some(pid) => Ok(pid),
+        None => {
+            err_fmt!("'%s' is not a valid process ID", arg)
+                .cmd(cmd)
+                .finish(streams);
+            Err(STATUS_INVALID_ARGS)
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn parse_pid_may_be_zero(
+    streams: &mut IoStreams,
+    cmd: &wstr,
+    arg: &wstr,
+) -> Result<Option<Pid>, ErrorCode> {
+    match wutil::fish_wcstol(arg)
+        .ok()
+        .and_then(|pid| u32::try_from(pid).ok())
+    {
+        Some(0) => Ok(None),
+        Some(pid) => Ok(Some(Pid::from_native(pid))),
+        None => {
+            err_fmt!("'%s' is not a valid process ID", arg)
+                .cmd(cmd)
+                .finish(streams);
+            Err(STATUS_INVALID_ARGS)
         }
     }
 }

@@ -364,7 +364,10 @@ impl BorrowedInput<'static> {
     }
 
     pub fn stdin() -> io::Result<Self> {
-        standard_handle(-10i32 as u32).map(Self::from_handle)
+        let endpoint = crate::io::root_descriptors()?.endpoint(0)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "standard input is closed")
+        })?;
+        Ok(Self::from_endpoint(endpoint))
     }
 }
 

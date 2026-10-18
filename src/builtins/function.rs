@@ -9,13 +9,9 @@ use crate::global_safety::RelaxedAtomicBool;
 use crate::parse_execution::varname_error;
 use crate::parse_tree::NodeRef;
 use crate::parser_keywords::parser_keywords_is_reserved;
-#[cfg(unix)]
 use crate::proc::{InternalJobId, Pid};
-#[cfg(unix)]
 use crate::signal::RawSignal;
 use crate::{err_fmt, err_str, function};
-#[cfg(unix)]
-use nix::unistd::getpid;
 use std::sync::Arc;
 
 struct Options {
@@ -60,22 +56,8 @@ const LONG_OPTIONS: &[WOption] = &[
     wopt(L!("inherit-variable"), ArgType::RequiredArgument, 'V'),
 ];
 
-/// Inspect literal header options without expanding their arguments. The same
-/// option table/tokenizer must distinguish flags from descriptions and `--`.
-#[cfg(windows)]
-pub(crate) fn has_unavailable_event_option(argv: &mut [&wstr]) -> bool {
-    let mut options = WGetopter::new(SHORT_OPTIONS, LONG_OPTIONS, argv);
-    while let Some(option) = options.next_opt() {
-        if matches!(option, 's' | 'j' | 'p') {
-            return true;
-        }
-    }
-    false
-}
-
 /// Return the internal_job_id for a pid, or None if none.
 /// This looks through both active and finished jobs.
-#[cfg(unix)]
 fn job_id_for_pid(pid: Pid, parser: &Parser) -> Option<InternalJobId> {
     if let Some(job) = parser.job_get_from_pid(pid) {
         Some(job.internal_job_id)
@@ -146,16 +128,6 @@ fn parse_cmd_opts(
             'd' => {
                 opts.description = w.woptarg.unwrap().to_owned();
             }
-            #[cfg(windows)]
-            's' | 'j' | 'p' => {
-                err_str!(
-                    "signal and process/job event handlers are unavailable in native batch mode"
-                )
-                .cmd(cmd)
-                .finish(streams);
-                return Err(STATUS_INVALID_ARGS);
-            }
-            #[cfg(unix)]
             's' => {
                 let Some(signal) = RawSignal::parse(w.woptarg.unwrap()) else {
                     err_fmt!("Unknown signal '%s'", w.woptarg.unwrap())
@@ -174,7 +146,6 @@ fn parse_cmd_opts(
                 let param = w.woptarg.unwrap().to_owned();
                 opts.events.push(EventDescription::Generic { param });
             }
-            #[cfg(unix)]
             'j' | 'p' => {
                 let woptarg = w.woptarg.unwrap();
                 let e: EventDescription;
@@ -192,7 +163,10 @@ fn parse_cmd_opts(
                     }
                     e = EventDescription::CallerExit { caller_id };
                 } else if opt == 'p' && woptarg == "%self" {
-                    let pid = Pid::from_nullable_pid_unchecked(getpid());
+                    #[cfg(unix)]
+                    let pid = Pid::new(std::process::id().try_into().unwrap());
+                    #[cfg(windows)]
+                    let pid = Pid::from_native(std::process::id());
                     e = EventDescription::ProcessExit { pid: Some(pid) };
                 } else {
                     let pid = parse_pid_may_be_zero(streams, cmd, woptarg)?;
@@ -381,31 +355,54 @@ pub fn function(
         complete_add_wrapper(function_name.clone(), wt);
     }
 
-    // Add any event handlers.
-    for ed in &opts.events {
-        event::add_handler(EventHandler::new(ed.clone(), Some(function_name.clone())));
-    }
-
-    // If there is an --on-process-exit or --on-job-exit event handler for some pid, and that
-    // process has already exited, run it immediately (#7210).
-    #[cfg(unix)]
-    for ed in &opts.events {
-        match *ed {
+    // Register all handlers before callbacks can run. Cached completion replay is
+    // targeted to the newly registered handler, not every matching handler.
+    let handlers: Vec<_> = opts
+        .events
+        .into_iter()
+        .map(|ed| event::add_handler(EventHandler::new(ed, Some(function_name.clone()))))
+        .collect();
+    for handler in handlers {
+        let replay = match handler.desc {
             EventDescription::ProcessExit { pid: Some(pid) } => {
-                let wh = parser.wait_handles().get_by_pid(pid);
-                if let Some(status) = wh.and_then(|wh| wh.status()) {
-                    event::fire(parser, event::Event::process_exit(pid, status));
-                }
+                let wait = parser.wait_handles().get_by_pid(pid);
+                #[cfg(unix)]
+                let replay = wait
+                    .and_then(|wait| wait.status())
+                    .map(|status| event::Event::process_exit(pid, status));
+                #[cfg(windows)]
+                let replay = wait.and_then(|wait| {
+                    wait.status().map(|status| {
+                        event::Event::process_exit(Arc::clone(wait.native_process()), status)
+                    })
+                });
+                replay
             }
             EventDescription::JobExit { pid: Some(pid), .. } => {
                 let wh = parser.wait_handles().get_by_pid(pid);
-                if let Some(wh) = wh {
-                    if wh.is_completed() {
-                        event::fire(parser, event::Event::job_exit(pid, wh.internal_job_id));
-                    }
-                }
+                #[cfg(unix)]
+                let completed = wh
+                    .filter(|wh| wh.is_completed())
+                    .map(|wh| (pid, wh.internal_job_id));
+                #[cfg(unix)]
+                let replay =
+                    completed.map(|(job_pid, job_id)| event::Event::job_exit(job_pid, job_id));
+                #[cfg(windows)]
+                let replay = wh.and_then(|wait| {
+                    wait.native_job_completion().map(|completion| {
+                        event::Event::job_exit(
+                            Arc::clone(&completion.process),
+                            wait.internal_job_id,
+                            completion.status,
+                        )
+                    })
+                });
+                replay
             }
-            _ => (),
+            _ => None,
+        };
+        if let Some(replay) = replay {
+            event::fire_to_handler(parser, replay, handler);
         }
     }
 

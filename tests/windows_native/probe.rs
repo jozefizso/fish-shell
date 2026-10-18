@@ -1,5 +1,8 @@
 //! Real native child used by the Windows acceptance suite; never implements shell behavior.
 #[cfg(windows)]
+#[path = "conpty.rs"]
+mod conpty;
+#[cfg(windows)]
 #[path = "n2.rs"]
 mod windows_native_n2;
 #[cfg(windows)]
@@ -8,6 +11,15 @@ mod windows_native_n4_notifications;
 #[cfg(windows)]
 #[path = "../windows_n4/storage_probe.rs"]
 mod windows_native_n4_storage;
+#[cfg(windows)]
+#[path = "../windows_n5/account_probe.rs"]
+mod windows_native_n5_account;
+#[cfg(windows)]
+#[path = "../windows_n5/cancel_probe.rs"]
+mod windows_native_n5_cancel;
+#[cfg(windows)]
+#[path = "../windows_n5/jobs_probe.rs"]
+mod windows_native_n5_jobs;
 #[cfg(windows)]
 #[path = "runtime.rs"]
 mod windows_native_runtime;
@@ -34,6 +46,13 @@ fn main() {
     match mode.to_str().expect("Unicode mode") {
         "runtime-init" => windows_native_runtime::run(),
         mode if mode.starts_with("n2-") => windows_native_n2::run(mode, args.collect()),
+        mode if mode.starts_with("n5-jobs-") => windows_native_n5_jobs::run(mode, args.collect()),
+        mode if mode.starts_with("n5-cancel-") => {
+            windows_native_n5_cancel::run(mode, args.collect())
+        }
+        mode if mode.starts_with("n5-account-") => {
+            windows_native_n5_account::run(mode, args.collect())
+        }
         "known-folder-roots" => {
             let (local, profile) =
                 fish::path::native_known_folder_roots().expect("native known folders");

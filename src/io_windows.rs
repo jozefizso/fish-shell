@@ -92,6 +92,19 @@ impl<'a> NativeOutput<'a> {
     pub fn is_console(&self) -> bool {
         is_console(self.handle())
     }
+
+    /// Native cancellation is terminal for this append, not a transient Unix
+    /// EINTR. The default Write::write_all would retry it forever.
+    fn write_all_cancellable(&mut self, mut bytes: &[u8]) -> io::Result<()> {
+        while !bytes.is_empty() {
+            let count = self.write(bytes)?;
+            if count == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            bytes = &bytes[count..];
+        }
+        Ok(())
+    }
 }
 
 impl NativeOutput<'static> {
@@ -359,7 +372,7 @@ impl FdOutputStream {
             return false;
         };
         if !self.console {
-            if let Err(error) = endpoint.write_all(bytes) {
+            if let Err(error) = endpoint.write_all_cancellable(bytes) {
                 self.error = Some(error);
             }
             return self.error.is_none();
@@ -374,7 +387,7 @@ impl FdOutputStream {
             if self.pending_len < required {
                 return true;
             }
-            if let Err(error) = endpoint.write_all(&self.pending_utf8[..required]) {
+            if let Err(error) = endpoint.write_all_cancellable(&self.pending_utf8[..required]) {
                 self.error = Some(error);
                 return false;
             }
@@ -393,7 +406,7 @@ impl FdOutputStream {
                 complete = start;
             }
         }
-        if let Err(error) = endpoint.write_all(&bytes[..complete]) {
+        if let Err(error) = endpoint.write_all_cancellable(&bytes[..complete]) {
             self.error = Some(error);
             return false;
         }
@@ -405,7 +418,9 @@ impl FdOutputStream {
         if self.error.is_none() {
             if let Some(endpoint) = &mut self.endpoint {
                 if self.pending_len != 0 {
-                    if let Err(error) = endpoint.write_all(&self.pending_utf8[..self.pending_len]) {
+                    if let Err(error) =
+                        endpoint.write_all_cancellable(&self.pending_utf8[..self.pending_len])
+                    {
                         self.error = Some(error);
                     }
                     self.pending_len = 0;

@@ -50,11 +50,11 @@ use libc::{EXIT_SUCCESS, c_int};
 const STDOUT_FILENO: i32 = 1;
 const STDERR_FILENO: i32 = 2;
 use crate::function;
+use crate::timer::push_timer;
 #[cfg(unix)]
 use crate::{
     proc::{JobControl, get_job_control_mode},
     reader::fish_is_unwinding_for_exit,
-    timer::push_timer,
 };
 #[cfg(unix)]
 use nix::errno::Errno;
@@ -1671,7 +1671,6 @@ impl ExecutionContext {
         };
 
         let job_is_background = job_node.bg.is_some();
-        #[cfg(unix)]
         let _timer = {
             let wants_timing = job_node_wants_timing(job_node);
             // It's an error to have 'time' in a background job.
@@ -2020,32 +2019,22 @@ impl ExecutionContext {
 
     #[cfg(windows)]
     fn setup_group(&self, ctx: &mut OperationContext<'_>, job: &mut Job) {
-        if let Some(group) = ctx.job_group.as_ref() {
-            job.group = Some(group.clone());
-        } else {
-            job.group = Some(JobGroup::create(job.command().to_owned(), false));
-            job.flags_mut().is_group_root = true;
+        if ctx
+            .job_group
+            .as_ref()
+            .is_some_and(|group| group.has_job_id() || !job.wants_job_id())
+            && !job.is_initially_background()
+        {
+            job.group.clone_from(&ctx.job_group);
+            return;
         }
-        job.group().is_foreground.store(true);
-    }
-
-    #[cfg(windows)]
-    fn native_unavailable_function_option(&self, header: &ast::FunctionHeader) -> bool {
-        let mut nodes = Self::get_argument_nodes(&header.args);
-        nodes.insert(0, &header.first_arg);
-        let literals: Vec<_> = nodes
-            .iter()
-            .map(|argument| {
-                let source = self.node_source(*argument);
-                fish_common::unescape_string(source, fish_common::UnescapeStringStyle::default())
-                    .unwrap_or_else(|| source.to_owned())
-            })
-            .collect();
-        let mut argv: Vec<_> = literals
-            .iter()
-            .map(|argument| argument.as_utfstr())
-            .collect();
-        builtins::function::has_unavailable_event_option(&mut argv)
+        job.group = Some(JobGroup::create(
+            job.command().to_owned(),
+            job.wants_job_id(),
+        ));
+        job.group()
+            .set_is_foreground(!job.is_initially_background());
+        job.flags_mut().is_group_root = true;
     }
 
     /// Validate this job before assignment or argument expansion. Nested jobs
@@ -2062,15 +2051,6 @@ impl ExecutionContext {
             match node.kind() {
                 ast::Kind::JobPipeline(pipeline) if !std::ptr::eq(pipeline, job) => {
                     traversal.skip_children(node);
-                }
-                ast::Kind::JobPipeline(pipeline) if pipeline.bg.is_some() => {
-                    return Some((node, "background execution"));
-                }
-                ast::Kind::TimeDecorator(_) => return Some((node, "time")),
-                ast::Kind::FunctionHeader(header)
-                    if self.native_unavailable_function_option(header) =>
-                {
-                    return Some((node, "signal and process/job event handlers"));
                 }
                 ast::Kind::DecoratedStatement(statement) => {
                     if statement.decoration() == StatementDecoration::Exec {

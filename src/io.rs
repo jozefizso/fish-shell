@@ -25,7 +25,6 @@ use std::{
 mod buffer;
 pub use buffer::{BufferElement, BufferedOutputStream, IoBuffer, SeparatedBuffer, SeparationType};
 
-
 /// Describes what type of IO operation an io_data_t represents.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IoMode {
@@ -659,7 +658,6 @@ impl StringOutputStream {
         self.contents
     }
 }
-
 
 pub struct IoStreams<'a> {
     // Streams for out and err.

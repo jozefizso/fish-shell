@@ -258,7 +258,6 @@ pub(super) fn exercise(f: &Fixture) {
         vec!["-N", "--unknown", "-c", &code],
         vec!["-N", "-c"],
         vec!["-N", "--interactive"],
-        vec!["-N", "--print-rusage-self"],
         vec!["-N", "--help"],
     ] {
         let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();

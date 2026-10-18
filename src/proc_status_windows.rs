@@ -1,10 +1,9 @@
 //! Native completion codes are not POSIX wait statuses.
-use crate::signal::RawSignal;
 
 #[derive(Debug, Copy, Clone)]
 enum Completion {
     Shell(u8),
-    Native(u32),
+    Native { raw: u32, failure: Option<u8> },
 }
 
 /// A synchronous shell result or an intact Windows process exit code.
@@ -13,12 +12,12 @@ pub struct ProcStatus(Option<Completion>);
 
 impl ProcStatus {
     pub fn native(raw: u32) -> Self {
-        Self(Some(Completion::Native(raw)))
+        Self(Some(Completion::Native { raw, failure: None }))
     }
 
     pub fn native_raw(&self) -> Option<u32> {
         match self.0 {
-            Some(Completion::Native(raw)) => Some(raw),
+            Some(Completion::Native { raw, .. }) => Some(raw),
             _ => None,
         }
     }
@@ -29,8 +28,25 @@ impl ProcStatus {
         )))
     }
 
-    pub fn from_signal(_signal: RawSignal) -> Self {
-        panic!("POSIX signal completion is unavailable in the native batch runtime")
+    /// The evaluator stopped after a native control request. This is a shell
+    /// result, never an observed child signal or exit DWORD.
+    pub fn interrupted() -> Self {
+        Self::from_exit_code(130)
+    }
+
+    /// Preserve an observed native DWORD when a stage's own IO also fails.
+    pub(crate) fn with_failure(self, code: i32) -> Self {
+        if !self.is_empty() && !self.is_success() {
+            return self;
+        }
+        let code = u8::try_from(code).expect("invalid shell failure code");
+        match self.0 {
+            Some(Completion::Native { raw, .. }) => Self(Some(Completion::Native {
+                raw,
+                failure: Some(code),
+            })),
+            _ => Self::from_exit_code(i32::from(code)),
+        }
     }
 
     pub fn empty() -> Self {
@@ -68,7 +84,9 @@ impl ProcStatus {
     pub fn exit_code(&self) -> u8 {
         match self.0.expect("An empty status has no exit code") {
             Completion::Shell(code) => code,
-            Completion::Native(raw) => u8::try_from(raw).unwrap_or(1),
+            Completion::Native { raw, failure } => {
+                failure.unwrap_or_else(|| u8::try_from(raw).unwrap_or(1))
+            }
         }
     }
 
@@ -91,8 +109,10 @@ mod tests {
             (0, 0),
             (7, 7),
             (255, 255),
+            (130, 130),
             (256, 1),
             (0xC0000005, 1),
+            (0xC000013A, 1),
             (0xFFFFFFFF, 1),
         ] {
             let status = ProcStatus::native(raw);
@@ -117,6 +137,26 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(empty.native_raw(), None);
         assert!(!empty.normal_exited());
+        let interrupted = ProcStatus::interrupted();
+        assert_eq!(interrupted.status_value(), 130);
+        assert_eq!(interrupted.native_raw(), None);
+        assert!(!interrupted.signal_exited());
         assert!(!empty.signal_exited());
+    }
+
+    #[test]
+    fn io_failure_preserves_native_completion_and_prior_failure_precedence() {
+        let successful_child = ProcStatus::native(0).with_failure(1);
+        assert_eq!(successful_child.native_raw(), Some(0));
+        assert_eq!(successful_child.status_value(), 1);
+        assert!(!successful_child.is_success());
+        assert_eq!(successful_child.with_failure(127).status_value(), 1);
+        for raw in [7, 259, 0xC000013A, u32::MAX] {
+            let child = ProcStatus::native(raw);
+            let failed_io = child.with_failure(127);
+            assert_eq!(failed_io.native_raw(), Some(raw));
+            assert_eq!(failed_io.status_value(), child.status_value());
+        }
+        assert_eq!(ProcStatus::empty().with_failure(127).status_value(), 127);
     }
 }

@@ -252,9 +252,9 @@ jobs:
     - name: Build native fish, formatter and probe profiles
       run: |
         New-Item -ItemType Directory -Force native-windows-results | Out-Null
-        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin fish_indent --bin windows_native_probe 2>&1 | Tee-Object native-windows-results/build-debug.txt
+        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --bin fish --bin fish_indent --bin windows_native_probe --bin windows_n5_gui_probe 2>&1 | Tee-Object native-windows-results/build-debug.txt
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish --bin fish_indent 2>&1 | Tee-Object native-windows-results/build-release.txt
+        cargo build --locked --target x86_64-pc-windows-msvc --no-default-features --release --bin fish --bin fish_indent --bin windows_native_probe --bin windows_n5_gui_probe 2>&1 | Tee-Object native-windows-results/build-release.txt
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     - name: Native GOAL leaf, library, initialization and acceptance gates
       run: |
@@ -302,7 +302,9 @@ jobs:
           'env::environment::native::tests::w4_scopes_native_export_selection',
           'env::environment::native::tests::w4_env_native_path_and_name_policy',
           'proc::native_status::tests::native_exit_codes_keep_raw_bits_and_map_shell_status',
-          'proc::native_status::tests::builtin_and_empty_statuses_are_not_native_exit_codes'
+          'proc::native_status::tests::builtin_and_empty_statuses_are_not_native_exit_codes',
+          'proc::native_status::tests::io_failure_preserves_native_completion_and_prior_failure_precedence',
+          'exec::native_launch::tests::assignment_quota_rollback_preserves_host'
         )) {
           if (@($libraryCases | Where-Object { $_ -eq "$($case): test" }).Count -ne 1) {
             throw "Required native library case missing: $case"
@@ -316,6 +318,10 @@ jobs:
         }
         $env:FISH_NATIVE_TEST_BIN = (Resolve-Path 'target/x86_64-pc-windows-msvc/debug/fish.exe').Path
         $env:FISH_NATIVE_TEST_RELEASE_BIN = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/fish.exe').Path
+        $env:FISH_NATIVE_TEST_PROBE = (Resolve-Path 'target/x86_64-pc-windows-msvc/debug/windows_native_probe.exe').Path
+        $env:FISH_NATIVE_TEST_RELEASE_PROBE = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/windows_native_probe.exe').Path
+        $env:FISH_NATIVE_N5_GUI_FIXTURE = (Resolve-Path 'target/x86_64-pc-windows-msvc/debug/windows_n5_gui_probe.exe').Path
+        $env:FISH_NATIVE_N5_RELEASE_GUI_FIXTURE = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/windows_n5_gui_probe.exe').Path
         Invoke-NativeTests -Name native-acceptance -CargoArgs @('--test', 'windows_native', 'native_required_acceptance_cases') -Required @('native_required_acceptance_cases') -Exact
         $required = @('W2-RUNTIME', 'W3-BYTES', 'W3-ERRORS', 'W3-LIFETIME', 'W3-CONSOLE', 'W4-PATHS', 'W5-LANGUAGE', 'W5-NO-CONFIG', 'W5-REJECT', 'W6-CHILD', 'W6-STREAMS', 'W6-STATUS', 'W6-FAILURE', 'W6-BOUNDARY', 'W6-CLEAN-RUN')
         $passes = @(Get-Content native-windows-results/native-acceptance.txt | Where-Object { $_ -match '^PASS (debug|release) ' })
@@ -327,11 +333,18 @@ jobs:
           @{ Name = 'n1'; Tests = @('N1_PATHS', 'N1_DISCOVERY', 'N1_GLOB'); Gates = @('N1-PATHS', 'N1-DISCOVERY', 'N1-GLOB') },
           @{ Name = 'n2'; Tests = @('N2_STREAM', 'N2_REDIRECT', 'N2_LIFETIME'); Gates = @('N2-STREAM', 'N2-REDIRECT', 'N2-LIFETIME') },
           @{ Name = 'n3'; Tests = @('N3_LANGUAGE', 'N3_CAPTURE', 'N3_SCRIPTS'); Gates = @('N3-LANGUAGE', 'N3-CAPTURE', 'N3-SCRIPTS') },
-          @{ Name = 'n4'; Tests = @('N4_STARTUP', 'N4_SHARING', 'N4_RECOVERY'); Gates = @('N4-STARTUP', 'N4-SHARING', 'N4-RECOVERY') }
+          @{ Name = 'n4'; Tests = @('N4_STARTUP', 'N4_SHARING', 'N4_RECOVERY'); Gates = @('N4-STARTUP', 'N4-SHARING', 'N4-RECOVERY') },
+          @{ Name = 'n5'; Tests = @('N5_JOBS', 'N5_CANCEL', 'N5_ACCOUNT'); Gates = @('N5-JOBS', 'N5-CANCEL', 'N5-ACCOUNT') }
         )) {
           foreach ($profile in @('debug', 'release')) {
             $profileArgs = @()
             if ($profile -eq 'release') { $profileArgs += '--release' }
+            if ($phase.Name -eq 'n5') {
+              # The real target-quota rejection needs private backend ownership,
+              # not an invalid assumption about enclosing-job UI restrictions.
+              $assignmentCase = 'exec::native_launch::tests::assignment_quota_rollback_preserves_host'
+              Invoke-NativeTests -Name "native-n5-assignment-$profile" -CargoArgs ($profileArgs + @('--lib', $assignmentCase)) -Required @($assignmentCase) -Exact
+            }
             $name = "native-$($phase.Name)-$profile"
             Invoke-NativeTests -Name $name -CargoArgs ($profileArgs + @('--test', "windows_$($phase.Name)")) -Required $phase.Tests -Exact
             $prefix = $phase.Name.ToUpperInvariant()
@@ -374,6 +387,41 @@ jobs:
                 throw "N4 must execute the exact eleven behavioral families against both artifacts in the $profile harness"
               }
             }
+            if ($phase.Name -eq 'n5') {
+              $cases = @(
+                'N5-JOBS/native-mixed-background-progress',
+                'N5-JOBS/background-nul-explicit-file-pipe',
+                'N5-JOBS/visible-jobs-options-native-group-identities',
+                'N5-JOBS/wait-cached-multi-any-duplicate-invalid',
+                'N5-JOBS/process-job-caller-shell-events-late-reentrant',
+                'N5-JOBS/callback-disown-after-active-wait-captures-handles',
+                'N5-JOBS/early-member-not-whole-job-late-replay',
+                'N5-JOBS/late-targeted-replay-block-removal-callback-drain',
+                'N5-JOBS/disown-ordinary-graceful-shell-exit-survival',
+                'N5-JOBS/under-construction-deferred-streaming-function-scheduling',
+                'N5-JOBS/retained-pid-cache-callback-drain-partial-rollback',
+                'N5-JOBS/actual-shell-partial-pipeline-no-orphan',
+                'N5-CANCEL/console-receipt-rearm-shutdown',
+                'N5-CANCEL/cooperative-ignored-forced-unsupported',
+                'N5-CANCEL/blocked-read-pipe-evaluator',
+                'N5-CANCEL/close-and-native-status-provenance',
+                'N5-ACCOUNT/owner-process-job-counters-transition-cutoff',
+                'N5-ACCOUNT/owner-query-arithmetic-output-faults',
+                'N5-ACCOUNT/builtin-cpu-time', 'N5-ACCOUNT/native-cpu-time',
+                'N5-ACCOUNT/concurrent-native-pipeline-cpu-time',
+                'N5-ACCOUNT/nested-child-cpu-time',
+                'N5-ACCOUNT/cached-completion-no-recharge',
+                'N5-ACCOUNT/print-rusage-self-native-units-unavailable-categories',
+                'N5-ACCOUNT/time-rusage-output-failure-preserves-stdout-status'
+              )
+              $casePasses = @(Get-Content "native-windows-results/$name.txt" | Where-Object { $_ -match '^PASS-CASE (debug|release) N5-' })
+              $expectedCases = @(foreach ($artifact in @('debug', 'release')) {
+                foreach ($case in $cases) { "PASS-CASE $artifact $case" }
+              })
+              if ($casePasses.Count -ne 50 -or @(Compare-Object ($expectedCases | Sort-Object) ($casePasses | Sort-Object)).Count -ne 0) {
+                throw "N5 must execute all 25 integration families against both artifacts plus the required private assignment owner case in the $profile harness"
+              }
+            }
           }
         }
     - name: Upload native Windows evidence
@@ -387,8 +435,11 @@ jobs:
           target/x86_64-pc-windows-msvc/debug/fish.exe
           target/x86_64-pc-windows-msvc/debug/fish_indent.exe
           target/x86_64-pc-windows-msvc/debug/windows_native_probe.exe
+          target/x86_64-pc-windows-msvc/debug/windows_n5_gui_probe.exe
           target/x86_64-pc-windows-msvc/release/fish.exe
           target/x86_64-pc-windows-msvc/release/fish_indent.exe
+          target/x86_64-pc-windows-msvc/release/windows_native_probe.exe
+          target/x86_64-pc-windows-msvc/release/windows_n5_gui_probe.exe
 
   windows:
     runs-on: windows-latest

@@ -54,6 +54,12 @@ unsafe extern "system" {
     fn SetEvent(event: RawHandle) -> i32;
     fn ResetEvent(event: RawHandle) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
+    fn WaitForMultipleObjects(
+        count: u32,
+        handles: *const RawHandle,
+        all: i32,
+        milliseconds: u32,
+    ) -> u32;
     fn ReadFile(
         handle: RawHandle,
         buffer: *mut u8,
@@ -178,6 +184,32 @@ impl Event {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
+        }
+    }
+    /// Only an evaluator-owned operation observes console interruption. Pump
+    /// workers and private cancel/drain barriers remain uninterruptible so one
+    /// control cannot cancel an unrelated job or outlive borrowed IO buffers.
+    fn wait_interruptible(&self) -> io::Result<()> {
+        if !crate::threads::is_registered_main_thread() {
+            return self.wait();
+        }
+        let Some(cancellation) = crate::signal::console_control_cancellation() else {
+            return self.wait();
+        };
+        let handles = [
+            self.0.as_raw_handle(),
+            cancellation.handle().as_raw_handle(),
+        ];
+        match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) } {
+            0 => Ok(()),
+            1 => Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "native IO interrupted by console control",
+            )),
+            u32::MAX => Err(io::Error::last_os_error()),
+            result => Err(io::Error::other(format!(
+                "unexpected native IO wait result {result}"
+            ))),
         }
     }
 }
@@ -355,17 +387,19 @@ impl NativeOverlappedFile {
             }
         }
         // Even an event-wait failure cannot permit a borrowed buffer to escape pending I/O.
-        let wait_error = operation.event.wait().err();
+        let wait_error = operation.event.wait_interruptible().err();
         if wait_error.is_some() {
-            self.cancel();
+            let control = lock(&self.control);
+            if control.active {
+                unsafe {
+                    CancelIoEx(self.owner.as_handle().as_raw_handle(), ptr::null());
+                }
+            }
         }
         unsafe {
             WaitForThreadpoolIoCallbacks(self.io, 0);
         }
         lock(&self.control).active = false;
-        if let Some(error) = wait_error {
-            return Err(error);
-        }
         let result = lock(&operation.result)
             .take()
             .expect("drained native I/O has a completion");
@@ -374,6 +408,11 @@ impl NativeOverlappedFile {
         }
         if result.bytes != 0 {
             return Ok(result.bytes);
+        }
+        if result.code == OPERATION_ABORTED {
+            if let Some(error) = wait_error {
+                return Err(error);
+            }
         }
         if result.code == 0 || (!write && eof(result.code)) {
             Ok(0)
@@ -410,10 +449,12 @@ impl Drop for NativeOverlappedFile {
 struct SyncRequest {
     buffer: *mut u8,
     count: usize,
+    write: bool,
     requested: bool,
     active: bool,
     stopped: bool,
     cancelled: bool,
+    interrupted: bool,
     result: Option<IoResult>,
 }
 struct SyncState {
@@ -422,16 +463,16 @@ struct SyncState {
     complete: Event,
     state: Mutex<SyncRequest>,
 }
-// The reader holds its caller's mutable buffer until the worker acknowledges completion.
+// The caller retains its read/write buffer until the worker acknowledges completion.
 // State lock prevents cancellation from targeting a reused worker operation.
 unsafe impl Send for SyncRequest {}
 unsafe impl Sync for SyncRequest {}
-pub(super) struct NativeSynchronousInput {
+pub(super) struct NativeSynchronousPipe {
     state: Arc<SyncState>,
     worker: Option<JoinHandle<()>>,
     gate: Mutex<()>,
 }
-impl NativeSynchronousInput {
+impl NativeSynchronousPipe {
     pub(super) fn new(owner: NativeHandle) -> io::Result<Self> {
         let state = Arc::new(SyncState {
             owner,
@@ -440,10 +481,12 @@ impl NativeSynchronousInput {
             state: Mutex::new(SyncRequest {
                 buffer: ptr::null_mut(),
                 count: 0,
+                write: false,
                 requested: false,
                 active: false,
                 stopped: false,
                 cancelled: false,
+                interrupted: false,
                 result: None,
             }),
         });
@@ -453,7 +496,7 @@ impl NativeSynchronousInput {
                 if worker_state.request.wait().is_err() {
                     std::process::abort();
                 }
-                let (buffer, count) = {
+                let (buffer, count, write) = {
                     let mut request = lock(&worker_state.state);
                     if request.stopped {
                         break;
@@ -462,7 +505,7 @@ impl NativeSynchronousInput {
                         continue;
                     }
                     request.requested = false;
-                    if request.cancelled {
+                    if request.cancelled || request.interrupted {
                         request.result = Some(IoResult {
                             code: OPERATION_ABORTED,
                             bytes: 0,
@@ -471,17 +514,27 @@ impl NativeSynchronousInput {
                         continue;
                     }
                     request.active = true;
-                    (request.buffer, request.count)
+                    (request.buffer, request.count, request.write)
                 };
                 let mut count_read = 0;
                 let result = unsafe {
-                    ReadFile(
-                        worker_state.owner.as_handle().as_raw_handle(),
-                        buffer,
-                        count as u32,
-                        &mut count_read,
-                        ptr::null_mut(),
-                    )
+                    if write {
+                        WriteFile(
+                            worker_state.owner.as_handle().as_raw_handle(),
+                            buffer.cast_const(),
+                            count as u32,
+                            &mut count_read,
+                            ptr::null_mut(),
+                        )
+                    } else {
+                        ReadFile(
+                            worker_state.owner.as_handle().as_raw_handle(),
+                            buffer,
+                            count as u32,
+                            &mut count_read,
+                            ptr::null_mut(),
+                        )
+                    }
                 };
                 let code = if result == 0 { last_error() } else { 0 };
                 let mut request = lock(&worker_state.state);
@@ -500,7 +553,15 @@ impl NativeSynchronousInput {
         })
     }
     pub(super) fn read(&self, bytes: &mut [u8]) -> io::Result<usize> {
-        if bytes.is_empty() {
+        self.run(bytes.as_mut_ptr(), bytes.len(), false)
+    }
+
+    pub(super) fn write(&self, bytes: &[u8]) -> io::Result<usize> {
+        self.run(bytes.as_ptr().cast_mut(), bytes.len(), true)
+    }
+
+    fn run(&self, buffer: *mut u8, count: usize, write: bool) -> io::Result<usize> {
+        if count == 0 {
             return Ok(0);
         }
         let _gate = lock(&self.gate);
@@ -509,18 +570,22 @@ impl NativeSynchronousInput {
             if request.cancelled || request.stopped {
                 return Err(io::ErrorKind::Interrupted.into());
             }
-            request.buffer = bytes.as_mut_ptr();
-            request.count = bytes.len().min(u32::MAX as usize);
+            request.buffer = buffer;
+            request.count = count.min(u32::MAX as usize);
+            request.write = write;
             request.result = None;
+            request.interrupted = false;
             request.requested = true;
             self.state.complete.reset();
             self.state.request.set();
         }
-        if self.state.complete.wait().is_err() {
-            self.cancel();
-            // A private event cannot fail normally. Returning could expose a
-            // borrowed buffer while the synchronous worker still writes to it.
-            std::process::abort();
+        let wait_error = self.state.complete.wait_interruptible().err();
+        if wait_error.is_some() {
+            self.cancel_request(false);
+            // Even failed waits must drain the borrowed buffer's real worker.
+            if self.state.complete.wait().is_err() {
+                std::process::abort();
+            }
         }
         let mut request = lock(&self.state.state);
         request.buffer = ptr::null_mut();
@@ -531,25 +596,53 @@ impl NativeSynchronousInput {
         if result.bytes != 0 {
             return Ok(result.bytes);
         }
-        if result.code == 0 || eof(result.code) {
+        if result.code == OPERATION_ABORTED {
+            if let Some(error) = wait_error {
+                return Err(error);
+            }
+        }
+        if result.code == 0 || (!write && eof(result.code)) {
             Ok(0)
         } else {
             Err(error(result.code))
         }
     }
-    pub(super) fn cancel(&self) {
-        let mut request = lock(&self.state.state);
-        request.cancelled = true;
-        if request.active {
-            if let Some(worker) = &self.worker {
-                unsafe {
-                    CancelSynchronousIo(worker.as_handle().as_raw_handle());
+    fn cancel_request(&self, permanent: bool) {
+        {
+            let mut request = lock(&self.state.state);
+            request.cancelled |= permanent;
+            request.interrupted = true;
+        }
+        loop {
+            {
+                let request = lock(&self.state.state);
+                if !request.active && !request.requested {
+                    return;
                 }
+                if request.active {
+                    if let Some(worker) = &self.worker {
+                        unsafe {
+                            CancelSynchronousIo(worker.as_handle().as_raw_handle());
+                        }
+                    }
+                }
+            }
+            // Cancellation may race the gap between publishing `active` and
+            // entering ReadFile. ERROR_NOT_FOUND cannot acknowledge that request.
+            // Only the private completion does; retry solely on this teardown
+            // path, with a kernel wait rather than a normal-execution poll.
+            match unsafe { WaitForSingleObject(self.state.complete.0.as_raw_handle(), 10) } {
+                0 => return,
+                258 => (),
+                _ => std::process::abort(),
             }
         }
     }
+    pub(super) fn cancel(&self) {
+        self.cancel_request(true);
+    }
 }
-impl Drop for NativeSynchronousInput {
+impl Drop for NativeSynchronousPipe {
     fn drop(&mut self) {
         self.cancel();
         lock(&self.state.state).stopped = true;

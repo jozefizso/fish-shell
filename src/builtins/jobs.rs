@@ -1,16 +1,20 @@
 // Functions for executing the jobs builtin.
 
 use super::prelude::*;
+#[cfg(unix)]
+use crate::proc::{HAVE_PROC_STAT, clock_ticks_to_seconds, proc_get_jiffies};
 use crate::{
     err_fmt,
     io::IoStreams,
     job_group::{JobId, MaybeJobId},
     localization::{wgettext, wgettext_fmt},
     parser::Parser,
-    proc::{HAVE_PROC_STAT, Job, clock_ticks_to_seconds, proc_get_jiffies},
+    proc::Job,
     wutil::fish_wcstoi,
 };
-use fish_common::{EscapeFlags, EscapeStringStyle, escape_string, timef};
+#[cfg(unix)]
+use fish_common::timef;
+use fish_common::{EscapeFlags, EscapeStringStyle, escape_string};
 use fish_wgetopt::{ArgType, WGetopter, WOption, wopt};
 use fish_widestring::{L, WExt as _, WString, wstr};
 use std::num::NonZeroU32;
@@ -28,6 +32,7 @@ enum JobsPrintMode {
 
 /// Calculates the cpu usage (as a fraction of 1) of the specified job.
 /// This may exceed 1 if there are multiple CPUs!
+#[cfg(unix)]
 fn cpu_use(j: &Job) -> f64 {
     let mut u = 0.0;
     for p in j.external_procs() {
@@ -44,8 +49,14 @@ fn cpu_use(j: &Job) -> f64 {
 
 /// Print information about the specified job.
 fn builtin_jobs_print(j: &Job, mode: JobsPrintMode, header: bool, streams: &mut IoStreams) {
+    #[cfg(unix)]
     let pgid = match j.pgid() {
         Some(pgid) => pgid.to_string(),
+        None => "-".to_owned(),
+    };
+    #[cfg(windows)]
+    let pgid = match j.native_group_id() {
+        Some(group) => group.to_string(),
         None => "-".to_owned(),
     };
 
@@ -59,6 +70,7 @@ fn builtin_jobs_print(j: &Job, mode: JobsPrintMode, header: bool, streams: &mut 
                 out.push('\t');
                 out += wgettext!("Group");
                 out.push('\t');
+                #[cfg(unix)]
                 if *HAVE_PROC_STAT {
                     out += wgettext!("CPU");
                     out.push('\t');
@@ -71,15 +83,23 @@ fn builtin_jobs_print(j: &Job, mode: JobsPrintMode, header: bool, streams: &mut 
 
             sprintf!(=> &mut out, "%d\t%s\t", j.job_id(), pgid);
 
+            #[cfg(unix)]
             if *HAVE_PROC_STAT {
                 sprintf!(=> &mut out, "%.0f%%\t", 100.0 * cpu_use(j));
             }
 
-            out += if j.is_stopped() {
+            let state = if j.is_stopped() {
                 wgettext!("stopped")
             } else {
                 wgettext!("running")
             };
+            #[cfg(windows)]
+            let state = if j.native_cancellation_requested() {
+                wgettext!("running (Ctrl-Break requested)")
+            } else {
+                state
+            };
+            out += state;
             out += "\t";
 
             let cmd = escape_string(
@@ -228,7 +248,7 @@ pub fn jobs(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]) ->
                 j = parser.job_get_from_pid(pid);
             }
 
-            if let Some(j) = j.filter(|j| !j.is_completed() && j.is_constructed()) {
+            if let Some(j) = j.filter(|j| j.is_visible()) {
                 builtin_jobs_print(&j, mode, false, streams);
                 found = true;
             } else {

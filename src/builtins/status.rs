@@ -6,9 +6,9 @@ use crate::env::config_paths::get_fish_path;
 use crate::err_fmt;
 #[cfg(all(unix, not(feature = "localize-messages")))]
 use crate::err_raw;
-use crate::proc::JobControl;
+use crate::proc::{JobControl, get_job_control_mode, set_job_control_mode};
 #[cfg(unix)]
-use crate::proc::{get_job_control_mode, get_login, is_interactive_session, set_job_control_mode};
+use crate::proc::{get_login, is_interactive_session};
 #[cfg(unix)]
 use crate::reader::reader_in_interactive_read;
 #[cfg(unix)]
@@ -388,7 +388,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
         } else {
             streams.out.appendln(wgettext!("This is not a login shell"));
         }
-        #[cfg(unix)]
         {
             let job_control_mode = match get_job_control_mode() {
                 JobControl::Interactive => wgettext!("Only on interactive jobs"),
@@ -398,12 +397,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             streams
                 .out
                 .appendln(&wgettext_fmt!("Job control: %s", job_control_mode));
-        }
-        #[cfg(windows)]
-        {
-            streams
-                .out
-                .appendln(L!("Job control: unavailable on native Windows (N5/N6)"));
         }
         streams.out.append(&parser.stack_trace());
 
@@ -424,13 +417,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             } else {
                 Err(STATUS_CMD_ERROR)
             };
-        }
-        #[cfg(windows)]
-        JobControl | IsFullJobControl | IsInteractiveJobControl | IsNoJobControl => {
-            err_fmt!("job control is unavailable on native Windows (N5/N6)")
-                .cmd(cmd)
-                .finish(streams);
-            return Err(STATUS_INVALID_ARGS);
         }
         #[cfg(windows)]
         IsInteractive | IsInteractiveRead => {
@@ -492,7 +478,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             .finish(streams);
             return Err(STATUS_CMD_ERROR);
         }
-        #[cfg(unix)]
         c @ JobControl => {
             let job_control_mode = match opts.new_job_control_mode {
                 Some(j) => {
@@ -518,6 +503,13 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                     new_mode
                 }
             };
+            #[cfg(windows)]
+            if job_control_mode != JobControl::None {
+                err_fmt!("POSIX terminal job control is unsupported on native Windows; use 'none'")
+                    .cmd(cmd)
+                    .finish(streams);
+                return Err(STATUS_INVALID_ARGS);
+            }
             set_job_control_mode(job_control_mode);
         }
         Features => print_features(streams),
@@ -769,7 +761,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
-                #[cfg(unix)]
                 IsFullJobControl => {
                     if get_job_control_mode() == JobControl::All {
                         return Ok(SUCCESS);
@@ -777,7 +768,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
-                #[cfg(unix)]
                 IsInteractiveJobControl => {
                     if get_job_control_mode() == JobControl::Interactive {
                         return Ok(SUCCESS);
@@ -793,7 +783,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                         return Err(STATUS_CMD_ERROR);
                     }
                 }
-                #[cfg(unix)]
                 IsNoJobControl => {
                     if get_job_control_mode() == JobControl::None {
                         return Ok(SUCCESS);
@@ -867,14 +856,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                     streams.out.appendln(first_line(terminal_os_name));
                 }
                 #[cfg(windows)]
-                IsLogin
-                | IsFullJobControl
-                | IsInteractiveJobControl
-                | IsNoJobControl
-                | IsInteractive
-                | IsInteractiveRead
-                | IsBreakpoint
-                | Terminal
+                IsLogin | IsInteractive | IsInteractiveRead | IsBreakpoint | Terminal
                 | TerminalOs => unreachable!(),
                 JobControl | Features | TestFeature | GetFile | ListFiles | Language
                 | TestTerminalFeature => {

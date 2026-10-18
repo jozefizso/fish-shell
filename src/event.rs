@@ -15,16 +15,12 @@ use crate::{
     flog::flog,
     io::{IoChain, IoStreams},
     parser::{Block, LoopStatus},
-    signal::signal_check_cancel,
+    signal::{RawSignal, signal_check_cancel},
 };
 #[cfg(unix)]
-use crate::{
-    reader::reader_update_termsize,
-    signal::{RawSignal, signal_handle},
-};
+use crate::{reader::reader_update_termsize, signal::signal_handle};
 use fish_common::{ScopeGuard, escape};
 use fish_widestring::str2wcstring;
-#[cfg(unix)]
 use std::sync::atomic::AtomicU32;
 use std::sync::{
     Arc, Mutex,
@@ -33,7 +29,6 @@ use std::sync::{
 
 pub enum EventType {
     Any,
-    #[cfg(unix)]
     Signal,
     Variable,
     ProcessExit,
@@ -47,8 +42,7 @@ pub enum EventDescription {
     /// Matches any event type (not always any event, as the function name may limit the choice as
     /// well).
     Any,
-    /// An event triggered by a signal.
-    #[cfg(unix)]
+    /// A POSIX signal on Unix, or a received native console control on Windows.
     Signal { signal: RawSignal },
     /// An event triggered by a variable update.
     Variable { name: WString },
@@ -80,7 +74,6 @@ pub enum EventDescription {
 impl EventDescription {
     fn str_param1(&self) -> Option<&wstr> {
         match self {
-            #[cfg(unix)]
             EventDescription::Signal { .. } => None,
             EventDescription::Any
             | EventDescription::ProcessExit { .. }
@@ -94,7 +87,6 @@ impl EventDescription {
     fn name(&self) -> &'static wstr {
         match self {
             EventDescription::Any => L!("any"),
-            #[cfg(unix)]
             EventDescription::Signal { .. } => L!("signal"),
             EventDescription::Variable { .. } => L!("variable"),
             EventDescription::ProcessExit { .. } => L!("process-exit"),
@@ -127,7 +119,6 @@ impl From<&EventDescription> for EventType {
     fn from(desc: &EventDescription) -> Self {
         match desc {
             EventDescription::Any => EventType::Any,
-            #[cfg(unix)]
             EventDescription::Signal { .. } => EventType::Signal,
             EventDescription::Variable { .. } => EventType::Variable,
             EventDescription::ProcessExit { .. } => EventType::ProcessExit,
@@ -167,7 +158,6 @@ impl EventHandler {
             EventDescription::ProcessExit { pid } => pid.is_some(),
             EventDescription::JobExit { pid, .. } => pid.is_some(),
             EventDescription::CallerExit { .. } => true,
-            #[cfg(unix)]
             EventDescription::Signal { .. } => false,
             EventDescription::Variable { .. }
             | EventDescription::Generic { .. }
@@ -179,7 +169,6 @@ impl EventHandler {
     fn matches(&self, event: &Event) -> bool {
         match (&self.desc, &event.desc) {
             (EventDescription::Any, _) => true,
-            #[cfg(unix)]
             (
                 EventDescription::Signal { signal },
                 EventDescription::Signal { signal: ev_signal },
@@ -217,70 +206,144 @@ impl EventHandler {
 }
 type EventHandlerList = Vec<Arc<EventHandler>>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct Event {
     desc: EventDescription,
     arguments: Vec<WString>,
+    // A queued native lifecycle event must pin its PID independently of job
+    // removal and bounded wait-cache eviction. This is lifetime, not value data.
+    #[cfg(windows)]
+    _native_process: Option<Arc<crate::exec::NativeChild>>,
+}
+
+impl std::fmt::Debug for Event {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Event")
+            .field("desc", &self.desc)
+            .field("arguments", &self.arguments)
+            .finish()
+    }
+}
+
+impl PartialEq for Event {
+    fn eq(&self, other: &Self) -> bool {
+        self.desc == other.desc && self.arguments == other.arguments
+    }
 }
 
 impl Event {
-    pub fn generic(desc: WString) -> Self {
+    fn new(desc: EventDescription, arguments: Vec<WString>) -> Self {
         Self {
-            desc: EventDescription::Generic { param: desc },
-            arguments: vec![],
+            desc,
+            arguments,
+            #[cfg(windows)]
+            _native_process: None,
         }
     }
 
-    pub fn variable_erase(name: WString) -> Self {
-        Self {
-            desc: EventDescription::Variable { name: name.clone() },
-            arguments: vec!["VARIABLE".into(), "ERASE".into(), name],
-        }
-    }
-
-    pub fn variable_set(name: WString) -> Self {
-        Self {
-            desc: EventDescription::Variable { name: name.clone() },
-            arguments: vec!["VARIABLE".into(), "SET".into(), name],
-        }
-    }
-
-    pub fn process_exit(pid: Pid, status: i32) -> Self {
-        Self {
-            desc: EventDescription::ProcessExit { pid: Some(pid) },
-            arguments: vec![
+    fn process_exit_value(pid: Pid, status: i32) -> Self {
+        Self::new(
+            EventDescription::ProcessExit { pid: Some(pid) },
+            vec![
                 "PROCESS_EXIT".into(),
                 pid.to_string().into(),
                 status.to_string().into(),
             ],
-        }
+        )
     }
 
-    pub fn job_exit(pgid: Pid, jid: InternalJobId) -> Self {
-        Self {
-            desc: EventDescription::JobExit {
-                pid: Some(pgid),
+    /// The current process implicitly pins its own PID until it actually exits.
+    pub fn shell_exit(status: i32) -> Self {
+        #[cfg(windows)]
+        let pid = Pid::from_native(std::process::id());
+        #[cfg(not(windows))]
+        let pid = Pid::new(
+            std::process::id()
+                .try_into()
+                .expect("process ID fits pid_t"),
+        );
+        Self::process_exit_value(pid, status)
+    }
+
+    pub fn generic(desc: WString) -> Self {
+        Self::new(EventDescription::Generic { param: desc }, vec![])
+    }
+
+    pub fn variable_erase(name: WString) -> Self {
+        Self::new(
+            EventDescription::Variable { name: name.clone() },
+            vec!["VARIABLE".into(), "ERASE".into(), name],
+        )
+    }
+
+    pub fn variable_set(name: WString) -> Self {
+        Self::new(
+            EventDescription::Variable { name: name.clone() },
+            vec!["VARIABLE".into(), "SET".into(), name],
+        )
+    }
+
+    pub fn process_exit(
+        #[cfg(not(windows))] pid: Pid,
+        #[cfg(windows)] process: Arc<crate::exec::NativeChild>,
+        status: i32,
+    ) -> Self {
+        #[cfg(windows)]
+        let pid = Pid::from_native(process.pid());
+        let event = Self::process_exit_value(pid, status);
+        #[cfg(windows)]
+        let event = Self {
+            _native_process: Some(process),
+            ..event
+        };
+        event
+    }
+
+    pub fn job_exit(
+        #[cfg(not(windows))] pid: Pid,
+        #[cfg(windows)] process: Arc<crate::exec::NativeChild>,
+        jid: InternalJobId,
+        #[cfg(windows)] status: i32,
+    ) -> Self {
+        #[cfg(windows)]
+        let pid = Pid::from_native(process.pid());
+        #[cfg(not(windows))]
+        let status = 0; // Historical Unix job-exit argument.
+        let event = Self::new(
+            EventDescription::JobExit {
+                pid: Some(pid),
                 internal_job_id: jid,
             },
-            arguments: vec![
+            vec![
                 "JOB_EXIT".into(),
-                pgid.to_string().into(),
-                "0".into(), // historical
+                pid.to_string().into(),
+                status.to_string().into(),
             ],
-        }
+        );
+        #[cfg(windows)]
+        let event = Self {
+            _native_process: Some(process),
+            ..event
+        };
+        event
     }
 
     pub fn caller_exit(internal_job_id: InternalJobId, job_id: MaybeJobId) -> Self {
-        Self {
-            desc: EventDescription::CallerExit {
+        Self::new(
+            EventDescription::CallerExit {
                 caller_id: internal_job_id,
             },
-            arguments: vec![
-                "JOB_EXIT".into(),
-                job_id.to_wstring(),
-                "0".into(), // historical
-            ],
-        }
+            vec!["JOB_EXIT".into(), job_id.to_wstring(), "0".into()], // Historical caller argument.
+        )
+    }
+
+    /// A native console-control receipt on Windows; a POSIX signal on Unix.
+    pub fn signal(signal: RawSignal) -> Self {
+        Self::new(
+            EventDescription::Signal { signal },
+            vec![signal.name().into()],
+        )
     }
 
     /// Test if specified event is blocked.
@@ -297,7 +360,6 @@ impl Event {
 
 pub fn get_desc(parser: &Parser, evt: &Event) -> WString {
     let s = match &evt.desc {
-        #[cfg(unix)]
         EventDescription::Signal { signal } => {
             format!("signal handler for {} ({})", signal.name(), signal.desc(),)
         }
@@ -338,6 +400,8 @@ mod dispatch {
     /// but we can expand it to 64 just to be safe. All code checks if a signal value is within bounds
     /// before handling it.
     const SIGNAL_COUNT: usize = 64;
+    #[cfg(windows)]
+    const SIGNAL_COUNT: usize = 4;
 
     #[cfg(unix)]
     struct PendingSignals {
@@ -392,7 +456,6 @@ mod dispatch {
     // Required until inline const is stabilized.
     #[allow(clippy::declare_interior_mutable_const)]
     const ATOMIC_BOOL_FALSE: AtomicBool = AtomicBool::new(false);
-    #[cfg(unix)]
     #[allow(clippy::declare_interior_mutable_const)]
     const ATOMIC_U32_0: AtomicU32 = AtomicU32::new(0);
 
@@ -410,23 +473,34 @@ mod dispatch {
 
     /// Tracks the number of registered event handlers for each signal.
     /// This is inspected by a signal handler. We assume no values in here overflow.
-    #[cfg(unix)]
     static OBSERVED_SIGNALS: [AtomicU32; SIGNAL_COUNT] = [ATOMIC_U32_0; SIGNAL_COUNT];
 
     /// List of events that have been sent but have not yet been delivered because they are blocked.
     ///
     /// This was part of profile_item_t accessed as parser.libdata().blocked_events and has been
     /// temporarily moved here. There was no mutex around this in the cpp code. TODO: Move it back.
-    static BLOCKED_EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
+    struct EventDelivery {
+        event: Event,
+        only_handler: Option<Arc<EventHandler>>,
+    }
 
-    #[cfg(unix)]
+    impl From<Event> for EventDelivery {
+        fn from(event: Event) -> Self {
+            Self {
+                event,
+                only_handler: None,
+            }
+        }
+    }
+
+    static BLOCKED_EVENTS: Mutex<Vec<EventDelivery>> = Mutex::new(Vec::new());
+
     fn inc_signal_observed(sig: RawSignal) {
         if let Some(sig) = OBSERVED_SIGNALS.get(usize::from(sig)) {
             sig.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    #[cfg(unix)]
     fn dec_signal_observed(sig: RawSignal) {
         if let Some(sig) = OBSERVED_SIGNALS.get(usize::from(sig)) {
             sig.fetch_sub(1, Ordering::Relaxed);
@@ -435,26 +509,28 @@ mod dispatch {
 
     /// Returns whether an event listener is registered for the given signal. This is safe to call from
     /// a signal handler.
-    #[cfg(unix)]
     pub fn is_signal_observed(sig: libc::c_int) -> bool {
-        // We are in a signal handler!
-        OBSERVED_SIGNALS
-            .get(usize::try_from(sig).unwrap())
+        // Unix calls this from a signal handler; native controls do not need to.
+        usize::try_from(sig)
+            .ok()
+            .and_then(|index| OBSERVED_SIGNALS.get(index))
             .is_some_and(|s| s.load(Ordering::Relaxed) > 0)
     }
 
     /// Add an event handler.
-    pub fn add_handler(eh: EventHandler) {
-        #[cfg(unix)]
+    pub fn add_handler(eh: EventHandler) -> Arc<EventHandler> {
         if let EventDescription::Signal { signal } = eh.desc {
+            #[cfg(unix)]
             signal_handle(signal);
             inc_signal_observed(signal);
         }
 
+        let handler = Arc::new(eh);
         EVENT_HANDLERS
             .lock()
             .expect("event handler list should not be poisoned")
-            .push(Arc::new(eh));
+            .push(Arc::clone(&handler));
+        handler
     }
 
     /// Remove handlers where `pred` returns true. Simultaneously update our `signal_observed` array.
@@ -468,7 +544,6 @@ mod dispatch {
             let handler = &handlers[i];
             if pred(handler) {
                 handler.removed.store(true, Ordering::Relaxed);
-                #[cfg(unix)]
                 if let EventDescription::Signal { signal } = handler.desc {
                     dec_signal_observed(signal);
                 }
@@ -499,7 +574,7 @@ mod dispatch {
     /// Perform the specified event. Since almost all event firings will not be matched by even a single
     /// event handler, we make sure to optimize the 'no matches' path. This means that nothing is
     /// allocated/initialized unless needed.
-    fn fire_internal(parser: &mut Parser, event: &Event) {
+    fn fire_internal(parser: &mut Parser, event: &Event, only_handler: Option<&Arc<EventHandler>>) {
         // Suppress fish_trace during events.
         let _saved = parser.push_scope(|s| {
             s.is_event = true;
@@ -511,7 +586,7 @@ mod dispatch {
             .lock()
             .expect("event handler list should not be poisoned")
             .iter()
-            .filter(|h| h.matches(event))
+            .filter(|h| h.matches(event) && only_handler.is_none_or(|only| Arc::ptr_eq(h, only)))
             .cloned()
             .collect();
 
@@ -522,6 +597,17 @@ mod dispatch {
             if handler.removed.load(Ordering::Relaxed) {
                 continue;
             }
+
+            // Claim one-shot delivery before reentrant evaluation. A callback
+            // may register another already-completed handler or reap another job.
+            let one_shot = handler.is_one_shot();
+            if one_shot && handler.fired.swap(true, Ordering::Relaxed) {
+                continue;
+            }
+            if !one_shot {
+                handler.fired.store(true, Ordering::Relaxed);
+            }
+            fired_one_shot |= one_shot;
 
             // Construct a buffer to evaluate, starting with the function name and then all the
             // arguments.
@@ -564,8 +650,6 @@ mod dispatch {
             parser.eval(&buffer, &IoChain::new());
             parser.pop_block(b);
 
-            handler.fired.store(true, Ordering::Relaxed);
-            fired_one_shot |= handler.is_one_shot();
             if parser.libdata().exit_current_script {
                 break;
             }
@@ -609,23 +693,40 @@ mod dispatch {
                 if sig == libc::SIGWINCH {
                     reader_update_termsize(parser);
                 }
-                let event = Event {
-                    desc: EventDescription::Signal { signal: sig },
-                    arguments: vec![sig.name().into()],
-                };
-                to_send.push(event);
+                to_send.push(Event::signal(sig).into());
             }
+        }
+        #[cfg(windows)]
+        match crate::signal::take_pending_console_controls() {
+            Ok(pending) => {
+                for (control, count) in pending.controls() {
+                    for _ in 0..count {
+                        to_send.push(Event::signal(control).into());
+                    }
+                }
+            }
+            Err(error) => eprintln!("fish: cannot dispatch console controls: {error}"),
         }
 
         // Never retain the queue lock while invoking a handler: a handler can
         // emit another event, which is queued until main-thread dispatch resumes.
         while !to_send.is_empty() {
             let mut delivered = false;
-            for event in to_send {
-                if event.is_blocked(parser) || parser.libdata().exit_current_script {
-                    BLOCKED_EVENTS.lock().expect("Mutex poisoned").push(event);
+            #[cfg(windows)]
+            let interrupted = || signal_check_cancel() != 0;
+            #[cfg(unix)]
+            let interrupted = || false;
+            for delivery in to_send {
+                if delivery.event.is_blocked(parser)
+                    || parser.libdata().exit_current_script
+                    || interrupted()
+                {
+                    BLOCKED_EVENTS
+                        .lock()
+                        .expect("Mutex poisoned")
+                        .push(delivery);
                 } else {
-                    fire_internal(parser, &event);
+                    fire_internal(parser, &delivery.event, delivery.only_handler.as_ref());
                     delivered = true;
                 }
             }
@@ -638,7 +739,10 @@ mod dispatch {
 
     /// Queue a callback-produced event without entering parser state.
     pub fn enqueue(event: Event) {
-        BLOCKED_EVENTS.lock().expect("Mutex poisoned!").push(event);
+        BLOCKED_EVENTS
+            .lock()
+            .expect("Mutex poisoned!")
+            .push(event.into());
     }
 
     /// Enqueue a signal event. Invoked from a signal handler.
@@ -655,9 +759,30 @@ mod dispatch {
         fire_delayed(parser);
 
         if event.is_blocked(parser) || parser.libdata().exit_current_script {
-            BLOCKED_EVENTS.lock().expect("Mutex poisoned!").push(event);
+            BLOCKED_EVENTS
+                .lock()
+                .expect("Mutex poisoned!")
+                .push(event.into());
         } else {
-            fire_internal(parser, &event);
+            fire_internal(parser, &event, None);
+        }
+    }
+
+    /// Replay only a newly registered lifecycle handler. This is not a new
+    /// process/job transition and must not notify existing catch-all handlers.
+    pub(crate) fn fire_to_handler(parser: &mut Parser, event: Event, handler: Arc<EventHandler>) {
+        crate::threads::assert_is_main_thread();
+        fire_delayed(parser);
+        if event.is_blocked(parser) || parser.libdata().exit_current_script {
+            BLOCKED_EVENTS
+                .lock()
+                .expect("Mutex poisoned!")
+                .push(EventDelivery {
+                    event,
+                    only_handler: Some(handler),
+                });
+        } else {
+            fire_internal(parser, &event, Some(&handler));
         }
     }
 
@@ -703,7 +828,6 @@ mod dispatch {
             }
 
             match &evt.desc {
-                #[cfg(unix)]
                 EventDescription::Signal { signal } => {
                     let name: WString = signal.name().into();
                     streams
@@ -731,10 +855,7 @@ mod dispatch {
     pub fn fire_generic(parser: &mut Parser, name: WString, arguments: Vec<WString>) {
         fire(
             parser,
-            Event {
-                desc: EventDescription::Generic { param: name },
-                arguments,
-            },
+            Event::new(EventDescription::Generic { param: name }, arguments),
         );
     }
 }

@@ -5,6 +5,7 @@
 //! The group, not a PID lookup or a cached language status, owns rollback.
 
 use crate::io::IoChain;
+use crate::native_accounting::{self, TrackedJob};
 use crate::native_fd_bridge::{self, BridgeHandle, PRIVATE_FD_ENV};
 use crate::threads::{NativeCancellation, NativeRuntime, NativeWaitRegistration};
 use std::cmp::Ordering;
@@ -28,6 +29,7 @@ const INFINITE: u32 = u32::MAX;
 const STARTF_USESTDHANDLES: u32 = 0x0000_0100;
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
 const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const DUPLICATE_SAME_ACCESS: u32 = 2;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
@@ -189,6 +191,8 @@ unsafe extern "system" {
     ) -> i32;
     fn AssignProcessToJobObject(job: RawHandle, process: RawHandle) -> i32;
     fn TerminateJobObject(job: RawHandle, status: u32) -> i32;
+    fn GetConsoleProcessList(processes: *mut u32, count: u32) -> u32;
+    fn GenerateConsoleCtrlEvent(control: u32, process_group: u32) -> i32;
     fn CreateIoCompletionPort(
         file: RawHandle,
         existing: RawHandle,
@@ -218,6 +222,58 @@ unsafe extern "system" {
         right_length: i32,
         ignore_case: i32,
     ) -> i32;
+}
+
+/// A cooperative request is not an acknowledgement or a process completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeBreakOutcome {
+    Requested,
+    AlreadyExited(u32),
+    UnsupportedConsole,
+}
+
+/// Request provenance remains independent of the observed native exit DWORD.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeBreakAttempt {
+    Outcome(NativeBreakOutcome),
+    Failed {
+        kind: io::ErrorKind,
+        win32: Option<i32>,
+    },
+}
+
+#[derive(Default)]
+struct NativeControlState {
+    last_break: Option<NativeBreakAttempt>,
+    break_requested: bool,
+}
+
+fn current_console_contains(pid: u32) -> io::Result<bool> {
+    let mut local = [0u32; 64];
+    let count = unsafe { GetConsoleProcessList(local.as_mut_ptr(), local.len() as u32) };
+    if count == 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(6) {
+            Ok(false) // This process has no console to which it may target controls.
+        } else {
+            Err(error)
+        };
+    }
+    if count as usize <= local.len() {
+        return Ok(local[..count as usize].contains(&pid));
+    }
+    let mut processes = vec![0u32; count as usize];
+    let count = unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
+    if count == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if count as usize > processes.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "console membership changed during inspection",
+        ));
+    }
+    Ok(processes[..count as usize].contains(&pid))
 }
 
 fn invalid(message: &'static str) -> io::Error {
@@ -592,6 +648,7 @@ pub struct NativeChild {
     process: Arc<OwnedHandle>,
     registration: Mutex<Option<NativeWaitRegistration>>,
     exit_status: OnceLock<u32>,
+    control: Mutex<NativeControlState>,
 }
 
 impl NativeChild {
@@ -617,7 +674,7 @@ impl NativeChild {
         Ok(status)
     }
 
-    fn status_if_exited(&self) -> io::Result<Option<u32>> {
+    pub(crate) fn status_if_exited(&self) -> io::Result<Option<u32>> {
         if let Some(status) = self.exit_status.get() {
             return Ok(Some(*status));
         }
@@ -626,6 +683,58 @@ impl NativeChild {
             WAIT_TIMEOUT => Ok(None),
             result => Err(unexpected_wait(result)),
         }
+    }
+
+    /// Request Ctrl-Break only for this retained, NEW_PROCESS_GROUP root while
+    /// it belongs to our current console. GUI/detached/foreign-console children
+    /// are ineligible. Retaining the process object prevents PID reuse while the
+    /// group-number-based Windows API is used; no PID is reopened or killed.
+    pub fn request_ctrl_break(&self) -> io::Result<NativeBreakOutcome> {
+        let result = self.send_ctrl_break();
+        let mut control = self
+            .control
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        control.last_break = Some(match &result {
+            Ok(outcome) => NativeBreakAttempt::Outcome(*outcome),
+            Err(error) => NativeBreakAttempt::Failed {
+                kind: error.kind(),
+                win32: error.raw_os_error(),
+            },
+        });
+        control.break_requested |= matches!(result, Ok(NativeBreakOutcome::Requested));
+        result
+    }
+
+    pub fn last_ctrl_break_attempt(&self) -> Option<NativeBreakAttempt> {
+        self.control
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .last_break
+    }
+
+    pub(crate) fn ctrl_break_was_requested(&self) -> bool {
+        self.control
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .break_requested
+    }
+
+    fn send_ctrl_break(&self) -> io::Result<NativeBreakOutcome> {
+        if let Some(raw) = self.status_if_exited()? {
+            return Ok(NativeBreakOutcome::AlreadyExited(raw));
+        }
+        if !current_console_contains(self.pid)? {
+            return Ok(NativeBreakOutcome::UnsupportedConsole);
+        }
+        if unsafe { GenerateConsoleCtrlEvent(1, self.pid) } == 0 {
+            let error = io::Error::last_os_error();
+            if let Some(raw) = self.status_if_exited()? {
+                return Ok(NativeBreakOutcome::AlreadyExited(raw));
+            }
+            return Err(error);
+        }
+        Ok(NativeBreakOutcome::Requested)
     }
 
     /// Wait on this retained process and, optionally, one cancellation event.
@@ -656,7 +765,7 @@ impl NativeChild {
         }
     }
 
-    fn drain_registration(&self) -> io::Result<()> {
+    pub(crate) fn drain_registration(&self) -> io::Result<()> {
         let registration = self
             .registration
             .lock()
@@ -690,6 +799,7 @@ impl PendingChild {
             process: self.process.take().expect("pending process owner"),
             registration: Mutex::new(self.registration.take()),
             exit_status: OnceLock::new(),
+            control: Mutex::new(NativeControlState::default()),
         })
     }
 }
@@ -742,16 +852,18 @@ pub struct NativeLaunchPlan {
 
 /// A rollback boundary for one native pipeline/evaluation launch group.
 ///
-/// Successful finish requires every root to have exited, drains registrations,
-/// and releases living descendants without killing them. All other destruction
-/// keeps KILL_ON_JOB_CLOSE and terminates/reaps only this group's job members.
+/// Successful finish requires every root to have exited and releases descendants.
+/// Unaccepted destruction rolls back only this group's members. Accepted work
+/// releases monitoring instead, so a cooperative failure never silently escalates.
 pub struct NativeLaunchGroup {
     runtime: Arc<NativeRuntime>,
     children: Vec<Arc<NativeChild>>,
-    job: OwnedHandle,
+    job: Arc<OwnedHandle>,
+    accounting: TrackedJob,
     completion_port: OwnedHandle,
     finished: bool,
     terminated: bool,
+    accepted: bool,
 }
 
 impl NativeLaunchGroup {
@@ -761,7 +873,7 @@ impl NativeLaunchGroup {
         if raw_job.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
+        let job = Arc::new(unsafe { OwnedHandle::from_raw_handle(raw_job) });
         set_job_kill_on_close(&job, true)?;
         let raw_port =
             unsafe { CreateIoCompletionPort((-1isize) as RawHandle, ptr::null_mut(), 0, 1) };
@@ -785,13 +897,16 @@ impl NativeLaunchGroup {
         {
             return Err(io::Error::last_os_error());
         }
+        let accounting = native_accounting::register_job(Arc::clone(&job))?;
         Ok(Self {
             runtime,
             children: Vec::new(),
             job,
+            accounting,
             completion_port,
             finished: false,
             terminated: false,
+            accepted: false,
         })
     }
 
@@ -897,7 +1012,10 @@ impl NativeLaunchGroup {
                 ptr::null(),
                 ptr::null(),
                 i32::from(!plan.child_io.allowlist.is_empty()),
-                CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                CREATE_SUSPENDED
+                    | CREATE_NEW_PROCESS_GROUP
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | EXTENDED_STARTUPINFO_PRESENT,
                 plan.environment.as_ptr().cast(),
                 plan.cwd.as_ptr(),
                 &startup.startup,
@@ -953,8 +1071,39 @@ impl NativeLaunchGroup {
             child.drain_registration()?;
         }
         set_job_kill_on_close(&self.job, false)?;
+        self.accounting.finish()?;
         self.finished = true;
         Ok(())
+    }
+
+    /// Commit launch ownership without promising POSIX terminal job control.
+    /// Accepted work survives normal shell exit, including after disown. Until
+    /// this succeeds, every failure still rolls back the suspended/started roots.
+    pub(crate) fn accept(&mut self) -> io::Result<()> {
+        set_job_kill_on_close(&self.job, false)?;
+        self.accepted = true;
+        Ok(())
+    }
+
+    /// Stop monitoring accepted work without terminating it. Registrations are
+    /// drained before handles are released; accounting ends at this explicit
+    /// ownership cutoff rather than inventing future descendant CPU usage.
+    pub(crate) fn release_running(&mut self) -> io::Result<()> {
+        self.accept()?;
+        let mut error = None;
+        for child in &self.children {
+            if let Err(failure) = child.drain_registration() {
+                error.get_or_insert(failure);
+            }
+        }
+        if let Err(failure) = self.accounting.finish() {
+            error.get_or_insert(failure);
+        }
+        self.finished = true;
+        match error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Terminate the owned job (including descendants), reap root handles, and
@@ -1063,10 +1212,266 @@ fn set_job_kill_on_close(job: &OwnedHandle, enabled: bool) -> io::Result<()> {
 impl Drop for NativeLaunchGroup {
     fn drop(&mut self) {
         if !self.finished {
-            // KILL_ON_JOB_CLOSE remains armed even if a native cleanup API fails.
-            // The destructor never changes another group's job or uses a PID to
-            // reopen/terminate an unrelated process after handle recycling.
-            let _ = self.terminate_and_wait();
+            if self.accepted {
+                // A monitoring error is not permission to kill accepted work.
+                let _ = self.release_running();
+            } else {
+                // Rollback never targets an enclosing/host job or a reopened PID.
+                let _ = self.terminate_and_wait();
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const QUOTA_READY: &str = "FISH_NATIVE_ASSIGNMENT_QUOTA_READY";
+    const QUOTA_RELEASE: &str = "FISH_NATIVE_ASSIGNMENT_QUOTA_RELEASE";
+    const QUOTA_STATUS: &str = "FISH_NATIVE_ASSIGNMENT_QUOTA_STATUS";
+    const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: u32 = 0x0000_0008;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateEventW(
+            security: *const c_void,
+            manual: i32,
+            initial: i32,
+            name: *const u16,
+        ) -> RawHandle;
+        fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> RawHandle;
+        fn SetEvent(event: RawHandle) -> i32;
+        fn ExitProcess(status: u32) -> !;
+    }
+
+    fn own(raw: RawHandle) -> OwnedHandle {
+        assert!(
+            !raw.is_null(),
+            "native fixture handle: {}",
+            io::Error::last_os_error()
+        );
+        unsafe { OwnedHandle::from_raw_handle(raw) }
+    }
+
+    struct NamedEvent {
+        name: OsString,
+        handle: OwnedHandle,
+    }
+
+    impl NamedEvent {
+        fn new(label: &str) -> Self {
+            let name = OsString::from(format!(
+                "Local\\fish-native-assignment-quota-{}-{label}",
+                std::process::id()
+            ));
+            let handle =
+                own(unsafe { CreateEventW(ptr::null(), 1, 0, wide(&name).unwrap().as_ptr()) });
+            Self { name, handle }
+        }
+
+        fn wait(&self) {
+            assert_eq!(
+                unsafe { WaitForSingleObject(self.handle.as_raw_handle(), INFINITE) },
+                WAIT_OBJECT_0
+            );
+        }
+
+        fn signal(&self) {
+            assert_ne!(unsafe { SetEvent(self.handle.as_raw_handle()) }, 0);
+        }
+    }
+
+    fn job_accounting(job: &OwnedHandle) -> JobAccounting {
+        let mut accounting = JobAccounting::default();
+        assert_ne!(
+            unsafe {
+                QueryInformationJobObject(
+                    job.as_raw_handle(),
+                    JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+                    (&mut accounting as *mut JobAccounting).cast(),
+                    size_of::<JobAccounting>() as u32,
+                    ptr::null_mut(),
+                )
+            },
+            0,
+            "private job accounting: {}",
+            io::Error::last_os_error()
+        );
+        accounting
+    }
+
+    #[test]
+    fn assignment_quota_rollback_preserves_host() {
+        // The same exact libtest case is also the native sentinel image. Check
+        // this mode before isolation so it neither recurses nor needs shell argv.
+        if let Some(ready_name) = std::env::var_os(QUOTA_READY) {
+            let ready =
+                own(unsafe { OpenEventW(0x0000_0002, 0, wide(&ready_name).unwrap().as_ptr()) });
+            let release = own(unsafe {
+                OpenEventW(
+                    0x0010_0000,
+                    0,
+                    wide(&std::env::var_os(QUOTA_RELEASE).unwrap())
+                        .unwrap()
+                        .as_ptr(),
+                )
+            });
+            let status = std::env::var(QUOTA_STATUS).unwrap().parse::<u32>().unwrap();
+            assert_ne!(unsafe { SetEvent(ready.as_raw_handle()) }, 0);
+            assert_eq!(
+                unsafe { WaitForSingleObject(release.as_raw_handle(), INFINITE) },
+                WAIT_OBJECT_0
+            );
+            unsafe { ExitProcess(status) }
+        }
+
+        const CASE: &str = concat!(module_path!(), "::assignment_quota_rollback_preserves_host");
+        if !crate::threads::isolated_test(CASE) {
+            return;
+        }
+
+        // Only this isolated owner joins the outer job. Never terminate it or
+        // enable KILL_ON_JOB_CLOSE: it contains the test root, not the CI host.
+        let outer = own(unsafe { CreateJobObjectW(ptr::null(), ptr::null()) });
+        assert_ne!(
+            unsafe { AssignProcessToJobObject(outer.as_raw_handle(), GetCurrentProcess()) },
+            0,
+            "private outer job membership: {}",
+            io::Error::last_os_error()
+        );
+        assert_eq!(job_accounting(&outer).active_processes, 1);
+
+        let runtime = NativeRuntime::new().unwrap();
+        let exe = crate::wutil::native_current_exe_path().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let case = CASE
+            .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .unwrap();
+        let argv = [
+            exe.as_os_str().to_owned(),
+            "--exact".into(),
+            case.into(),
+            "--nocapture".into(),
+        ];
+        // The sentinel needs only its explicit protocol and SystemRoot. An
+        // inherited Windows block may contain drive pseudo-variables (`=D:`),
+        // which are not valid names in the launcher's explicit environment API.
+        let system_root = std::env::var_os("SystemRoot").expect("native test requires SystemRoot");
+        let sentinel_environment = |ready: &NamedEvent, release: &NamedEvent, status: u32| {
+            [
+                ("SystemRoot".into(), system_root.clone()),
+                (QUOTA_READY.into(), ready.name.clone()),
+                (QUOTA_RELEASE.into(), release.name.clone()),
+                (QUOTA_STATUS.into(), status.to_string().into()),
+            ]
+        };
+        let host_ready = NamedEvent::new("host-ready");
+        let host_release = NamedEvent::new("host-release");
+        let target_ready = NamedEvent::new("target-ready");
+        let target_release = NamedEvent::new("target-release");
+        let mut host_group = NativeLaunchGroup::new(Arc::clone(&runtime)).unwrap();
+        let mut target_group = NativeLaunchGroup::new(Arc::clone(&runtime)).unwrap();
+        let host = host_group
+            .spawn(
+                &exe,
+                &argv,
+                &cwd,
+                &sentinel_environment(&host_ready, &host_release, 37),
+                &IoChain::new(),
+                false,
+            )
+            .unwrap();
+        host_ready.wait();
+        let target_environment = sentinel_environment(&target_ready, &target_release, 41);
+        let target = target_group
+            .spawn(
+                &exe,
+                &argv,
+                &cwd,
+                &target_environment,
+                &IoChain::new(),
+                false,
+            )
+            .unwrap();
+        target_ready.wait();
+        assert_eq!(job_accounting(&outer).active_processes, 3);
+        assert_eq!(job_accounting(&outer).total_processes, 3);
+        assert_eq!(job_accounting(&target_group.job).active_processes, 1);
+
+        // The owner is outside the target job, so CreateProcessW can still
+        // create a suspended root in the outer job. Only the subsequent real
+        // AssignProcessToJobObject hits the target's now-full active quota.
+        let mut limits = JobExtendedLimits::default();
+        limits.basic.flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        limits.basic.active_process_limit = 1;
+        assert_ne!(
+            unsafe {
+                SetInformationJobObject(
+                    target_group.job.as_raw_handle(),
+                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                    (&limits as *const JobExtendedLimits).cast(),
+                    size_of::<JobExtendedLimits>() as u32,
+                )
+            },
+            0,
+            "target active-process quota: {}",
+            io::Error::last_os_error()
+        );
+        let plan = target_group
+            .prepare(
+                &exe,
+                &argv,
+                &cwd,
+                &target_environment,
+                &IoChain::new(),
+                false,
+            )
+            .unwrap();
+        let error = match target_group.spawn_prepared(plan) {
+            Err(error) => error,
+            Ok(_) => panic!("full target job accepted another native root"),
+        };
+        assert!(
+            error.raw_os_error().is_some(),
+            "expected native assignment failure: {error}"
+        );
+        assert_eq!(target_group.children.len(), 1, "failed root was published");
+        assert_eq!(job_accounting(&target_group.job).active_processes, 1);
+        assert_eq!(target.status_if_exited().unwrap(), None);
+        let accounting = job_accounting(&outer);
+        assert_eq!(
+            accounting.active_processes, 3,
+            "rejected suspended root survived"
+        );
+        assert!(
+            accounting.total_processes >= 4,
+            "rejection did not reach CreateProcessW"
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(host.handle().as_raw_handle(), 0) },
+            WAIT_TIMEOUT
+        );
+
+        // Windows itself terminates a process rejected by an active-process
+        // quota (AssignProcessToJobObject's documented contract). This proves
+        // PendingChild reaps that failure, not that it issued TerminateProcess.
+        // Drop must then roll back only the target's still-live first root.
+        drop(target_group);
+        assert_eq!(target.wait(None).unwrap(), ROLLBACK_STATUS);
+        assert_eq!(job_accounting(&outer).active_processes, 2);
+        assert_eq!(
+            unsafe { WaitForSingleObject(host.handle().as_raw_handle(), 0) },
+            WAIT_TIMEOUT,
+            "target rollback terminated the unrelated retained host sentinel"
+        );
+        host_release.signal();
+        assert_eq!(host.wait(None).unwrap(), 37);
+        host_group.finish().unwrap();
+        assert_eq!(job_accounting(&outer).active_processes, 1);
+        assert!(
+            runtime.drain().is_empty(),
+            "rollback left owned completion records"
+        );
     }
 }

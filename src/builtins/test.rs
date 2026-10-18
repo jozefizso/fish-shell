@@ -4,10 +4,10 @@ use crate::{err_str, should_flog};
 use fish_feature_flags::{FeatureFlag, feature_test};
 
 mod test_expressions {
-    #[cfg(unix)]
-    use nix::unistd::{AccessFlags, Gid, Uid};
     #[cfg(windows)]
     use crate::wutil::AccessFlags;
+    #[cfg(unix)]
+    use nix::unistd::{AccessFlags, Gid, Uid};
 
     use super::*;
 
@@ -283,7 +283,12 @@ mod test_expressions {
     /// Base trait for expressions.
     pub(super) trait Expression {
         /// Evaluate returns true if the expression is true (i.e. STATUS_CMD_OK).
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool;
+        fn evaluate(
+            &self,
+            streams: &mut IoStreams,
+            errors: &mut Vec<WString>,
+            vars: &dyn Environment,
+        ) -> bool;
 
         /// Return base.range.
         fn range(&self) -> Range;
@@ -340,7 +345,12 @@ mod test_expressions {
     }
 
     impl Expression for JustAString {
-        fn evaluate(&self, _streams: &mut IoStreams, _errors: &mut Vec<WString>, _vars: &dyn Environment) -> bool {
+        fn evaluate(
+            &self,
+            _streams: &mut IoStreams,
+            _errors: &mut Vec<WString>,
+            _vars: &dyn Environment,
+        ) -> bool {
             !self.arg.is_empty()
         }
 
@@ -350,7 +360,12 @@ mod test_expressions {
     }
 
     impl Expression for UnaryPrimary {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+        fn evaluate(
+            &self,
+            streams: &mut IoStreams,
+            errors: &mut Vec<WString>,
+            vars: &dyn Environment,
+        ) -> bool {
             unary_primary_evaluate(self.token, &self.arg, streams, errors, vars)
         }
 
@@ -360,7 +375,12 @@ mod test_expressions {
     }
 
     impl Expression for BinaryPrimary {
-        fn evaluate(&self, _streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+        fn evaluate(
+            &self,
+            _streams: &mut IoStreams,
+            errors: &mut Vec<WString>,
+            vars: &dyn Environment,
+        ) -> bool {
             binary_primary_evaluate(self.token, &self.arg_left, &self.arg_right, errors, vars)
         }
 
@@ -370,7 +390,12 @@ mod test_expressions {
     }
 
     impl Expression for UnaryOperator {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+        fn evaluate(
+            &self,
+            streams: &mut IoStreams,
+            errors: &mut Vec<WString>,
+            vars: &dyn Environment,
+        ) -> bool {
             match self.token {
                 UnaryBooleanToken::Bang => !self.subject.evaluate(streams, errors, vars),
             }
@@ -382,7 +407,12 @@ mod test_expressions {
     }
 
     impl Expression for CombiningExpression {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+        fn evaluate(
+            &self,
+            streams: &mut IoStreams,
+            errors: &mut Vec<WString>,
+            vars: &dyn Environment,
+        ) -> bool {
             assert!(!self.subjects.is_empty());
             assert_eq!(self.combiners.len() + 1, self.subjects.len());
 
@@ -430,7 +460,12 @@ mod test_expressions {
     }
 
     impl Expression for ParentheticalExpression {
-        fn evaluate(&self, streams: &mut IoStreams, errors: &mut Vec<WString>, vars: &dyn Environment) -> bool {
+        fn evaluate(
+            &self,
+            streams: &mut IoStreams,
+            errors: &mut Vec<WString>,
+            vars: &dyn Environment,
+        ) -> bool {
             self.contents.evaluate(streams, errors, vars)
         }
 
@@ -911,8 +946,8 @@ mod test_expressions {
                 // A denied or otherwise unidentifiable object is not a missing one.
                 let identify = |path: &wstr, _errors: &mut Vec<WString>| {
                     #[cfg(windows)]
-                    let result = native_operand(path, _vars)
-                        .and_then(|path| file_id_for_path(&path));
+                    let result =
+                        native_operand(path, _vars).and_then(|path| file_id_for_path(&path));
                     #[cfg(unix)]
                     let result = file_id_for_path(path);
                     match result {
@@ -921,7 +956,9 @@ mod test_expressions {
                             #[cfg(windows)]
                             if _error.kind() != std::io::ErrorKind::NotFound {
                                 _errors.push(wgettext_fmt!(
-                                    "Cannot identify '%s': %s", path, _error.to_string()
+                                    "Cannot identify '%s': %s",
+                                    path,
+                                    _error.to_string()
                                 ));
                             }
                             None
@@ -975,13 +1012,18 @@ mod test_expressions {
         #[cfg(windows)]
         let native_path = if matches!(
             token,
-            UnaryToken::FileStat(_) | UnaryToken::FilePerm(_)
+            UnaryToken::FileStat(_)
+                | UnaryToken::FilePerm(_)
                 | UnaryToken::FileType(FilePredicate::h | FilePredicate::L)
         ) {
             match native_operand(arg, _vars) {
                 Ok(path) => Some(path),
                 Err(error) => {
-                    errors.push(wgettext_fmt!("Cannot resolve '%s': %s", arg, error.to_string()));
+                    errors.push(wgettext_fmt!(
+                        "Cannot resolve '%s': %s",
+                        arg,
+                        error.to_string()
+                    ));
                     return false;
                 }
             }
@@ -996,9 +1038,15 @@ mod test_expressions {
                 #[cfg(windows)]
                 if matches!(
                     stat_token,
-                    StatPredicate::b | StatPredicate::c | StatPredicate::G
-                        | StatPredicate::g | StatPredicate::k | StatPredicate::O
-                        | StatPredicate::p | StatPredicate::S | StatPredicate::u
+                    StatPredicate::b
+                        | StatPredicate::c
+                        | StatPredicate::G
+                        | StatPredicate::g
+                        | StatPredicate::k
+                        | StatPredicate::O
+                        | StatPredicate::p
+                        | StatPredicate::S
+                        | StatPredicate::u
                 ) {
                     errors.push(wgettext!(
                         "Unix special-file and ownership/mode predicates are unsupported on native Windows"
