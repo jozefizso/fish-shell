@@ -13,6 +13,7 @@
 #end
 
 function __fish_emerge_print_sets
+    command -sq emerge; or return 127
     for s in '@'(emerge --list-sets)
         switch $s
             case @profile

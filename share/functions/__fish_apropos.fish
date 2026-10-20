@@ -1,4 +1,19 @@
 # localization: skip(private)
+if builtin -q __fish_native_fs
+    function __fish_apropos
+        test (count $argv) -eq 1; or return 2
+        set -l python (__fish_anypython)
+        or begin
+            printf '%s\n' 'fish: Python 3.8+ is required for native manual summaries' >&2
+            return 127
+        end
+        status get-file tools/create_manpage_completions.py |
+            command $python -B - --summary "$argv[1]"
+        return $pipestatus[-1]
+    end
+    exit
+end
+
 if not type -q apropos
     function __fish_apropos
     end

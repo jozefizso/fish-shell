@@ -8,7 +8,7 @@
 # manager initially developed for FreeBSD though now available on a few other BSDs. From here on
 # out, maintainers can assume we are specifically talking about the (Free)BSD `pkg` command being
 # executed on a BSD system, rather than just work with "not SunOS".
-if ! uname | string match -irq bsd
+if ! __fish_uname | string match -irq bsd
     exit
 end
 

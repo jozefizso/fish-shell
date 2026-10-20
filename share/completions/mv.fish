@@ -1,4 +1,4 @@
-set -l uname (uname -s)
+set -l uname (__fish_uname)
 
 ## GNU mv
 if __fish_supports_version mv

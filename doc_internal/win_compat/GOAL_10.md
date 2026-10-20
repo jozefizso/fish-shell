@@ -1,9 +1,9 @@
 # GOAL_10 — Native release and installation
 
-**Phase:** N10. **Status: planned / not started**.
+**Phase:** N10. **Status: native packaging integrated; independent candidates built; required acceptance blocked/pending**.
 Primary product target: `x86_64-pc-windows-msvc`, delivered first as a relocatable x64 ZIP.
 ARM64 runtime support and additional installer channels are separate tracks.
-The gates below are acceptance specifications, not existing tests or claimed passing releases.
+Runnable gates exist; package construction and offline inspection are not installed-runtime acceptance.
 This contract expands the approved roadmap at revision `2acbbad4b`.
 
 ## Objective
@@ -130,6 +130,44 @@ release claim or an implication that every installer/signature channel already e
   case counts/results, package checksums/artifact locations, loaded dependency paths, resource
   manifest and user-state preservation evidence. Record real install/upgrade/relocation smoke
   separately from automated gates and any authorized publication/signature evidence.
+
+## Observed candidate evidence and blockers
+
+Two real default-feature release candidates were built from the same declared
+source/toolchain inputs, using separate Cargo output roots. Both are unsigned
+AMD64 images with static MSVC CRT/PCRE2-32 and only declared Windows system imports.
+They predate later N9 parser/cursor/quoting/asset corrections and are not final releases.
+
+| Candidate directory under `target/` | ZIP SHA-256 |
+|---|---|
+| `n10-locale-sql-current-a` | `348bd01c3865ff3d54c61fee4ccf928930663df99d239d9de67f7e66ab27dbe5` |
+| `n10-locale-sql-current-b` | `98ec7d65e13a8be02139c2e68fae31a7dcb60198e1cd655c8dd652cc3dad009b` |
+
+Both contain `fish-4.9.3-160-gcdc211188-dirty-windows-x64-default-unsigned.zip`.
+Offline archive comparison proves byte-identical `build-inputs.json` and
+`source-inputs.json`; their source-input digest is
+`9e26973f734cd1288f42b9e7d74abceba75d7214315c21adacab389e29ce7f05`.
+Inputs record Rust/Cargo1.95, linker14.44.35229, SDK10.0.26100 and
+`-C target-feature=+crt-static`.
+
+Archive bytes are **not** reproducible in the current channel. The only changed
+members are the three executables and their hash manifest. Actual PE inspection
+finds different COFF/debug timestamps and CodeView GUIDs; PDB names remain
+executable-local basenames. Version/source/build-input reproducibility must not
+be reported as deterministic executable or ZIP bytes.
+
+The actual `n10_artifact` run stopped before `Inspect` completed:
+`SecurityError: AuthorizationManager check failed.`
+Retained log: `target/n7-gate-results/n10-current-independent-artifact-gate.txt`.
+Read-only diagnostics observe LocalMachine `RemoteSigned`, `FullLanguage`, an
+unsigned script and no Zone.Identifier stream; they do not establish the cause
+or resolve the provider rejection. No execution-policy/zone/security change,
+alternate management provider or retry was used to bypass it.
+
+Clean restricted-account/install fixtures and a prior supported ZIP are also
+unavailable by the user's explicit decision. N10-INSTALL, N10-MATRIX and
+N10-ARTIFACT therefore remain open. Earlier local installed smoke evidence is
+preliminary and cannot close clean-machine, final-source or upgrade acceptance.
 
 ## Definition of done and handoff
 

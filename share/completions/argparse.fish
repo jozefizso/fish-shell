@@ -31,8 +31,8 @@ function __fish_argparse_exclusive_args --description 'Helper function to list u
         set index (math $index - 1)
     end
 
-    if string match --quiet -- '-x*' $current_token
-        set current_token (string replace --regex -- '^-x' '' $current_token)
+    if string match --quiet -- '-x*' $current_token; or string match --quiet -- '--exclusive=*' $current_token
+        set current_token (string replace --regex -- '^(-x|--exclusive=)' '' $current_token)
     end
 
     if test $index -gt 1
@@ -60,7 +60,7 @@ complete --command argparse --short-option h --long-option help --description 'S
 complete --command argparse --short-option n --long-option name --require-parameter --no-files \
     --arguments '(functions --all | string replace ", " "\n")' --description 'Use function name'
 complete --command argparse --short-option x --long-option exclusive --no-files --require-parameter \
-    --arguments '(__fish_append "," (__fish_argparse_exclusive_args))' \
+    --arguments "(__fish_stripprefix='^(--exclusive=|-\w*x)' __fish_complete_list , __fish_argparse_exclusive_args)" \
     --description 'Specify mutually exclusive options'
 complete --command argparse --short-option N --long-option min-args --no-files --require-parameter \
     --description 'Specify minimum non-option argument count'

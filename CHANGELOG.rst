@@ -21,7 +21,60 @@ Interactive improvements
 - The experimental native Windows backend now has a shared interactive reader,
   strict Unicode console-record input, core editing/bindings, nested reader tools,
   native clipboard support and checked console-mode/protocol handoff to children.
-  Full editor/completion parity and installed help/localization remain later phases.
+  Evaluated completion, history/search, abbreviations, pager and vi/hybrid bindings
+  are now available; final Windows release acceptance remains in progress.
+- Native Windows input no longer leaves ordinary function keys blocked behind
+  cancelled completion workers. ConPTY Ctrl-C cancels the current evaluator
+  without inventing a native control-event receipt; paste remains literal input.
+- Native ``commandline`` cursor, column and selection coordinates count complete
+  Unicode scalars, including internally escaped private-use characters. Silent
+  native readers initialize a one-cell mask instead of displaying a NUL symbol.
+- ``beginning-of-history`` now reaches the oldest matching entry, including
+  entries not yet visited by the current search.
+- Native Windows vi/hybrid bindings initialize their mode and operator state
+  without queuing repaint ahead of dependent editing actions.
+- Readline actions called by binding helpers no longer refresh asynchronous
+  suggestions against temporary helper locals before consuming the displayed
+  suggestion. This restores vi suggestion acceptance through counted motions.
+- Interactive ``fish -C`` commands can initialize commandline text and cursor
+  before the reader starts; actions needing a live reader remain checked.
+- Wildcard command and executable-path completion rules now convert shell glob
+  syntax before matching. Native Windows path rules accept either separator;
+  literal rules retain their original spelling when listed or serialized.
+- Programmable completion matching no longer searches embedded descriptions as
+  candidate text, including fuzzy and wildcard matches.
+- Required option arguments are now completed as values even when they start
+  with ``-``, instead of being mistaken for new switches. Optional and attached
+  argument syntax remains distinct.
+- Ruff's generated-completion fallback checks the producer's status before
+  sourcing its output and preserves failure diagnostics.
+- GnuPG key-ID completions request fixed-list records, restoring primary-key
+  selection and Unicode user-ID descriptions with legacy GnuPG 1.
+- Completions after ``command`` now include the selected child's switches,
+  including with an explicit ``--`` separator. Builtin query modes retain
+  their command-name boundary instead of acquiring child switches.
+- GNU ``msgfmt`` completions now offer the real ``--check-header`` option.
+- Native Windows ImageMagick ``convert`` completions no longer attach to the
+  unrelated filesystem converter at the System32 path.
+- ``age`` and ``age-keygen`` completions distinguish required file arguments
+  from scalar recipients and register version options on the correct command.
+- Renaming a literal abbreviation now updates its matching word without losing
+  function callbacks or changing regex abbreviation patterns.
+- Modified F3 bindings are distinguished from cursor-position reports when no
+  cursor query is outstanding; requested reports retain their query ownership.
+- Live Tab completion consumes the complete logical token when the cursor is in its
+  middle; programmable completion retains access to the full commandline snapshot.
+- Function-name discovery no longer holds the function-definition lock while
+  scanning autoload directories. Live-file Unix debug builds scan the bundled
+  function namespace rather than every shipped asset for command completion.
+- Named bundled theme and prompt lookup now retrieves the requested asset
+  directly instead of enumerating the whole asset tree during startup.
+- Native evaluator callbacks yield to buffered input without continuously
+  restarting completion workers. Asynchronous job/universal-variable callbacks
+  are cancellable, and nested evaluators consume a typed-cancel reset only once.
+- Native console layout measures combining-character width in an inactive buffer.
+  Background job completion redraws cached cells even when a silent child restores
+  the cursor after writing directly to the console.
 
 Scripting improvements
 ----------------------
@@ -43,8 +96,43 @@ Scripting improvements
   N4 startup/sharing/recovery gates pass in both native development profiles.
   Native jobs/wait/disown, lifecycle events, cancellation and process accounting
   are also implemented. This does not complete all eleven Windows phases:
-  evaluated completion/editor parity, help and full locale/assets parity remain
-  separate phases. Faithful fork, same-PID exec and POSIX fg/bg remain excluded.
+  shipped-asset breadth, packaging and release-quality acceptance remain separate
+  validation gates. Faithful fork, same-PID exec and POSIX fg/bg remain excluded.
+- Double-quoted command substitutions retain their quote context when validating
+  the following argument text.
+- Quoted dollar-form substitutions now pass command-position syntax preflight,
+  allowing ``command "$(status fish-path)"`` to run the selected executable.
+- Web configuration theme notifications reject trailing newlines instead of
+  applying a frozen theme for a malformed protocol message.
+- Explicit completion wrappers inherit declared metadata even if the wrapped
+  executable is absent; missing direct commands retain their autoload guard.
+- Native Windows CRT arguments are quoted only when necessary, preserving flags
+  accepted by utilities such as ``attrib`` while retaining backslash/quote rules.
+- Native command discovery preserves callable aliases instead of replacing their
+  names with canonical dispatcher targets, restoring Cargo completion and invocation.
+- Cargo feature and package completions remove native CRLF record terminators before
+  inserting selected values.
+- Native help and manual resource roots are available in no-config sessions.
+- Native MySQL metadata helpers preserve UTF-8 schema records and forward
+  connection credentials/options to the genuine client.
+- Native locale completions enumerate Windows NLS locale names and preserve
+  selected ``LANG``/``LC_NUMERIC`` formatting semantics.
+- The Git repository predicate returns quietly false when Git is absent rather
+  than invoking a missing producer.
+
+Build improvements
+------------------
+- Default native builds keep generated help and gettext maps in one shared
+  workspace-rooted directory when ``CARGO_TARGET_DIR`` is relative.
+- Fluent maintainer tooling uses native exclusive temporary files on Windows.
+  Failed single-file replacement preserves the source and removes its temporary file.
+- Gettext maintenance accepts native CRLF headers and keeps Unicode PO/MO paths
+  in native file I/O instead of passing them through GNU tools' narrow filename argv.
+- Fluent extraction explicitly enables Syn's proc-macro support instead of
+  relying on unrelated workspace dependencies to enable it.
+- ``cargo xtask html-docs`` builds the formatter for its running platform and
+  selects it by absolute path, including native Windows ``.exe`` paths. The
+  documentation lexer propagates formatter failure without symlinks or PATH aliases.
 
 Regression fixes:
 -----------------

@@ -1,5 +1,74 @@
 # Workspace crates
 
+## N10 execution/deployment destinations
+
+These are explicit current destinations, not passing runtime claims. Native
+`build_tools/native.ps1` preserves `default` and `minimal` features; extraction
+features are maintenance-host operations, not covert runtime dependencies.
+The following ledger accounts for all **21** direct-child crates plus root fish.
+`fish-localization-extraction` is a manifest dependency name without a crate
+directory, not an invented twenty-second workspace member.
+
+| Direct-child crate | Native runtime / build-host destination |
+| --- | --- |
+| `common` | Linked native runtime algorithms and I/O/platform consumers; native crate/root gates, not host-only. |
+| `widestring` | Linked native runtime wide-string encoding/path/stream consumers; native crate/root gates. |
+| `util` | Linked native runtime shared utility/platform consumers; native crate/root gates. |
+| `tempfile` | Linked runtime temporary-file users and host extraction helpers; native crate tests do not replace atomic-state/DACL gates. |
+| `fallback` | Linked runtime width/case algorithms; native crate/console gates. |
+| `wcstringutil` | Linked runtime token/string algorithms; native crate/root gates. |
+| `wgetopt` | Linked native builtin/tool option parsing; native crate and actual three-executable gates. |
+| `feature-flags` | Linked runtime syntax feature handling; native crate/parser gates. |
+| `printf` | Linked native formatter; crate tests plus real installed printf/locale consumers. |
+| `color` | Linked runtime color parser/conversion; crate tests plus actual native terminal consumers. |
+| `widecharwidth` | Linked runtime Unicode width tables; crate tests plus Unicode console gates. |
+| `fluent` | Linked native runtime bundles; default embeds multilingual FTL, minimal English; native N9 catalog and runtime gates. |
+| `localization` | Linked default-profile runtime language types/catalog keys; native default-profile crate/N9 gates. |
+| `gettext` | Linked default-profile Rust PHF lookup, no runtime libintl DLL; native default-profile crate/N9 gates. |
+| `gettext-maps` | Host build script runs real native `msgfmt` and generates Rust maps; resulting maps are linked native runtime data; not excused as host-only. |
+| `gettext-mo-file-parser` | Host generator/parser and shared parser library; native crate malformed/valid MO tests and real catalog generation. |
+| `build-helper` | Native host build scripts (target-aware paths/version) plus linked runtime resource helpers; native W1/root/resource consumers. No `.sh` dependency. |
+| `build-man-pages` | Native host Sphinx generation and build-order dependency; generated help is embedded/installed runtime data. Default generation is mandatory, minimal ZIP generation is explicit packaging work. |
+| `gettext-extraction` | Host proc macro, invoked during supported Unix maintenance `cargo xtask gettext` extraction/check/update/new; never shipped as a runtime executable or mandatory startup dependency. |
+| `fluent-extraction` | Host proc macro, invoked during supported Unix maintenance `cargo xtask fluent` source extraction/check/update; never runtime startup dependency. |
+| `xtask` | Supported Unix maintenance CLI/library, all children assigned below; not advertised as a native Windows required operation. Native build/check/package duties use PowerShell directly instead. |
+
+Root `fish` is the native runtime package and supplies **three separately built**
+MSVC `.exe` entrypoints (`fish`, `fish_indent`, `fish_key_reader`). No hardlink,
+basename-dispatch or duplicate-shell packaging convention substitutes for them.
+There are no separately deployed runtime DLLs from these local Rust crates.
+Runtime behavior remains subject to native consumer evidence; this role ledger
+does not turn successful Cargo dependency resolution into a product result.
+
+### Every xtask child and supported host
+
+The supported maintenance host is Linux/Unix with native Cargo/Rust, fish,
+GNU gettext (`msgfmt`, `msgmerge`, `msgattrib`, `msguniq`), `diff`, ShellCheck,
+Sphinx/Python and Ruff/rustfmt as applicable. WSL can run these **Unix host tools**,
+but their results are never native-Windows shell/console/install evidence.
+
+- `check`: intentional Unix `build_tools/check.sh` orchestration. Native-required
+  checks instead use `native.ps1 -Action Check`; they never delegate to this child.
+- `format` (`--all`, selected paths, `--check`): Git file selection, installed
+  `fish_indent`, Ruff, Cargo/rustfmt on the Unix host; not a shell startup dependency.
+- `gettext check`, `update`, `new`: actual source-extraction proc macro output
+  plus GNU gettext/diff on that host. A failed subprocess remains nonzero.
+- `fluent check` (including `--from-source`), `format`, `rename`, `show-missing`,
+  `update`, and every `resolve-outdated` child (`delete`, `ignore`, `needs-review`,
+  `show-unresolved`): source extraction and FTL processing on the Unix host.
+- `html-docs`: host-executable formatter plus Sphinx HTML generator; its existing
+  Unix temporary symlink/PATH policy is intentionally host-only.
+- `man-pages`: Cargo/native-host Sphinx generated man output; the native package
+  uses the same shared generator/text inputs without invoking this Unix CLI.
+- `shellcheck`: Unix shell-script maintenance checks; not a runtime native gate.
+
+`.github/workflows/windows-release.yml` runs supported Unix workspace tests and
+real documentation/extraction checks separately and inspects generated outputs;
+native CI runs runtime crate/root suites and installed artifact consumers.
+Existing Linux/macOS/MSYS release tooling remains separate. No all-workspace
+Windows claim is inferred by omitting `xtask`, and no runtime crate is relabeled
+host-only to avoid testing it.
+
 ## Current N4 consumer overlay
 
 The 21-crate inventory and candidate audit below remain historical; their old unconditional-Unix

@@ -17,7 +17,7 @@ else
     complete -c date -s u -d 'Display or set UTC time' -f
     complete -c date -s j -d "Don't try to set the date" -f
 
-    set -l uname (uname -s)
+    set -l uname (__fish_uname)
 
     switch $uname
         case FreeBSD Darwin DragonFly

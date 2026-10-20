@@ -254,6 +254,7 @@ impl<'a> BorrowedInput<'a> {
     }
 
     fn read_console(&self, bytes: &mut [u8]) -> io::Result<usize> {
+        let _consumer = crate::console_windows::suspend_evaluation_input();
         let handle = self
             .handle
             .native_handle()

@@ -20,7 +20,11 @@ function __fish_config_files
     if not set -q argv[1]
         set -a paths (status list-files $prefix)
     else
-        set -a paths (status list-files "$prefix/"$argv$suffix)
+        for file in "$prefix/"$argv$suffix
+            if status get-file $file >/dev/null
+                set -a paths $file
+            end
+        end
     end
     string join \n $paths
 end

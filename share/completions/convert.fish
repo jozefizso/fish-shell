@@ -1,1 +1,2 @@
+__fish_is_windows_command convert; and return 0
 __fish_complete_magick convert

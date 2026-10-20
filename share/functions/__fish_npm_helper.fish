@@ -10,7 +10,7 @@
 function __npm_helper_installed
     # This function takes the command to globally install a package as $argv[1]
     if not type -q all-the-package-names
-        if not set -qg __fish_npm_pkg_info_shown
+        if status is-interactive; and not set -qg __fish_npm_pkg_info_shown
             set -l old (commandline)
             commandline -r ""
             echo \nfish: Run `$argv[1] all-the-package-names` to gain intelligent \
@@ -26,32 +26,35 @@ end
 # Entire list of packages is too long to be used efficiently in a `complete` subcommand.
 # Search it for matches instead.
 function __npm_filtered_list_packages
-    # This function takes the command to globally install a package as $argv[1]
-    if not __npm_helper_installed $argv[1]
-        return
-    end
+    set -l token (commandline -ct)
+    test -n "$token"; or return
 
-    # Do not provide any completions if nothing has been entered yet to avoid long hang.
-    if string match -rq -- . (commandline -ct)
-        # Filter the results here rather than in the C++ code due to #5267
-        # `all-the-package-names` reads a billion line JSON file using node (slow) then prints
-        # it all (slow) using node (slow). Directly parse the `names.json` file that ships with it instead.
-        for path in {$HOME/.config/yarn/global,$HOME/.npm-global/lib,/usr/local/lib}/node_modules/all-the-package-names/names.json
-            test -f $path || continue
-            # Using `string replace` directly is slow because it doesn't know to stop looking after a match cannot be
-            # found in the alphabetically sorted list. Use `look` for its binary search support.
-            look '  "'(commandline -ct) $path | string replace -rf '^  "(.*?)".*' '$1'
-            break
-        end
+    # npm knows its native module layout (Windows does not use prefix/lib).
+    set -l roots
+    if command -sq npm
+        set -a roots (command npm root -g 2>/dev/null)
     end
+    set -a roots $HOME/.config/yarn/global/node_modules $HOME/.npm-global/lib/node_modules /usr/local/lib/node_modules
+    for root in $roots
+        set -l names "$root/all-the-package-names/names.json"
+        test -f "$names"; or continue
+        __npm_read_json "$names" names "$token"
+        return $status
+    end
+    __npm_helper_installed $argv[1]
 end
 
 function __npm_find_package_json
     set -l parents (__fish_parent_directories (pwd -P))
+    set -l separator /
+    if builtin -q __fish_native_fs
+        set separator \\
+    end
 
     for p in $parents
-        if test -f "$p/package.json"
-            echo "$p/package.json"
+        set -l manifest "$(string trim --right --chars "$separator" -- "$p")$separator"package.json
+        if test -f "$manifest"
+            printf '%s\n' "$manifest"
             return 0
         end
     end
@@ -60,15 +63,16 @@ function __npm_find_package_json
 end
 
 function __npm_installed_global_packages
-    set -l prefix (npm prefix -g)
-    set -l node_modules "$prefix/lib/node_modules"
+    command -sq npm; or return 1
+    set -l node_modules (command npm root -g 2>/dev/null)
+    test -n "$node_modules"; and test -d "$node_modules"; or return 1
 
     for path in $node_modules/*
         set -l mod (path basename -- $path)
 
         if string match -rq "^@" $mod
             for sub_path in $path/*
-                set -l sub_mod (string split '/' $sub_path)[-1]
+                set -l sub_mod (path basename -- $sub_path)
                 echo $mod/$sub_mod
             end
         else
@@ -84,36 +88,78 @@ function __npm_installed_local_packages
         return 1
     end
 
-    if set -l python (__fish_anypython)
-        $python -S -c 'import json, sys; data = json.load(sys.stdin);
-print("\n".join(data.get("dependencies", []))); print("\n".join(data.get("devDependencies", [])))' <$package_json 2>/dev/null
-    else if type -q jq
-        jq -r '.dependencies as $a1 | .devDependencies as $a2 | ($a1 + $a2) | to_entries[] | .key' $package_json
-    else
-        set -l depsFound 0
-        for line in (command cat $package_json)
-            # echo "evaluating $line"
-            if test $depsFound -eq 0
-                # echo "mode: noDeps"
-                if string match -qr '(devD|d)ependencies"' -- $line
-                    # echo "switching to mode: deps"
-                    set depsFound 1
-                    continue
-                end
-                continue
-            end
+    __npm_read_json "$package_json" dependencies
+end
 
-            if string match -qr '\}' -- $line
-                # echo "switching to mode: noDeps"
-                set depsFound 0
-                continue
-            end
-
-            # echo "mode: deps"
-
-            string replace -r '^\s*"([^"]+)".*' '$1' -- $line
+# Parse JSON with the runtime npm already requires, or Python on installations
+# where Node is not on PATH. Never infer JSON structure from physical lines.
+function __npm_read_json --argument-names file mode prefix
+    test -f "$file"; or return 1
+    if command -sq node
+        command node -e '
+const fs = require("fs");
+try {
+    const [file, mode, prefix = ""] = process.argv.slice(1);
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    const object = value => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const line = value => (typeof value === "string" ? value : JSON.stringify(value)).replace(/[\r\n\t]/g, " ");
+    if (mode === "names") {
+        if (Array.isArray(data)) for (const name of data) {
+            if (typeof name === "string" && name.startsWith(prefix)) console.log(line(name));
+        }
+    } else if (mode === "scripts") {
+        for (const [name, value] of Object.entries(object(object(data).scripts))) {
+            console.log(line(name) + "\t" + line(value).slice(0, 20));
+        }
+    } else {
+        for (const key of ["dependencies", "devDependencies"])
+            for (const name of Object.keys(object(object(data)[key]))) console.log(line(name));
+    }
+} catch (_) { process.exitCode = 1; }
+' -- "$file" "$mode" "$prefix" 2>/dev/null
+    else if set -l python (__fish_anypython)
+        $python -X utf8 -S -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        data = json.load(source)
+    mode, prefix = sys.argv[2:4]
+    def obj(value):
+        return value if isinstance(value, dict) else {}
+    def line(value):
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return value.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    if mode == "names":
+        for name in data if isinstance(data, list) else []:
+            if isinstance(name, str) and name.startswith(prefix):
+                print(line(name))
+    elif mode == "scripts":
+        for name, value in obj(obj(data).get("scripts")).items():
+            print(line(name) + "\t" + line(value)[:20])
+    else:
+        for key in ("dependencies", "devDependencies"):
+            for name in obj(obj(data).get(key)):
+                print(line(name))
+except (OSError, ValueError, TypeError):
+    sys.exit(1)
+' "$file" "$mode" "$prefix" 2>/dev/null
+    else if command -sq jq
+        switch "$mode"
+            case names
+                command jq -r --arg prefix "$prefix" '.[] | select(type == "string" and startswith($prefix))' "$file" 2>/dev/null
+            case scripts
+                command jq -r '(.scripts // {}) | to_entries[] | [.key, (.value | tostring | gsub("[\\r\\n\\t]"; " ") | .[0:20])] | join("\t")' "$file" 2>/dev/null
+            case '*'
+                command jq -r '(.dependencies // {}), (.devDependencies // {}) | keys[]' "$file" 2>/dev/null
         end
+    else
+        return 1
     end
+end
+
+function __npm_package_scripts
+    __npm_read_json package.json scripts
 end
 
 function __fish_npm_helper

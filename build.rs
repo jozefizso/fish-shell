@@ -5,6 +5,9 @@ use fish_build_helper::{
 use rsconf::Target;
 use std::path::{Path, PathBuf};
 
+#[path = "build_tools/windows_resource.rs"]
+mod windows_resource;
+
 fn main() {
     let is_nightly =
         rustc_version::version_meta().unwrap().channel == rustc_version::Channel::Nightly;
@@ -20,6 +23,12 @@ fn main() {
         // If set by CMake, this might include symlinks. Since we want to compare this to the
         // dir fish is executed in we need to canonicalize it.
         fish_build_dir().canonicalize().unwrap().to_str().unwrap(),
+    );
+    // Supply the complete platform path: appending '/' in a derive attribute
+    // would make a canonical Win32 extended path invalid.
+    rsconf::set_env_value(
+        "FISH_HELP_DIR",
+        fish_build_helper::fish_doc_dir().join("help").to_str().unwrap(),
     );
 
     // We need to canonicalize (i.e. realpath) the manifest dir because we want to be able to
@@ -41,7 +50,8 @@ fn main() {
     fish_build_helper::rebuild_if_embedded_path_changed("share");
 
     if target_os() == "windows" {
-        // The native slice has no POSIX capability probes or C compiler requirement.
+        windows_resource::emit(&get_version());
+        // Native builds use the SDK resource compiler, but no POSIX probes.
         // Still register these names so shared cfg annotations remain checked.
         for name in [
             "apple",

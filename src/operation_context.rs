@@ -44,6 +44,12 @@ pub struct OperationContext<'a> {
 
     // A function which may be used to poll for cancellation.
     pub cancel_checker: CancelChecker,
+
+    /// Counted native receipts belong to this foreground operation's lifetime,
+    /// not to a rearmable global token. Fresh callbacks/readers capture a new
+    /// baseline; background operations retain their supplied cancellation policy.
+    #[cfg(windows)]
+    native_control_epoch: Option<crate::signal::ConsoleControlEpoch>,
 }
 
 impl<'a> OperationContext<'a> {
@@ -81,6 +87,8 @@ impl<'a> OperationContext<'a> {
             expansion_limit,
             job_group: None,
             cancel_checker,
+            #[cfg(windows)]
+            native_control_epoch: Some(crate::signal::console_control_epoch()),
         }
     }
 
@@ -94,6 +102,8 @@ impl<'a> OperationContext<'a> {
             expansion_limit: EXPANSION_LIMIT_DEFAULT,
             job_group: None,
             cancel_checker,
+            #[cfg(windows)]
+            native_control_epoch: Some(crate::signal::console_control_epoch()),
         }
     }
 
@@ -104,6 +114,8 @@ impl<'a> OperationContext<'a> {
             expansion_limit,
             job_group: None,
             cancel_checker: Box::new(no_cancel),
+            #[cfg(windows)]
+            native_control_epoch: None,
         }
     }
 
@@ -117,6 +129,8 @@ impl<'a> OperationContext<'a> {
             expansion_limit,
             job_group: None,
             cancel_checker,
+            #[cfg(windows)]
+            native_control_epoch: None,
         }
     }
 
@@ -147,7 +161,18 @@ impl<'a> OperationContext<'a> {
     }
     // Invoke the cancel checker. Return if we should cancel.
     pub fn check_cancel(&self) -> bool {
-        (self.cancel_checker)()
+        let cancelled = (self.cancel_checker)();
+        #[cfg(windows)]
+        return cancelled || self.native_cancellation_signal().is_some();
+        #[cfg(not(windows))]
+        cancelled
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn native_cancellation_signal(&self) -> Option<crate::signal::RawSignal> {
+        self.native_control_epoch.and_then(|earlier| {
+            crate::signal::console_control_epoch().signal_since(earlier)
+        })
     }
 }
 

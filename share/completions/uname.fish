@@ -1,4 +1,4 @@
-if test (uname) = Darwin
+if test (__fish_uname) = Darwin
     complete -c uname -s a -d 'Behave as though all of the options mnrsv were specified.'
     complete -c uname -s m -d 'print the machine hardware name.'
     complete -c uname -s n -d 'print the nodename'

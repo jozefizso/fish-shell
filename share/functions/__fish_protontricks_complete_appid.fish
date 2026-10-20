@@ -1,5 +1,6 @@
 # localization: skip(private)
 function __fish_protontricks_complete_appid
+    command -sq protontricks; or return 127
     # '-L' is a newer flag that lists all games without a graphical prompt
     # if multiple Steam installations exist
     set output "$(protontricks -L 2>/dev/null || protontricks -l 2>/dev/null)"

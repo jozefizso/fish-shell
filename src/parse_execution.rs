@@ -209,7 +209,7 @@ impl<'io> ExecutionContext<'io> {
             return Some(EndExecutionReason::Cancelled);
         }
         #[cfg(windows)]
-        if ctx.check_cancel() {
+        if self.cancel_signal.is_some() || ctx.check_cancel() {
             return Some(EndExecutionReason::Cancelled);
         }
         let parser = ctx.parser();
@@ -302,63 +302,7 @@ impl<'io> ExecutionContext<'io> {
             );
         }
 
-        // Handle unrecognized commands with standard command not found handler that can make better
-        // error messages.
-        let mut event_args = vec![];
-        {
-            let args = Self::get_argument_nodes_no_redirs(&statement.args_or_redirs);
-            let arg_result = self.expand_arguments_from_nodes(
-                ctx,
-                &args,
-                &mut event_args,
-                WildcardNoMatchBehavior::Fail,
-            );
-            if arg_result != EndExecutionReason::Ok {
-                return arg_result;
-            }
-
-            event_args.insert(0, cmd.to_owned());
-        }
-
-        let mut error = WString::new();
-
-        // Redirect to stderr
-        let mut io = IoChain::new();
-        let mut list = RedirectionSpecList::new();
-        list.push(RedirectionSpec::new(
-            STDOUT_FILENO,
-            RedirectionMode::Fd,
-            L!("2").to_owned(),
-        ));
-        io.append_from_specs(&list, L!(""));
-
-        let function_name = L!("fish_command_not_found");
-        if function::exists(function_name, ctx.parser()) {
-            let mut buffer = function_name.to_owned();
-            for arg in &event_args {
-                buffer.push(' ');
-                buffer.push_utfstr(&escape(arg));
-            }
-            let parser = ctx.parser();
-            let prev_statuses = parser.last_statuses();
-
-            let event = Event::generic(function_name.to_owned());
-            let b = parser.push_block(Block::event_block(event));
-            parser.eval(&buffer, &io);
-            parser.pop_block(b);
-            parser.set_last_statuses(prev_statuses);
-        } else {
-            // If we have no handler, just print it as a normal error.
-            error = wgettext!("Unknown command:").to_owned();
-            if !event_args.is_empty() {
-                error.push(' ');
-                error.push_utfstr(&escape(&event_args[0]));
-            }
-        }
-
-        // Here we want to report an error (so it shows a backtrace).
-        // If the handler printed text, that's already shown, so error will be empty.
-        report_error_formatted!(self, ctx, STATUS_CMD_UNKNOWN, &statement.command, error)
+        self.dispatch_command_not_found(ctx, cmd, statement)
     }
 
     #[cfg(windows)]
@@ -369,20 +313,88 @@ impl<'io> ExecutionContext<'io> {
         statement: &ast::DecoratedStatement,
         err: std::io::Error,
     ) -> EndExecutionReason {
-        let status = if err.kind() == ErrorKind::NotFound {
-            STATUS_CMD_UNKNOWN
-        } else {
-            STATUS_NOT_EXECUTABLE
-        };
+        if err.kind() == ErrorKind::NotFound {
+            return self.dispatch_command_not_found(ctx, cmd, statement);
+        }
         report_error!(
             self,
             ctx,
-            status,
+            STATUS_NOT_EXECUTABLE,
             &statement.command,
             "Cannot execute '%s': %s",
             cmd,
             err.to_string()
         )
+    }
+
+    fn dispatch_command_not_found(
+        &mut self,
+        ctx: &mut OperationContext<'_>,
+        cmd: &wstr,
+        statement: &ast::DecoratedStatement,
+    ) -> EndExecutionReason {
+        let mut event_args = vec![];
+        let args = Self::get_argument_nodes_no_redirs(&statement.args_or_redirs);
+        let arg_result = self.expand_arguments_from_nodes(
+            ctx,
+            &args,
+            &mut event_args,
+            WildcardNoMatchBehavior::Fail,
+        );
+        if arg_result != EndExecutionReason::Ok {
+            return arg_result;
+        }
+        event_args.insert(0, cmd.to_owned());
+
+        let mut error = WString::new();
+        // The public hook writes diagnostics, including when it uses stdout.
+        let mut list = RedirectionSpecList::new();
+        list.push(RedirectionSpec::new(
+            STDOUT_FILENO,
+            RedirectionMode::Fd,
+            L!("2").to_owned(),
+        ));
+        #[cfg(unix)]
+        let io = {
+            let mut io = IoChain::new();
+            io.append_from_specs(&list, L!(""));
+            io
+        };
+        #[cfg(windows)]
+        let io = match self.block_io.with_specs(&list, ctx.parser().vars()) {
+            Ok(io) => io,
+            Err(error) => {
+                return report_error!(
+                    self,
+                    ctx,
+                    STATUS_CMD_ERROR,
+                    &statement.command,
+                    "Cannot redirect command-not-found diagnostics: %s",
+                    error.to_string()
+                );
+            }
+        };
+
+        let function_name = L!("fish_command_not_found");
+        if function::exists(function_name, ctx.parser()) {
+            let mut buffer = function_name.to_owned();
+            for arg in &event_args {
+                buffer.push(' ');
+                buffer.push_utfstr(&escape(arg));
+            }
+            let parser = ctx.parser();
+            let prev_statuses = parser.last_statuses();
+            let event = Event::generic(function_name.to_owned());
+            let block = parser.push_block(Block::event_block(event));
+            parser.eval(&buffer, &io);
+            parser.pop_block(block);
+            parser.set_last_statuses(prev_statuses);
+        } else {
+            error = wgettext!("Unknown command:").to_owned();
+            error.push(' ');
+            error.push_utfstr(&escape(cmd));
+        }
+        report_error_formatted!(self, ctx, STATUS_CMD_UNKNOWN, &statement.command, error)
     }
 
     // Utilities.
@@ -1602,10 +1614,11 @@ impl<'io> ExecutionContext<'io> {
         match ctx.parser().vars().service_native_state() {
             Ok(events) => {
                 for event in events {
-                    event::fire(ctx.parser(), event);
-                    if ctx.parser().libdata().exit_current_script {
-                        break;
-                    }
+                    // Synchronize state now, but dispatch asynchronous notifications
+                    // through the delayed queue below. In particular, the first
+                    // fish_prompt handler must finish installing key bindings before
+                    // a notification callback can reenter the evaluator.
+                    event::enqueue(event);
                 }
             }
             Err(error) => {

@@ -8,6 +8,7 @@
 
 from glob import glob
 import os.path
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -78,7 +79,7 @@ def extract_sections(app, env):
 
 
 def remove_fish_indent_lexer(app):
-    if app.builder.name in ("man", "markdown"):
+    if app.builder.name in ("man", "markdown", "text"):
         del lexers["fish-docs-samples"]
 
 
@@ -117,13 +118,36 @@ copyright = "fish-shell developers"
 author = "fish-shell developers"
 issue_url = "https://github.com/fish-shell/fish-shell/issues"
 
-# From Cargo, or no build system.
-ret = subprocess.check_output(
-    ("../build_tools/git_version_gen.sh"), stderr=subprocess.STDOUT
-).decode("utf-8")
+def fish_build_version():
+    # Match build-helper's version policy without executing a Unix shell script.
+    # Packagers can pin documentation to the exact artifact being installed.
+    configured = os.environ.get("FISH_DOC_VERSION")
+    if configured:
+        return configured
+    source = Path(__file__).resolve().parent.parent
+    manifest = (source / "Cargo.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"([^"]+)"\s*$', manifest, re.MULTILINE)
+    if match is None:
+        raise RuntimeError("Cargo.toml does not declare the fish package version")
+    package_version = match.group(1)
+    try:
+        git_version = subprocess.check_output(
+            ["git", "-C", str(source), "describe", "--always", "--dirty"],
+            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(source.parent)},
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).rstrip()
+    except (OSError, subprocess.CalledProcessError):
+        return package_version
+    if not git_version:
+        raise RuntimeError("Git returned an empty fish documentation version")
+    if git_version.startswith(package_version):
+        return git_version
+    return f"{package_version}-g{git_version}"
 
-# The full version, including alpha/beta/rc tags
-release = ret.strip().split(" ")[-1]
+
+# The full version, including alpha/beta/rc tags.
+release = fish_build_version()
 # The short X.Y version
 version = release.rsplit(".", 1)[0]
 
@@ -253,8 +277,8 @@ man_pages = [
     ("faq", "fish-faq", "", [author], 1),
 ]
 for path in sorted(set(glob("cmds/*.rst")) - set(glob(fish_exclude_patterns))):
-    docname = os.path.splitext(path)[0]
-    cmd = os.path.basename(docname)
+    docname = Path(path).with_suffix("").as_posix()
+    cmd = Path(path).stem
     man_pages.append((docname, cmd, get_command_description(path, cmd), "", 1))
 
 

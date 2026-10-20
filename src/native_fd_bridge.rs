@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 /// Reserved for one launch only; never import this key as a fish variable.
 pub const PRIVATE_FD_ENV: &str = "FISH_INTERNAL_NATIVE_FDS";
+pub(crate) const ARGCOMPLETE_FD_ENV: &str = "FISH_INTERNAL_ARGCOMPLETE_FDS";
 
 const VERSION: &str = "v1";
 const HANDLE_FLAG_INHERIT: u32 = 1;
@@ -362,36 +363,20 @@ pub fn decode(value: &OsStr) -> io::Result<Vec<ImportedBinding>> {
 /// Match the reserved key with Windows' ordinal, case-insensitive environment
 /// semantics, including non-ASCII characters Windows maps to an ASCII letter.
 pub fn is_private_environment_key(key: &OsStr) -> bool {
-    const PRIVATE_WIDE: [u16; PRIVATE_FD_ENV.len()] = {
-        let mut wide = [0; PRIVATE_FD_ENV.len()];
-        let bytes = PRIVATE_FD_ENV.as_bytes();
-        let mut index = 0;
-        while index < bytes.len() {
-            wide[index] = bytes[index] as u16;
-            index += 1;
-        }
-        wide
-    };
-    let mut candidate = [0u16; PRIVATE_FD_ENV.len()];
-    let mut units = key.encode_wide();
-    for slot in &mut candidate {
-        let Some(unit) = units.next() else {
-            return false;
-        };
-        *slot = unit;
+    let mut candidate = [0u16; 64];
+    let mut length = 0;
+    for unit in key.encode_wide() {
+        if length == candidate.len() { return false; }
+        candidate[length] = unit;
+        length += 1;
     }
-    if units.next().is_some() {
-        return false;
-    }
-    unsafe {
-        CompareStringOrdinal(
-            candidate.as_ptr(),
-            candidate.len() as i32,
-            PRIVATE_WIDE.as_ptr(),
-            PRIVATE_WIDE.len() as i32,
-            1,
-        ) == 2 // CSTR_EQUAL
-    }
+    [PRIVATE_FD_ENV, ARGCOMPLETE_FD_ENV].iter().any(|name| {
+        if name.len() != length { return false; }
+        let mut reserved = [0u16; 64];
+        for (slot, byte) in reserved.iter_mut().zip(name.bytes()) { *slot = u16::from(byte); }
+        unsafe { CompareStringOrdinal(candidate.as_ptr(), length as i32,
+            reserved.as_ptr(), length as i32, 1) == 2 }
+    })
 }
 
 /// Remove stale or user-supplied bridge metadata from a child environment.

@@ -832,6 +832,13 @@ Command substitutions can also be double-quoted::
 
 When using double quotes, the command output is not split up by lines, but trailing empty lines are still removed.
 
+The dollar form can also select the command itself, including inside double quotes::
+
+  command "$(status fish-path)" --version
+
+Here the substitution selects the running fish executable. The older ``(command)``
+spelling is not allowed in command position.
+
 If the output is piped to :doc:`string split or string split0 <cmds/string-split>` as the last step, those splits are used as they appear instead of splitting lines.
 
 fish also allows spelling command substitutions without the dollar, like ``echo (pwd)``. This variant will not be expanded in double-quotes (``echo "(pwd)"`` will print ``(pwd)``).
@@ -1853,8 +1860,8 @@ In UNIX, these are made up of several categories. The categories used by fish ar
    which allows to specify a priority list of languages for translation.
    It's a :ref:`PATH variable <variables-path>`, like in `GNU gettext <https://www.gnu.org/software/gettext/manual/html_node/The-LANGUAGE-variable.html>`__.
 
-   Language identifiers without a region specified (e.g. ``zh``) result in all available variants of this language being tried in arbitrary order.
-   In this example, we might first look for messages in the ``zh_CN`` catalog, followed by ``zh_TW``, or the other way around.
+   Language identifiers without a region specified (e.g. ``zh``) result in all available variants of this language being tried in catalog-name order.
+   In this example, ``zh_CN`` is tried before ``zh_TW``. Specify a region explicitly when its wording matters.
    This is different from GNU gettext, which uses a "default" variant of the language instead.
    If you prefer a certain variant, specify it earlier in the list,
    e.g. ``zh_TW:zh`` if your preferred language is ``zh_TW``, and you prefer any other variants of ``zh`` over the English default.
@@ -1880,6 +1887,19 @@ In UNIX, these are made up of several categories. The categories used by fish ar
 
    Determines how date and time are displayed.
    Used in the :ref:`history <history-show-time>` builtin.
+
+On native Windows, message catalogs accept both POSIX names such as
+``de_DE.UTF-8`` and native names such as ``de-DE``. In the absence of message
+locale variables and ``LANGUAGE``, fish captures the Windows user locale.
+``status language set`` overrides the environment until ``status language
+unset``. Otherwise ``LC_ALL``, ``LC_MESSAGES`` and ``LANG`` select the message
+locale, in that order. A C/POSIX locale disables translation even when
+``LANGUAGE`` is set; otherwise ``LANGUAGE`` supplies the preferred catalog
+list. Missing translations fall back through that list and finally to English.
+Changing these variables refreshes catalog selection without changing the
+process-global CRT locale. Numeric and time display retain their separate
+native locale policy; fish expressions and numeric input keep C decimal
+syntax regardless of translated messages or display punctuation.
 
 .. _builtin-overview:
 

@@ -30,14 +30,17 @@ fn key_options(f: &Fixture) {
         let a = run(&mut tool(f, &[flag]), b"");
         let b = f.eval(&format!("fish_key_reader {flag}"));
         for r in [&a, &b] {
-            assert_eq!(r.code, 0);
-            assert!(!r.out.is_empty());
-            assert!(r.err.is_empty());
-        }
-        if flag == "-h" || flag == "--help" {
-            for option in ["--continuous", "--verbose", "--help", "--version"] {
-                assert!(String::from_utf8_lossy(&a.out).contains(option));
-                assert!(String::from_utf8_lossy(&b.out).contains(option));
+            if matches!(flag, "-h" | "--help") && !cfg!(feature = "embed-manpages") {
+                // This primitive fixture has no installed resources. N9/N10
+                // exercise matching installed help for the minimal profile.
+                assert_ne!(r.code, 0);
+                assert!(r.out.is_empty() && !r.err.is_empty());
+            } else {
+                assert_eq!(r.code, 0, "{}", String::from_utf8_lossy(&r.err));
+                assert!(r.err.is_empty());
+                if matches!(flag, "-v" | "--version") {
+                    assert_eq!(String::from_utf8_lossy(&r.out).split_whitespace().last(), Some(fish::BUILD_VERSION));
+                }
             }
         }
     }
@@ -306,10 +309,13 @@ fn reads(f: &Fixture) {
         "0:雪".as_bytes()
     );
     recovered(&mut s);
-    s.send(b"read -P N6-CANCEL: cancelled; printf '%s' $status > read-cancel\r");
+    // Wait for the actual nested prompt, never its typed command echo.
+    // Typed Ctrl-C interrupts this read; it is not a native control receipt.
+    s.send(b"read -P (string join '' N6- CANCEL:) cancelled; set -l read_status $status; printf '%s:%s' $read_status (count $cancelled) > read-cancel\r");
     s.wait_text(b"N6-CANCEL:");
     s.send(b"discard\x03");
-    assert_ne!(s.wait_file(&f.root.join("read-cancel")), b"0");
+    failed_empty(s.wait_file(&f.root.join("read-cancel")));
+    recovered(&mut s);
     s.send(b"printf ready > read-eof-ready; read --null partial; printf '%s:%s' $status $partial > read-eof\r");
     s.wait_file(&f.root.join("read-eof-ready"));
     s.send(b"partial\x04");
@@ -330,8 +336,11 @@ fn reads(f: &Fixture) {
     s.key(true, 1, 0, 0, b'x' as u16, 0);
     s.wait_input_drained();
     s.control(0);
-    failed_empty(s.wait_file(&f.root.join("raw-control")));
+    s.wait_protocol(true);
+    s.send(b"set -l cancelled_status $status; printf '%s:%s' $cancelled_status (count $cancelled) > raw-control-recovered\r");
+    assert_eq!(s.wait_file(&f.root.join("raw-control-recovered")), b"130:0");
     recovered(&mut s);
+    assert!(!f.root.join("raw-control").exists(), "native control must cancel the owning evaluator tail");
     s.send(b"read --line --null invalid 2> read-flags-error; printf '%s' $status > read-flags-status\r");
     assert_ne!(s.wait_file(&f.root.join("read-flags-status")), b"0");
     assert!(

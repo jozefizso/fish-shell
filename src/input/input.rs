@@ -447,6 +447,18 @@ impl InputData {
     pub fn function_set_status(&mut self, status: bool) {
         self.function_status = status;
     }
+
+    /// Reconcile only already-consumed logical input after a local evaluator
+    /// cancellation. The native monitor removed exactly the prefix through
+    /// Ctrl-C; the kernel suffix belongs to the next command/nested reader.
+    #[cfg(windows)]
+    pub(crate) fn clear_evaluation_cancelled_input(&mut self) {
+        self.queue.clear();
+        self.paste_buffer = None;
+        self.input_function_args.clear();
+        self.event_storage.clear();
+        self.blocking_query = None;
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -548,7 +560,14 @@ pub trait InputEventQueuer {
             InputEventTrigger::Interrupted => self.select_interrupted(),
             InputEventTrigger::UvarNotified => self.uvar_change_notified(),
             InputEventTrigger::IOPortNotified => self.ioport_notified(),
-            InputEventTrigger::Byte(byte) => on_byte_read(self, byte),
+            InputEventTrigger::Byte(byte) => {
+                on_byte_read(self, byte);
+                #[cfg(windows)]
+                {
+                    let data = self.get_input_data();
+                    data.native.synchronize_paste_framing(data.paste_buffer.as_deref());
+                }
+            }
             InputEventTrigger::TimeoutElapsed => {
                 return Some(CharEvent::QueryResult(QueryResultEvent::Timeout));
             }
@@ -558,16 +577,18 @@ pub trait InputEventQueuer {
                     if let CharEvent::Key(key) = &event {
                         if let Some(text) = key.key.native_text {
                             let mut bytes = [0; 4];
-                            self.get_input_data_mut()
-                                .paste_buffer
-                                .as_mut()
-                                .unwrap()
-                                .extend_from_slice(text.encode_utf8(&mut bytes).as_bytes());
+                            for &byte in text.encode_utf8(&mut bytes).as_bytes() {
+                                super::decode::InputEventQueuerExt::paste_ingest_byte(self, byte);
+                            }
+                            let data = self.get_input_data();
+                            data.native.synchronize_paste_framing(data.paste_buffer.as_deref());
                             return None;
                         }
                     }
                 }
                 super::decode::InputEventQueuerExt::enqueue_event(self, event);
+                let data = self.get_input_data();
+                data.native.synchronize_paste_framing(data.paste_buffer.as_deref());
             }
             #[cfg(windows)]
             InputEventTrigger::JobNotified => self.native_jobs_notified(),
@@ -703,13 +724,6 @@ pub trait InputEventQueuer {
         self.get_input_data().paste_buffer.is_some()
     }
 
-    fn paste_push_char(&mut self, b: u8) {
-        self.get_input_data_mut()
-            .paste_buffer
-            .as_mut()
-            .unwrap()
-            .push(b);
-    }
 
     fn paste_commit(&mut self) {
         self.get_input_data_mut().paste_buffer = None;

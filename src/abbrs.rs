@@ -1,6 +1,9 @@
 use std::{
     collections::HashSet,
-    sync::{LazyLock, Mutex, MutexGuard},
+    sync::{
+        LazyLock, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use crate::prelude::*;
@@ -9,6 +12,13 @@ use crate::parse_constants::SourceRange;
 use pcre2::utf32::Regex;
 
 static ABBRS: LazyLock<Mutex<AbbreviationSet>> = LazyLock::new(|| Mutex::new(Default::default()));
+static ABBREVIATION_REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// Definition identity for asynchronous consumers of the abbreviation registry.
+/// Reads and failed mutations do not invalidate outstanding interactive work.
+pub(crate) fn abbreviation_revision() -> u64 {
+    ABBREVIATION_REVISION.load(Ordering::Acquire)
+}
 
 pub fn with_abbrs<R>(cb: impl FnOnce(&AbbreviationSet) -> R) -> R {
     let abbrs_g = ABBRS.lock().unwrap();
@@ -98,9 +108,14 @@ impl Abbreviation {
     }
 
     // Return true if we match a token at a given position.
-    pub fn matches(&self, token: &wstr, position: Position, command: &wstr) -> bool {
+    pub fn matches(
+        &self,
+        token: &wstr,
+        position: Position,
+        command: &wstr,
+    ) -> Result<bool, pcre2::Error> {
         if !self.matches_position(position) {
-            return false;
+            return Ok(false);
         }
 
         if !self.commands.is_empty()
@@ -109,14 +124,12 @@ impl Abbreviation {
                 .iter()
                 .any(|candidate| candidate.as_utfstr() == command)
         {
-            return false;
+            return Ok(false);
         }
 
         match &self.regex {
-            Some(r) => r
-                .is_match(token.as_char_slice())
-                .expect("regex match should not error"),
-            None => self.key == token,
+            Some(r) => r.is_match(token.as_char_slice()),
+            None => Ok(self.key == token),
         }
     }
 
@@ -176,6 +189,15 @@ impl Replacement {
     }
 }
 
+/// Matching can fail even for a compiled expression (for example PCRE's match
+/// limit). The reader must report this error and leave the edit unchanged;
+/// trying a lower-priority replacement would hide a broken user definition.
+#[derive(Debug)]
+pub struct AbbreviationMatchError {
+    pub name: WString,
+    pub error: pcre2::Error,
+}
+
 #[derive(Default)]
 pub struct AbbreviationSet {
     /// List of abbreviations, in definition order.
@@ -189,12 +211,20 @@ pub struct AbbreviationSet {
 impl AbbreviationSet {
     /// Return the list of replacers for an input token, in priority order.
     /// The `position` is given to describe where the token was found.
-    pub fn r#match(&self, token: &wstr, position: Position, cmd: &wstr) -> Vec<Replacer> {
+    pub fn r#match(
+        &self,
+        token: &wstr,
+        position: Position,
+        cmd: &wstr,
+    ) -> Result<Vec<Replacer>, AbbreviationMatchError> {
         let mut result = vec![];
 
         // Later abbreviations take precedence so walk backwards.
         for abbr in self.abbrs.iter().rev() {
-            if abbr.matches(token, position, cmd) {
+            if abbr.matches(token, position, cmd).map_err(|error| AbbreviationMatchError {
+                name: abbr.name.clone(),
+                error,
+            })? {
                 result.push(Replacer {
                     replacement: abbr.replacement.clone(),
                     is_function: abbr.replacement_is_function,
@@ -202,14 +232,25 @@ impl AbbreviationSet {
                 });
             }
         }
-        result
+        Ok(result)
     }
 
     /// Return whether we would have at least one replacer for a given token.
-    pub fn has_match(&self, token: &wstr, position: Position, cmd: &wstr) -> bool {
-        self.abbrs
-            .iter()
-            .any(|abbr| abbr.matches(token, position, cmd))
+    pub fn has_match(
+        &self,
+        token: &wstr,
+        position: Position,
+        cmd: &wstr,
+    ) -> Result<bool, AbbreviationMatchError> {
+        for abbr in self.abbrs.iter().rev() {
+            if abbr.matches(token, position, cmd).map_err(|error| AbbreviationMatchError {
+                name: abbr.name.clone(),
+                error,
+            })? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Add an abbreviation. Any abbreviation with the same name is replaced.
@@ -229,19 +270,26 @@ impl AbbreviationSet {
             }
         }
         self.abbrs.push(abbr);
+        ABBREVIATION_REVISION.fetch_add(1, Ordering::Release);
     }
 
     /// Rename an abbreviation. This asserts that the old name is used, and the new name is not; the
     /// caller should check these beforehand with has_name().
     pub fn rename(&mut self, old_name: &wstr, new_name: &wstr, commands: &[WString]) {
-        self.abbrs
+        let abbr = self
+            .abbrs
             .iter_mut()
             .find(|a| a.name == old_name && a.commands == commands)
-            .expect("Abbreviation to rename was not found.")
-            .name = new_name.to_owned();
+            .expect("Abbreviation to rename was not found.");
+        if !abbr.is_regex() {
+            abbr.key.clear();
+            abbr.key.push_utfstr(new_name);
+        }
+        abbr.name = new_name.to_owned();
 
         self.used_names.insert(new_name.to_owned());
         self.on_remove(old_name);
+        ABBREVIATION_REVISION.fetch_add(1, Ordering::Release);
     }
 
     /// Erase an abbreviation by name and command restrictions.
@@ -257,13 +305,17 @@ impl AbbreviationSet {
 
         self.abbrs.remove(idx);
         self.on_remove(name);
+        ABBREVIATION_REVISION.fetch_add(1, Ordering::Release);
 
         true
     }
 
     #[cfg(test)]
     pub fn clear(&mut self) {
-        *self = Default::default();
+        if !self.abbrs.is_empty() {
+            *self = Default::default();
+            ABBREVIATION_REVISION.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Return true if we have an abbreviation with the given name.
@@ -289,7 +341,11 @@ impl AbbreviationSet {
 
 /// Return the list of replacers for an input token, in priority order, using the global set.
 /// The `position` is given to describe where the token was found.
-pub fn abbrs_match(token: &wstr, position: Position, cmd: &wstr) -> Vec<Replacer> {
+pub fn abbrs_match(
+    token: &wstr,
+    position: Position,
+    cmd: &wstr,
+) -> Result<Vec<Replacer>, AbbreviationMatchError> {
     with_abbrs(|set| set.r#match(token, position, cmd))
 }
 
@@ -341,11 +397,11 @@ mod tests {
         // Helper to expand an abbreviation, enforcing we have no more than one result.
         macro_rules! abbr_expand_1 {
             ($token:expr, $position:expr) => {
-                let result = abbrs_match(L!($token), $position, L!(""));
+                let result = abbrs_match(L!($token), $position, L!("")).unwrap();
                 assert_eq!(result, vec![]);
             };
             ($token:expr, $position:expr, $expected:expr) => {
-                let result = abbrs_match(L!($token), $position, L!(""));
+                let result = abbrs_match(L!($token), $position, L!("")).unwrap();
                 assert_eq!(
                     result
                         .into_iter()
@@ -465,6 +521,8 @@ mod tests {
             abbrs_g.rename(L!("gc"), L!("gcc"), &[]);
             assert!(abbrs_g.has_name(L!("gcc")));
             assert!(!abbrs_g.has_name(L!("gc")));
+            assert!(abbrs_g.has_match(L!("gcc"), Position::Command, L!("")).unwrap());
+            assert!(!abbrs_g.has_match(L!("gc"), Position::Command, L!("")).unwrap());
 
             assert!(!abbrs_g.erase(L!("gc"), &[]));
             assert!(abbrs_g.erase(L!("gcc"), &[]));
@@ -495,18 +553,72 @@ mod storage_tests {
                 .unwrap(),
         ));
         set.add(abbr);
-        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("tool")));
-        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("other")));
-        assert!(!set.has_match(L!("a雪42"), Position::Anywhere, L!("tool")));
+        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("tool")).unwrap());
+        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("other")).unwrap());
+        assert!(!set.has_match(L!("a雪42"), Position::Anywhere, L!("tool")).unwrap());
         assert_eq!(
-            set.r#match(L!("雪42"), Position::Anywhere, L!("tool"))[0].replacement,
+            set.r#match(L!("雪42"), Position::Anywhere, L!("tool")).unwrap()[0].replacement,
             L!("expanded"),
         );
         set.rename(L!("unicode"), L!("renamed"), &[L!("tool").to_owned()]);
         assert!(set.has_name(L!("renamed")));
         assert!(!set.has_name(L!("unicode")));
+        assert_eq!(set.list()[0].key, L!("雪[0-9]+"));
+        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("tool")).unwrap());
+        assert!(!set.has_match(L!("renamed"), Position::Anywhere, L!("tool")).unwrap());
         assert!(set.erase(L!("renamed"), &[L!("tool").to_owned()]));
-        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("tool")));
+        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("tool")).unwrap());
+    }
+
+    #[test]
+    fn renamed_literal_function_keeps_callback_and_position() {
+        let mut set = AbbreviationSet::default();
+        let mut abbr = Abbreviation::new(
+            L!("before").to_owned(),
+            L!("before").to_owned(),
+            L!("callback").to_owned(),
+            Position::Command,
+            false,
+        );
+        abbr.replacement_is_function = true;
+        set.add(abbr);
+        set.rename(L!("before"), L!("after"), &[]);
+        assert!(!set.has_match(L!("before"), Position::Command, L!("")).unwrap());
+        assert!(!set.has_match(L!("after"), Position::Anywhere, L!("")).unwrap());
+        let replacements = set.r#match(L!("after"), Position::Command, L!("")).unwrap();
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].replacement, L!("callback"));
+        assert!(replacements[0].is_function);
+    }
+
+    #[test]
+    fn recursive_regex_reports_error_without_using_lower_priority_literal() {
+        let mut set = AbbreviationSet::default();
+        set.add(Abbreviation::new(
+            L!("literal").to_owned(),
+            L!("x").to_owned(),
+            L!("must-not-expand").to_owned(),
+            Position::Anywhere,
+            false,
+        ));
+        let mut recursive = Abbreviation::new(
+            L!("recursive").to_owned(),
+            L!("(?R)").to_owned(),
+            L!("must-not-expand").to_owned(),
+            Position::Anywhere,
+            false,
+        );
+        recursive.regex = Some(Box::new(
+            pcre2::utf32::RegexBuilder::new()
+                .build(L!("^(?:(?R))$").as_char_slice())
+                .unwrap(),
+        ));
+        set.add(recursive);
+        let error = set.r#match(L!("x"), Position::Anywhere, L!("echo")).unwrap_err();
+        assert_eq!(error.name, L!("recursive"));
+        assert!(set.has_match(L!("x"), Position::Anywhere, L!("echo")).is_err());
+        assert!(set.erase(L!("recursive"), &[]));
+        assert_eq!(set.r#match(L!("x"), Position::Anywhere, L!("echo")).unwrap()[0].replacement, L!("must-not-expand"));
     }
 
     #[test]

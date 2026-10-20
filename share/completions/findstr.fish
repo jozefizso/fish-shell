@@ -1,23 +1,12 @@
 function __findstr_generate_args --description 'Function to generate args'
     set --local current_token (commandline --current-token --cut-at-cursor)
     switch $current_token
-        case '/a:*'
-            echo -e '0\tBlack
-1\tBlue
-2\tGreen
-3\tAqua
-4\tRed
-5\tPurple
-6\tYellow
-7\tWhite
-8\tGray
-9\tLight blue
-A\tLight green
-B\tLight aqua
-C\tLight red
-D\tLight purple
-E\tLight yellow
-F\tBright white' | awk -F '\t' "{ printf \"$current_token%s\t%s\n\", \$1, \$2 }"
+        case '/a:*' '/A:*'
+            string match -rq '^/[aA]:[0-9A-Fa-f]?$' -- $current_token; or return
+            for color in '0:Black' '1:Blue' '2:Green' '3:Aqua' '4:Red' '5:Purple' '6:Yellow' '7:White' '8:Gray' '9:Light blue' 'A:Light green' 'B:Light aqua' 'C:Light red' 'D:Light purple' 'E:Light yellow' 'F:Bright white'
+                set -l fields (string split -m 1 : -- $color)
+                printf '%s%s\t%s\n' $current_token $fields[1] $fields[2]
+            end
         case '*'
             echo -e '/b\tMatch at the beginning of the line
 /e\tMatch at the end of the line
@@ -42,4 +31,4 @@ F\tBright white' | awk -F '\t' "{ printf \"$current_token%s\t%s\n\", \$1, \$2 }"
     end
 end
 
-complete --command findstr --no-files --arguments '(__findstr_generate_args)'
+complete --command findstr --arguments '(__findstr_generate_args)'

@@ -1,7 +1,7 @@
 # localization: tier3
 function __fish_complete_zfs_mountpoint_properties
     set -l OS ""
-    switch (uname)
+    switch (__fish_uname)
         case Linux
             set OS Linux
         case Darwin

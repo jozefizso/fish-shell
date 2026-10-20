@@ -2,7 +2,7 @@ use super::{
     binding::match_key_event_to_key,
     input::{
         CharEvent, ImplicitEvent, InputEventQueuer, InputEventTrigger, KeyEvent, QueryResponse,
-        QueryResultEvent, interrupt_key, is_event_blocked_when_querying, stop_query,
+        QueryResultEvent, TerminalQuery, interrupt_key, is_event_blocked_when_querying, stop_query,
     },
 };
 use crate::{
@@ -22,6 +22,12 @@ use fish_widestring::{WString, bytes2wcstring, encode_byte_to_char, fish_reserve
 use std::time::Duration;
 
 pub(crate) const LONG_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Shared with native cancellation framing; active paste accepts only this exact end.
+pub(crate) const PASTE_BEGIN: &[u8] = b"\x1b[200~";
+pub(crate) const PASTE_END: &[u8] = b"\x1b[201~";
+/// Reports are advisory, never an unbounded input allocation or parsing job.
+const MAX_TERMINAL_SEQUENCE_BYTES: usize = 4096;
+const MAX_TERMINAL_SEQUENCE_TIME: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 enum EscapeSequenceParseState {
@@ -42,15 +48,34 @@ pub(super) fn on_byte_read<Queuer: InputEventQueuer + ?Sized>(queuer: &mut Queue
 impl<T: InputEventQueuer + ?Sized> InputEventQueuerExt for T {}
 
 pub(crate) trait InputEventQueuerExt: InputEventQueuer {
+    /// The sole active-paste byte path. Only an exact closing envelope has
+    /// protocol meaning; every other escape/control sequence is literal data.
+    /// Keeping a partial envelope in the buffer also survives notification turns.
+    fn paste_ingest_byte(&mut self, byte: u8) {
+        let ended = {
+            let buffer = self.get_input_data_mut().paste_buffer.as_mut().unwrap();
+            buffer.push(byte);
+            let ended = buffer.ends_with(PASTE_END);
+            if ended {
+                buffer.truncate(buffer.len() - PASTE_END.len());
+            }
+            ended
+        };
+        if ended {
+            self.paste_commit();
+        }
+    }
+
     fn on_byte_read(&mut self, read_byte: u8) {
+        if self.paste_is_buffering() {
+            self.paste_ingest_byte(read_byte);
+            return;
+        }
         let mut buffer = vec![read_byte];
         let escape_sequence = if read_byte == b'\x1b' {
             self.parse_escape_sequence(&mut buffer, false)
         } else {
-            if self.paste_is_buffering() {
-                self.paste_push_char(read_byte);
-                return;
-            }
+            // Paste bytes, including ESC, were handled before general key parsing.
             EscapeSequenceParseResult {
                 state: EscapeSequenceParseState::Incomplete,
                 unconsumed_escapes: 0,
@@ -206,7 +231,15 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
         let Some(mut c) = self.read_sequence_byte(buffer) else {
             return char_event(buffer, KeyEvent::from(alt('[')));
         };
-        let mut next_char = |zelf: &mut Self| zelf.read_sequence_byte(buffer).unwrap_or(0xff);
+        let started = std::time::Instant::now();
+        let mut next_char = |zelf: &mut Self| {
+            if buffer.len() >= MAX_TERMINAL_SEQUENCE_BYTES
+                || started.elapsed() >= MAX_TERMINAL_SEQUENCE_TIME
+            {
+                return 0xff;
+            }
+            zelf.read_sequence_byte(buffer).unwrap_or(0xff)
+        };
         let private_mode;
         match c {
             b'[' => {
@@ -379,6 +412,22 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
             }
             b'P' => masked_key(function_key(1)),
             b'Q' => masked_key(function_key(2)),
+            // Modified F3 and a row-one cursor report share CSI 1;mod R.
+            // A requested cursor report takes precedence until its query ends;
+            // native consoles obtain cursor positions without sending DSR.
+            b'R' if private_mode.is_none()
+                && !matches!(
+                    &self.get_input_data().blocking_query,
+                    Some(TerminalQuery::Recurrent(query)) if query.cursor_position.is_some()
+                )
+                && count <= 1
+                && params[0][0] <= 1
+                && params[0][1..].iter().all(|&value| value == 0)
+                && params[1][1..].iter().all(|&value| value == 0)
+                && (count == 0 || (1..=16).contains(&params[1][0])) =>
+            {
+                masked_key(function_key(3))
+            }
             b'R' => {
                 let Some(y) = params[0][0]
                     .checked_sub(1)
@@ -433,14 +482,13 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
                 33 | 34 => KeyEvent::from(shift(
                     char::from_u32(u32::from(function_key(9)) + params[0][0] - 33).unwrap(),
                 )), // rxvt style
-                200 => {
+                200 if buffer.as_slice() == PASTE_BEGIN => {
                     self.paste_start_buffering();
                     return None;
                 }
-                201 => {
-                    self.paste_commit();
-                    return None;
-                }
+                // Active paste closing is handled bytewise by paste_ingest_byte.
+                // An unsolicited closing marker has no undo/binding side effects.
+                201 => return None,
                 _ => return None,
             },
             b'c' if private_mode == Some(b'?') => {
@@ -556,12 +604,23 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
     }
 
     fn parse_ss3(&mut self, buffer: &mut Vec<u8>) -> Option<CharEvent> {
-        let mut raw_mask = 0;
+        let mut raw_mask = 0u32;
+        let started = std::time::Instant::now();
         let Some(mut code) = self.read_sequence_byte(buffer) else {
             return char_event(buffer, KeyEvent::from(alt('O')));
         };
         while code.is_ascii_digit() {
-            raw_mask = raw_mask * 10 + u32::from(code - b'0');
+            let Some(mask) = raw_mask.checked_mul(10)
+                .and_then(|mask| mask.checked_add(u32::from(code - b'0')))
+            else {
+                return invalid_sequence(buffer);
+            };
+            raw_mask = mask;
+            if buffer.len() >= MAX_TERMINAL_SEQUENCE_BYTES
+                || started.elapsed() >= MAX_TERMINAL_SEQUENCE_TIME
+            {
+                return invalid_sequence(buffer);
+            }
             code = self.read_sequence_byte(buffer).unwrap_or(0xff);
         }
         let (modifiers, _caps_lock) = parse_mask(raw_mask.saturating_sub(1));
@@ -608,7 +667,15 @@ pub(crate) trait InputEventQueuerExt: InputEventQueuer {
         allow_bel: bool,
     ) -> Option<()> {
         let mut escape = false;
+        let started = std::time::Instant::now();
         loop {
+            if buffer.len() >= MAX_TERMINAL_SEQUENCE_BYTES
+                || started.elapsed() >= MAX_TERMINAL_SEQUENCE_TIME
+            {
+                // Do not prefetch/drain the rest of the kernel FIFO: bytes after the
+                // rejected report still belong to the user or to a nested reader.
+                return None;
+            }
             let b = self.read_sequence_byte(buffer)?;
             if allow_bel && b == b'\x07' {
                 buffer.pop();
@@ -888,6 +955,191 @@ mod tests {
     #[test]
     fn test_parse_hex() {
         assert_eq!(parse_hex(b"3d"), Some(vec![61]));
+    }
+
+    #[test]
+    fn modified_f3_is_disambiguated_by_outstanding_cursor_query() {
+        use crate::input::{
+            BackgroundColorQuery, CursorPositionQuery, CursorPositionQueryReason, RecurrentQuery,
+            TerminalQuery,
+        };
+        use crate::key::ViewportPosition;
+
+        let sequence = b"\x1b[1;7R";
+        let f3 = CharEvent::from_key_seq(
+            KeyEvent::new_with(
+                Modifiers { ctrl: true, alt: true, ..Default::default() },
+                true,
+                key::function_key(3),
+                None,
+                None,
+                Default::default(),
+            ),
+            "\x1b[1;7R".into(),
+        );
+        let position = ViewportPosition { x: 6, y: 0 };
+        let report = query_response(QueryResponse::CursorPosition(position));
+        let cursor_query = |result| TerminalQuery::Recurrent(RecurrentQuery {
+            cursor_position: Some(CursorPositionQuery {
+                reason: CursorPositionQueryReason::NewPrompt,
+                result,
+            }),
+            ..Default::default()
+        });
+        for (query, expected) in [
+            (None, f3.clone()),
+            (Some(TerminalQuery::Initial), f3.clone()),
+            (Some(TerminalQuery::Recurrent(RecurrentQuery {
+                background_color: Some(BackgroundColorQuery::default()),
+                ..Default::default()
+            })), f3.clone()),
+            (Some(cursor_query(None)), report.clone()),
+            // The query remains outstanding until the DA barrier, including
+            // after a position response has already arrived.
+            (Some(cursor_query(Some(position))), report),
+        ] {
+            let mut queue = MockInputEventQueuer::new();
+            queue.input_data.blocking_query = query;
+            queue.pending_input = &sequence[1..];
+            let parsed = queue.parse_escape_sequence(&mut vec![sequence[0]], false);
+            assert!(queue.pending_input.is_empty());
+            let super::EscapeSequenceParseState::Complete(event) = parsed.state else {
+                panic!("expected a decoded event, got {parsed:?}");
+            };
+            assert_eq!(event, expected);
+        }
+
+        // Non-key-shaped and DEC-private cursor reports remain reports even
+        // without an outstanding query; neither becomes a spurious F3.
+        for (sequence, position) in [
+            (&b"\x1b[12;34R"[..], ViewportPosition { x: 33, y: 11 }),
+            (&b"\x1b[?1;7R"[..], ViewportPosition { x: 6, y: 0 }),
+        ] {
+            let mut queue = MockInputEventQueuer::new();
+            queue.pending_input = &sequence[1..];
+            queue.on_byte_read(sequence[0]);
+            assert_eq!(
+                queue.input_data.queue.pop_front(),
+                Some(query_response(QueryResponse::CursorPosition(position))),
+            );
+        }
+    }
+
+    struct PasteRecorder {
+        inner: MockInputEventQueuer,
+        committed: Vec<Vec<u8>>,
+    }
+    impl crate::input::InputEventQueuer for PasteRecorder {
+        fn get_input_data(&self) -> &crate::input::InputData {
+            &self.inner.input_data
+        }
+        fn get_input_data_mut(&mut self) -> &mut crate::input::InputData {
+            &mut self.inner.input_data
+        }
+        fn read_sequence_byte(&mut self, buffer: &mut Vec<u8>) -> Option<u8> {
+            crate::input::InputEventQueuer::read_sequence_byte(&mut self.inner, buffer)
+        }
+        fn paste_commit(&mut self) {
+            self.committed.push(self.inner.input_data.paste_buffer.take().unwrap());
+        }
+    }
+
+    #[test]
+    fn active_paste_only_recognizes_exact_closing_envelope() {
+        use crate::input::{ImplicitEvent, InputEventQueuer as _};
+        let mut queue = PasteRecorder {
+            inner: MockInputEventQueuer::new(), committed: Vec::new(),
+        };
+        queue.inner.pending_input = b"[201~";
+        queue.on_byte_read(0x1b);
+        assert!(queue.committed.is_empty(), "unsolicited close must not commit");
+        queue.inner.pending_input = b"[200;1~";
+        queue.on_byte_read(0x1b);
+        assert!(!queue.paste_is_buffering(), "only the exact begin envelope is recognized");
+        queue.inner.pending_input = b"[200~";
+        queue.on_byte_read(0x1b);
+        assert!(queue.paste_is_buffering());
+        let payload = b"literal\x1bOM\x1bOP\x1b[13u\x1b]11;bad\x07\x1b[200~\r\n\x1b[201X";
+        for &byte in payload {
+            queue.on_byte_read(byte);
+        }
+        for &byte in b"\x1b[20" {
+            queue.on_byte_read(byte);
+        }
+        // A notification turn does not discard a partial closing delimiter or
+        // permit SS3/CSI/function keys hidden in the body to reach bindings.
+        queue.inner.input_data.queue.push_back(CharEvent::Implicit(ImplicitEvent::CheckExit));
+        queue.on_byte_read(b'1');
+        assert!(queue.committed.is_empty());
+        assert!(queue.inner.input_data.queue.iter().all(|event|
+            matches!(event, CharEvent::Implicit(ImplicitEvent::CheckExit))));
+        queue.on_byte_read(b'~');
+        assert_eq!(queue.committed, vec![payload.to_vec()]);
+        assert!(!queue.paste_is_buffering());
+        queue.on_byte_read(b'K');
+        assert!(queue.inner.input_data.queue.iter().any(|event|
+            matches!(event, CharEvent::Key(key) if key.key.key == Key::from_single_char('K'))));
+    }
+
+    #[test]
+    fn ss3_numeric_overflow_rejects_without_consuming_following_key() {
+        let mut queue = MockInputEventQueuer::new();
+        queue.pending_input = b"O4294967296K";
+        queue.on_byte_read(0x1b);
+        assert_eq!(queue.pending_input, b"K");
+        assert!(queue.input_data.queue.is_empty());
+        queue.pending_input = b"";
+        queue.on_byte_read(b'K');
+        assert!(queue.input_data.queue.iter().any(|event|
+            matches!(event, CharEvent::Key(key) if key.key.key == Key::from_single_char('K'))));
+    }
+
+    #[test]
+    fn oversized_reports_leave_subsequent_input_unconsumed() {
+        const MAX: usize = super::MAX_TERMINAL_SEQUENCE_BYTES;
+        static OSC: [u8; MAX + 1] = {
+            let mut bytes = [b'x'; MAX + 1];
+            bytes[0] = 0x1b;
+            bytes[1] = b']';
+            bytes[MAX] = b'K';
+            bytes
+        };
+        static CSI: [u8; MAX + 1] = {
+            let mut bytes = [b'0'; MAX + 1];
+            bytes[0] = 0x1b;
+            bytes[1] = b'[';
+            bytes[MAX] = b'K';
+            bytes
+        };
+        static SS3: [u8; MAX + 1] = {
+            let mut bytes = [b'0'; MAX + 1];
+            bytes[0] = 0x1b;
+            bytes[1] = b'O';
+            bytes[MAX] = b'K';
+            bytes
+        };
+        for input in [&OSC[..], &CSI[..], &SS3[..]] {
+            let mut queue = MockInputEventQueuer::new();
+            queue.pending_input = &input[1..];
+            queue.on_byte_read(input[0]);
+            assert_eq!(queue.pending_input, b"K");
+            queue.pending_input = b"";
+            queue.on_byte_read(b'K');
+            assert!(queue.input_data.queue.iter().any(|evt|
+                matches!(evt, CharEvent::Key(key) if key.key.key == Key::from_single_char('K'))));
+        }
+    }
+
+    #[test]
+    fn unsupported_terminated_reports_preserve_following_keys() {
+        for input in [&b"\x1b]99;unsupported\x07keep"[..],
+            &b"\x1bP0+runknown\x1b\\keep"[..],
+            &b"\x1b]11;not-a-color\x1b\\keep"[..]] {
+            let mut queue = MockInputEventQueuer::new();
+            queue.pending_input = &input[1..];
+            queue.on_byte_read(input[0]);
+            assert_eq!(queue.pending_input, b"keep");
+        }
     }
 
     #[test]

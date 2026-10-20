@@ -65,8 +65,9 @@ impl LocalizationVariables {
         let langs = langs.as_list();
         let filtered_langs: Vec<String> = langs
             .iter()
+            .flat_map(|lang| lang.to_string().split(':').map(str::to_owned).collect::<Vec<_>>())
             .filter(|lang| !lang.is_empty())
-            .map(|lang| lang.to_string())
+            .map(|lang| normalize_language(&lang))
             .collect();
         if filtered_langs.is_empty() {
             return None;
@@ -80,6 +81,20 @@ impl LocalizationVariables {
             language: Self::get_language_var(env),
         }
     }
+}
+
+/// Accept both POSIX ll_CC.UTF-8 and native BCP-47 ll-CC names.
+fn normalize_language(locale: &str) -> String {
+    if locale == "C" || locale.starts_with("C.") { return "C".to_owned(); }
+    if locale == "POSIX" || locale.starts_with("POSIX.") { return "POSIX".to_owned(); }
+    let name = locale.split(['.', '@']).next().unwrap_or(locale);
+    let mut parts = name.split(['-', '_']);
+    let mut normalized = parts.next().unwrap_or_default().to_ascii_lowercase();
+    for part in parts {
+        normalized.push('_');
+        normalized.push_str(&part.to_ascii_uppercase());
+    }
+    normalized
 }
 
 fn append_space_separated_list<S: AsRef<str>>(
@@ -156,6 +171,8 @@ impl LocalizationState {
         language: Language<'a>,
         available_languages: &HashSet<LL>,
     ) -> Vec<LL> {
+        let normalized = normalize_language(language.as_ref());
+        let language = Language(normalized.as_str());
         // Try the exact name first.
         // If there already is a corresponding catalog return the language.
         if let Some(&lang) = available_languages.get(*language) {
@@ -175,6 +192,7 @@ impl LocalizationState {
                     lang_catalogs.push(lang);
                 }
             }
+            lang_catalogs.sort_unstable_by(|a, b| a.as_ref().cmp(b.as_ref()));
             lang_catalogs
         } else {
             // If `language` contained a country code, we only try to fall back to a catalog
@@ -216,17 +234,18 @@ impl LocalizationState {
             (LanguagePrecedenceOrigin::LanguageEnvVar, list)
         } else if let Some((precedence_origin, locale)) = &localization_vars.message_locale {
             // Strip off encoding and modifier. (We always expect UTF-8 and don't support modifiers.)
-            let normalized_name = locale
-                .split_once(|c: char| !(c.is_ascii_alphabetic() || c == '_'))
-                .map_or(locale.as_str(), |(lang_name, _)| lang_name)
-                .to_owned();
+            let normalized_name = normalize_language(locale);
             // At this point, the normalized_name should have the shape `ll` or `ll_CC`.
             (
                 precedence_origin.as_language_precedence_origin(),
                 vec![normalized_name],
             )
         } else {
-            (LanguagePrecedenceOrigin::Default, vec![])
+            #[cfg(windows)]
+            let defaults = vec![normalize_language(crate::locale::native_message_locale())];
+            #[cfg(not(windows))]
+            let defaults = vec![];
+            (LanguagePrecedenceOrigin::Default, defaults)
         };
         // We always have our messages available in English, so there is no point in adding
         // additional fallback options after English.

@@ -18,18 +18,75 @@ use crate::{
 };
 static COMPLETION_AUTOLOADER: LazyLock<Mutex<Autoload>> =
     LazyLock::new(|| Mutex::new(Autoload::new(L!("fish_complete_path"))));
+#[cfg(windows)]
+static AUTOLOADED_COMPLETIONS: Mutex<BTreeSet<WString>> = Mutex::new(BTreeSet::new());
+#[cfg(windows)]
+static AUTOLOADED_WRAPPERS: Mutex<BTreeMap<WString, Vec<WString>>> = Mutex::new(BTreeMap::new());
+#[cfg(windows)]
+static AUTOLOADED_RULE_COMMANDS: Mutex<BTreeMap<WString, BTreeSet<CompletionEntryKey>>> =
+    Mutex::new(BTreeMap::new());
+#[cfg(windows)]
+thread_local! {
+    static COMPLETION_AUTOLOAD_OWNER: std::cell::RefCell<Option<Arc<WString>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(windows)]
+fn completion_autoload_owner() -> Option<Arc<WString>> {
+    COMPLETION_AUTOLOAD_OWNER.with(|owner| owner.borrow().clone())
+}
+
+/// Detach only this source's rules. Retain Arc snapshots for transactional rollback;
+/// manually added rules remain in place, including rules registered after an earlier load.
+#[cfg(windows)]
+fn remove_autoloaded_rules(owner: &wstr) -> Vec<(CompletionEntryKey, Arc<CompletionEntry>)> {
+    let keys = AUTOLOADED_RULE_COMMANDS.lock().unwrap().remove(owner).unwrap_or_default();
+    let mut map = COMPLETION_MAP.lock().unwrap();
+    let mut previous = Vec::new();
+    for key in keys {
+        let Some(entry) = map.get_mut(&key) else { continue };
+        if entry.options.iter().any(|rule| rule.autoload_owner.as_deref().is_some_and(|value| value.as_utfstr() == owner)) {
+            previous.push((key.clone(), Arc::clone(entry)));
+            Arc::make_mut(entry).options.retain(|rule| {
+                !rule.autoload_owner.as_deref().is_some_and(|value| value.as_utfstr() == owner)
+            });
+        }
+        if entry.options.is_empty() {
+            map.remove(&key);
+        }
+    }
+    if !previous.is_empty() { completion_changed(); }
+    previous
+}
+/// Definition changes also invalidate background work whose text did not change.
+static COMPLETION_REVISION: atomic::AtomicU64 = atomic::AtomicU64::new(0);
+
+pub(crate) fn completion_revision() -> u64 {
+    COMPLETION_REVISION.load(atomic::Ordering::Acquire)
+}
+
+fn completion_changed() {
+    COMPLETION_REVISION.fetch_add(1, atomic::Ordering::Release);
+}
 /// Load command-specific completions for the specified command.
 /// Returns `true` if something new was loaded, `false` if not.
-pub fn complete_load(cmd: &wstr, parser: &mut Parser) -> bool {
+/// `case_sensitive` is the resolved command directory's policy, not the completion path's policy.
+/// It controls only embedded completion asset names; functions and disk sources retain exact names.
+pub fn complete_load(cmd: &wstr, parser: &mut Parser, case_sensitive: bool) -> bool {
     if COMPLETION_TOMBSTONES.lock().unwrap().contains(cmd) {
         return false;
     }
 
     let mut loaded_new = false;
 
-    // We have to load this as a function, since it may define a --wraps or signature.
-    // See issue #2466.
-    if function::load(cmd, parser) {
+    // Function-defined metadata cannot make a reserved native operation callable.
+    // In particular, do not parse Unix fg/bg wrappers for unsupported builtins.
+    #[cfg(windows)]
+    let load_function = !crate::builtins::builtin_is_unsupported(cmd);
+    #[cfg(unix)]
+    let load_function = true;
+    // Other functions may define a --wraps or signature. See issue #2466.
+    if load_function && function::load(cmd, parser) {
         // We autoloaded something; check if we have a --wraps.
         loaded_new |= complete_wrap_map().get(cmd).is_some();
     }
@@ -42,27 +99,95 @@ pub fn complete_load(cmd: &wstr, parser: &mut Parser) -> bool {
     let path_to_load = COMPLETION_AUTOLOADER
         .lock()
         .expect("mutex poisoned")
-        .resolve_command(cmd, EnvStack::globals());
+        .resolve_completion_command(cmd, EnvStack::globals(), case_sensitive);
     #[cfg(windows)]
     let path_to_load = COMPLETION_AUTOLOADER
         .lock()
         .expect("mutex poisoned")
-        .resolve_command(cmd, parser.vars());
+        .resolve_completion_command(cmd, parser.vars(), case_sensitive);
     match path_to_load {
         AutoloadResult::Path(path_to_load) => {
+            // Replace this source's obsolete rules, preserving independent manual rules.
+            #[cfg(windows)]
+            let previous = {
+                let entries = remove_autoloaded_rules(cmd);
+                let wrappers = complete_get_wrap_targets(cmd);
+                let owned = AUTOLOADED_WRAPPERS.lock().unwrap().get(cmd).cloned().unwrap_or_default();
+                for target in owned {
+                    complete_remove_wrapper(cmd.to_owned(), &target);
+                }
+                let baseline = complete_get_wrap_targets(cmd);
+                (entries, wrappers, baseline)
+            };
+            #[cfg(windows)]
+            let owner_guard = {
+                let previous = COMPLETION_AUTOLOAD_OWNER.with(|owner| {
+                    owner.replace(Some(Arc::new(cmd.to_owned())))
+                });
+                ScopeGuard::new(previous, |previous| {
+                    COMPLETION_AUTOLOAD_OWNER.with(|owner| { owner.replace(previous); });
+                })
+            };
             let loaded = Autoload::perform_autoload(&path_to_load, parser);
+            #[cfg(windows)]
+            drop(owner_guard);
             let mut autoload = COMPLETION_AUTOLOADER.lock().expect("mutex poisoned");
             if loaded {
                 autoload.mark_autoload_finished(cmd);
+                drop(autoload);
+                #[cfg(windows)]
+                {
+                    AUTOLOADED_COMPLETIONS.lock().unwrap().insert(cmd.to_owned());
+                    let baseline = &previous.2;
+                    let owned = complete_get_wrap_targets(cmd).into_iter()
+                        .filter(|target| !baseline.contains(target)).collect();
+                    AUTOLOADED_WRAPPERS.lock().unwrap().insert(cmd.to_owned(), owned);
+                    completion_changed();
+                }
                 loaded_new = true;
             } else {
                 autoload.mark_autoload_failed(cmd);
+                drop(autoload);
+                #[cfg(windows)]
+                {
+                    let (entries, wrappers, _) = previous;
+                    remove_autoloaded_rules(cmd);
+                    let keys = entries.iter().map(|(key, _)| key.clone()).collect();
+                    let mut map = COMPLETION_MAP.lock().unwrap();
+                    for (key, entry) in entries {
+                        map.insert(key, entry);
+                    }
+                    drop(map);
+                    AUTOLOADED_RULE_COMMANDS.lock().unwrap().insert(cmd.to_owned(), keys);
+                    let mut map = WRAPPER_MAP.lock().unwrap();
+                    map.remove(cmd);
+                    if !wrappers.is_empty() {
+                        map.insert(cmd.to_owned(), wrappers);
+                    }
+                    completion_changed();
+                }
             }
         }
         AutoloadResult::None => {
+            #[cfg(windows)]
+            let was_loaded = AUTOLOADED_COMPLETIONS.lock().unwrap().remove(cmd);
+            #[cfg(windows)]
+            if was_loaded {
+                COMPLETION_AUTOLOADER.lock().unwrap().forget_command(cmd);
+                remove_autoloaded_rules(cmd);
+                let owned = AUTOLOADED_WRAPPERS.lock().unwrap().remove(cmd).unwrap_or_default();
+                for target in owned {
+                    complete_remove_wrapper(cmd.to_owned(), &target);
+                }
+                completion_changed();
+                loaded_new = true;
+            }
+            #[cfg(unix)]
             let stripped = strip_executable_suffix(cmd);
+            #[cfg(windows)]
+            let stripped = crate::path::native_strip_provider_suffix(cmd);
             if let Some(stripped) = stripped {
-                loaded_new = complete_load(stripped, parser);
+                loaded_new |= complete_load(stripped, parser, case_sensitive);
             }
         }
         AutoloadResult::Loaded | AutoloadResult::Pending => {}
@@ -72,16 +197,30 @@ pub fn complete_load(cmd: &wstr, parser: &mut Parser) -> bool {
 
 /// Observes that fish_complete_path has changed.
 pub fn complete_invalidate_path() {
-    // TODO: here we unload all completions for commands that are loaded by the autoloader. We also
-    // unload any completions that the user may specified on the command line. We should in
-    // principle track those completions loaded by the autoloader alone.
+    // Native sources retain rule ownership; the retained Unix unload policy is unchanged.
 
     let mut autoload = COMPLETION_AUTOLOADER.lock().expect("mutex poisoned");
+    #[cfg(unix)]
     let cmds = autoload.get_autoloaded_commands();
+    // A failed reload keeps the last successful owned rules, but deliberately
+    // forgets its file identity so it can retry. Include those sources as well.
+    #[cfg(windows)]
+    let cmds = std::mem::take(&mut *AUTOLOADED_COMPLETIONS.lock().unwrap());
     for cmd in cmds {
+        #[cfg(unix)]
         complete_remove_all(cmd, /*cmd_is_path=*/ false, /*explicit=*/ false);
+        #[cfg(windows)]
+        {
+            remove_autoloaded_rules(&cmd);
+            let owned = AUTOLOADED_WRAPPERS.lock().unwrap().remove(&cmd).unwrap_or_default();
+            for target in owned {
+                complete_remove_wrapper(cmd.clone(), &target);
+            }
+        }
     }
     autoload.clear();
+    #[cfg(windows)]
+    AUTOLOADED_WRAPPERS.lock().unwrap().clear();
 }
 use crate::{
     abbrs::with_abbrs,
@@ -99,8 +238,8 @@ use crate::{
     localization::localizable_string,
     operation_context::OperationContext,
     parse_constants::SourceRange,
-    parse_util::{get_cmdsubst_extent, get_process_extent, unescape_wildcards},
-    parser::{Block, BlockId, ParserEnvSetMode},
+    parse_util::{get_cmdsubst_extent, get_process_extent, get_token_extent, unescape_wildcards},
+    parser::{Block, BlockId, ParserEnvSetMode, TransientCommandline},
     parser_keywords::parser_keywords_is_subcommand,
     path::{path_get_path, path_try_get_path},
     reader::{get_quote, is_backslashed},
@@ -122,12 +261,11 @@ use fish_widestring::WExt as _;
 use fish_widestring::charptr2wcstring;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
-use std::{cmp::Ordering, collections::HashSet, mem};
+use std::{borrow::Cow, cmp::Ordering, collections::HashSet, mem};
 
 #[cfg(windows)]
 fn strip_executable_suffix(command: &wstr) -> Option<&wstr> {
-    string_suffixes_string_case_insensitive(L!(".exe"), command)
-        .then(|| &command[..command.len() - 4])
+    crate::path::native_strip_provider_suffix(command)
 }
 
 fn is_path_separator(character: char) -> bool {
@@ -143,33 +281,6 @@ fn is_explicit_command_path(command: &wstr) -> bool {
     {
         crate::path::native_is_explicit_path(command)
     }
-}
-
-/// Diagnose unavailable native completion providers without initializing a reader.
-/// Quoted and escaped literal tildes remain ordinary filenames.
-#[cfg(windows)]
-pub fn native_completion_request_error(commandline: &wstr) -> Option<&'static wstr> {
-    let (token, _) = crate::parse_util::get_token_extent(commandline, commandline.len());
-    let token = &commandline[token];
-    if token.starts_with('~') {
-        let unescaped = unescape_string(
-            token,
-            UnescapeStringStyle::Script(UnescapeFlags {
-                incomplete: true,
-                ..Default::default()
-            }),
-        )?;
-        if unescaped
-            .chars()
-            .nth(1)
-            .is_some_and(|c| !is_path_separator(c))
-        {
-            return Some(L!(
-                "Named-user home completion is not supported on native Windows"
-            ));
-        }
-    }
-    None
 }
 
 /// The shared walker uses '/', but extended Win32 identities require literal backslashes.
@@ -665,6 +776,8 @@ pub enum CompleteOptionType {
 /// switch.
 #[derive(Clone, Debug)]
 struct CompleteEntryOpt {
+    #[cfg(windows)]
+    autoload_owner: Option<Arc<WString>>,
     /// Text of the option (like 'foo').
     option: WString,
     /// Arguments to the option; may be a subshell expression expanded at evaluation time.
@@ -728,8 +841,13 @@ impl CompletionEntry {
     /// option strings. Returns true if it is now empty and should be deleted, false if it's not
     /// empty.
     pub fn remove_option(&mut self, option: &wstr, typ: CompleteOptionType) -> bool {
-        self.options
-            .retain(|opt| opt.option != option || opt.typ != typ);
+        #[cfg(windows)]
+        let owner = completion_autoload_owner();
+        self.options.retain(|opt| {
+            #[cfg(windows)]
+            if owner.is_some() && opt.autoload_owner != owner { return true; }
+            opt.option != option || opt.typ != typ
+        });
         self.options.is_empty()
     }
 
@@ -810,18 +928,29 @@ pub fn complete_add(
         option.is_empty(),
         (option_type == CompleteOptionType::ArgsOnly)
     );
+    let key = CompletionEntryKey { name: cmd, is_path: cmd_is_path };
+    #[cfg(windows)]
+    let autoload_owner = completion_autoload_owner();
+    #[cfg(windows)]
+    if let Some(owner) = &autoload_owner {
+        let mut index = AUTOLOADED_RULE_COMMANDS.lock().unwrap();
+        if !index.contains_key(owner.as_utfstr()) {
+            index.insert(owner.as_ref().clone(), BTreeSet::new());
+        }
+        let keys = index.get_mut(owner.as_utfstr()).unwrap();
+        if !keys.contains(&key) { keys.insert(key.clone()); }
+    }
 
     // Lock the lock that allows us to edit the completion entry list.
     let mut completion_map = COMPLETION_MAP.lock().expect("mutex poisoned");
     let c = completion_map
-        .entry(CompletionEntryKey {
-            name: cmd,
-            is_path: cmd_is_path,
-        })
+        .entry(key)
         .or_insert_with(CompletionEntry::new);
 
     // Create our new option.
     let opt = CompleteEntryOpt {
+        #[cfg(windows)]
+        autoload_owner,
         option,
         typ: option_type,
         argument_policy,
@@ -833,6 +962,7 @@ pub fn complete_add(
         flags,
     };
     Arc::make_mut(c).add_option(opt);
+    completion_changed();
 }
 
 /// Remove a previously defined completion.
@@ -844,6 +974,7 @@ pub fn complete_remove(cmd: WString, cmd_is_path: bool, option: &wstr, typ: Comp
     };
     if let Some(c) = completion_map.get_mut(&key) {
         let delete_it = Arc::make_mut(c).remove_option(option, typ);
+        completion_changed();
         if delete_it {
             completion_map.remove(&key);
         }
@@ -857,8 +988,18 @@ pub fn complete_remove_all(cmd: WString, cmd_is_path: bool, explicit: bool) {
         name: cmd,
         is_path: cmd_is_path,
     };
+    #[cfg(windows)]
+    if let Some(owner) = completion_autoload_owner() {
+        if let Some(entry) = completion_map.get_mut(&key) {
+            Arc::make_mut(entry).options.retain(|rule| rule.autoload_owner.as_ref() != Some(&owner));
+            if entry.options.is_empty() { completion_map.remove(&key); }
+            completion_changed();
+        }
+        return;
+    }
     let removed = completion_map.remove(&key).is_some();
     WRAPPER_MAP.lock().unwrap().remove(&key.name);
+    completion_changed();
     if explicit && !removed && !key.is_path {
         COMPLETION_TOMBSTONES.lock().unwrap().insert(key.name);
     }
@@ -985,6 +1126,7 @@ pub fn complete_add_wrapper(command: WString, new_target: WString) -> bool {
     // If it's already present, we do nothing.
     if !targets.contains(&new_target) {
         targets.push(new_target);
+        completion_changed();
     }
 
     true
@@ -1004,6 +1146,7 @@ pub fn complete_remove_wrapper(command: WString, target_to_remove: &wstr) -> boo
         return false;
     };
     targets.remove(pos);
+    completion_changed();
     if targets.is_empty() {
         wrappers.remove(&command);
     }
@@ -1131,12 +1274,17 @@ mod active {
         file_policy: FileCompletionPolicy,
         /// Depth in the wrap chain.
         wrap_depth: usize,
+        /// Whether the actual root command exists, allowing its declared wrap targets to autoload.
+        root_command_exists: bool,
         /// The list of variable assignments: escaped strings of the form VAR=VAL.
         /// This may be temporarily appended to as we explore the wrap chain.
         /// When completing, variable assignments are really set in a local scope.
         var_assignments: &'a mut Vec<WString>,
-        /// The set of wrapped commands which we have visited, and so should not be explored again.
+        /// Commands visited, also used to identify wrappers of cd.
         visited_wrapped_commands: HashSet<WString>,
+        /// Dedup identity includes wrapper-local assignments, independently of active cycles.
+        visited_wrap_scopes: HashSet<(WString, Vec<WString>)>,
+        active_wrapped_commands: HashSet<WString>,
     }
 
     impl<'a> CustomArgData<'a> {
@@ -1147,8 +1295,11 @@ mod active {
                 had_ddash: false,
                 file_policy: FileCompletionPolicy::Inherit,
                 wrap_depth: 0,
+                root_command_exists: false,
                 var_assignments,
                 visited_wrapped_commands: HashSet::new(),
+                visited_wrap_scopes: HashSet::new(),
+                active_wrapped_commands: HashSet::new(),
             }
         }
     }
@@ -1161,8 +1312,8 @@ mod active {
         flags: CompletionRequestOptions,
         /// The output completions.
         completions: CompletionReceiver,
-        /// Commands which we would have tried to load, if we had a parser.
-        needs_load: Vec<WString>,
+        /// Commands and their resolved case policies which need loading if we had a parser.
+        needs_load: Vec<(WString, bool)>,
         /// Table of completions conditions that have already been tested and the corresponding test
         /// results.
         condition_cache: HashMap<WString, bool>,
@@ -1183,7 +1334,12 @@ mod active {
             }
         }
 
-        fn perform_for_commandline(&mut self, cmdline: WString) {
+        fn perform_for_commandline(
+            &mut self,
+            commandline: &wstr,
+            cursor_pos: usize,
+            completion_end: usize,
+        ) {
             // Limit recursion, in case a user-defined completion has cycles, or the completion for "x"
             // wraps "A=B x" (#3474, #7344).  No need to do that when there is no parser: this happens only
             // for autosuggestions where we don't evaluate command substitutions or variable assignments.
@@ -1198,13 +1354,21 @@ mod active {
                 }
                 *level += 1;
             }
-            self.perform_for_commandline_impl(cmdline);
+            self.perform_for_commandline_impl(commandline, cursor_pos, completion_end);
             if let Some(parser) = self.ctx.maybe_parser() {
                 parser.libdata_mut().complete_recursion_level -= 1;
             }
         }
 
-        fn perform_for_commandline_impl(&mut self, cmdline: WString) {
+        fn perform_for_commandline_impl(
+            &mut self,
+            commandline: &wstr,
+            commandline_cursor: usize,
+            completion_end: usize,
+        ) {
+            // Match through the token end as before, but expose the entire command
+            // substitution and the real insertion point to completion scripts.
+            let cmdline = &commandline[..completion_end];
             let cursor_pos = cmdline.len();
             let is_autosuggest = self.flags.autosuggestion();
 
@@ -1262,11 +1426,12 @@ mod active {
                 return;
             };
 
-            let effective_cmdline = if tokens.len() == actual_token_count {
-                &cmdline
+            let bias = if tokens.len() == actual_token_count {
+                0
             } else {
-                &cmdline[first_token.offset()..]
+                first_token.offset()
             };
+            let effective_cmdline = &commandline[bias..];
 
             if tokens.last().unwrap().type_ == TokenType::Comment {
                 return;
@@ -1364,7 +1529,6 @@ mod active {
                 let mut arg_data = CustomArgData::new(&mut var_assignments);
                 arg_data.had_ddash = had_ddash;
 
-                let bias = cmdline.len() - effective_cmdline.len();
                 let command_range = SourceRange::new(cmd_tok.offset() - bias, cmd_tok.length());
 
                 let mut exp_command = cmd_tok.get_source(&cmdline).to_owned();
@@ -1389,6 +1553,7 @@ mod active {
                     self.walk_wrap_chain(
                         &exp_command,
                         effective_cmdline,
+                        commandline_cursor - bias,
                         command_range,
                         &mut arg_data,
                     );
@@ -1428,7 +1593,7 @@ mod active {
             self.completions.take()
         }
 
-        pub fn acquire_needs_load(&mut self) -> Vec<WString> {
+        pub fn acquire_needs_load(&mut self) -> Vec<(WString, bool)> {
             mem::take(&mut self.needs_load)
         }
 
@@ -1847,32 +2012,46 @@ mod active {
         // Return whether a command (which may be a command name or a full path)
         // matches a completion entry key.
         fn command_matches(cmd: &wstr, key: &CompletionEntryKey, case_sensitive: bool) -> bool {
+            let glob_question = key.name.contains('?')
+                && !fish_feature_flags::feature_test(fish_feature_flags::FeatureFlag::QuestionMarkNoGlob);
+            let wildcard_pattern = key.name.contains('*') || glob_question;
+            #[cfg(unix)]
+            let pattern: Cow<'_, wstr> = if wildcard_pattern {
+                Cow::Owned(unescape_wildcards(&key.name))
+            } else {
+                Cow::Borrowed(&key.name)
+            };
+            #[cfg(windows)]
+            let pattern: Cow<'_, wstr> = if key.is_path
+                && (wildcard_pattern || key.name.contains('\\'))
+            {
+                // Native backslashes separate path components, including before
+                // a wildcard; they are not wildcard escapes.
+                let mut pattern = key.name.clone();
+                for character in pattern.as_char_slice_mut() {
+                    *character = match *character {
+                        '\\' => '/',
+                        '*' => fish_widestring::ANY_STRING,
+                        '?' if glob_question => fish_widestring::ANY_CHAR,
+                        other => other,
+                    };
+                }
+                Cow::Owned(pattern)
+            } else if wildcard_pattern {
+                Cow::Owned(unescape_wildcards(&key.name))
+            } else {
+                Cow::Borrowed(&key.name)
+            };
             let matches = |name: &wstr| {
                 #[cfg(unix)]
                 {
                     let _ = case_sensitive;
-                    wildcard_match(name, &key.name, false)
+                    wildcard_match(name, &pattern, false)
                 }
                 #[cfg(windows)]
                 {
-                    fn normalize(path: &wstr, is_path: bool) -> std::borrow::Cow<'_, wstr> {
-                        if is_path && path.contains('\\') {
-                            let mut normalized = path.to_owned();
-                            for character in normalized.as_char_slice_mut() {
-                                if *character == '\\' {
-                                    *character = '/';
-                                }
-                            }
-                            std::borrow::Cow::Owned(normalized)
-                        } else {
-                            std::borrow::Cow::Borrowed(path)
-                        }
-                    }
                     crate::wildcard::wildcard_match_with_case_policy(
-                        &normalize(name, key.is_path),
-                        &normalize(&key.name, key.is_path),
-                        false,
-                        case_sensitive,
+                        name, &pattern, false, case_sensitive,
                     )
                 }
             };
@@ -1921,6 +2100,55 @@ mod active {
         ) -> Result<FileCompletionPolicy, CompletionOverflow> {
             let mut file_policy = FileCompletionPolicy::Inherit;
 
+            // A required argument owns this token even when it starts with '-'.
+            if use_switches && popt.char_at(0) == '-' {
+                let mut token_claimed = false;
+                let mut old_style_match = false;
+
+                // Old-style long options take precedence over short-option bundles.
+                for o in options {
+                    if o.typ == CompleteOptionType::SingleLong
+                        && param_match(o, popt)
+                        && self.conditions_test(&o.conditions)
+                    {
+                        old_style_match = true;
+                        if !o.argument_policy.requires_param && s.char_at(0) == '-' {
+                            continue;
+                        }
+                        if o.argument_policy.requires_param {
+                            token_claimed = true;
+                        }
+                        file_policy = file_policy.max(o.argument_policy.files);
+                        self.complete_from_args(s, &o.comp, o.desc.localize(), o.flags);
+                    }
+                }
+
+                if !old_style_match {
+                    let prev_short_opt_pos = self.short_option_pos(popt, options);
+                    for o in options {
+                        // Optional GNU-style arguments must be in the option's token.
+                        if !o.argument_policy.requires_param {
+                            continue;
+                        }
+                        let matches = if o.typ == CompleteOptionType::Short {
+                            prev_short_opt_pos.is_some_and(|pos| {
+                                pos + 1 == popt.len() && o.option.char_at(0) == popt.char_at(pos)
+                            })
+                        } else {
+                            o.typ == CompleteOptionType::DoubleLong && param_match(o, popt)
+                        };
+                        if matches && self.conditions_test(&o.conditions) {
+                            token_claimed = true;
+                            file_policy = file_policy.max(o.argument_policy.files);
+                            self.complete_from_args(s, &o.comp, o.desc.localize(), o.flags);
+                        }
+                    }
+                }
+                if token_claimed {
+                    return Ok(file_policy);
+                }
+            }
+
             let short_opt_pos = self.short_option_pos(s, options);
             // We want last_option_requires_param to default to false but distinguish between when
             // a previous completion has set it to false and when it has its default value.
@@ -1964,58 +2192,6 @@ mod active {
                                 for compl in &mut self.completions[first_new..] {
                                     compl.prepend_token_prefix(arg_prefix);
                                 }
-                            }
-                        }
-                    }
-                } else if popt.char_at(0) == '-' {
-                    // Set to true if we found a matching old-style switch.
-                    // Here we are testing the previous argument,
-                    // to see how we should complete the current argument
-                    let mut old_style_match = false;
-
-                    // If we are using old style long options, check for them first.
-                    for o in options {
-                        if o.typ == CompleteOptionType::SingleLong
-                            && param_match(o, popt)
-                            && self.conditions_test(&o.conditions)
-                        {
-                            old_style_match = true;
-                            if o.argument_policy.requires_param {
-                                token_claimed = true;
-                            }
-                            file_policy = file_policy.max(o.argument_policy.files);
-                            self.complete_from_args(s, &o.comp, o.desc.localize(), o.flags);
-                        }
-                    }
-
-                    // No old style option matched, or we are not using old style options. We check if
-                    // any short (or gnu style) options do.
-                    if !old_style_match {
-                        let prev_short_opt_pos = self.short_option_pos(popt, options);
-                        for o in options {
-                            // Gnu-style options with _optional_ arguments must be specified as a single
-                            // token, so that it can be differed from a regular argument.
-                            // Here we are testing the previous argument for a GNU-style match,
-                            // to see how we should complete the current argument
-                            if !o.argument_policy.requires_param {
-                                continue;
-                            }
-
-                            let mut r#match = false;
-                            if o.typ == CompleteOptionType::Short {
-                                if let Some(prev_short_opt_pos) = prev_short_opt_pos {
-                                    r#match = prev_short_opt_pos + 1 == popt.len()
-                                        && o.option.char_at(0) == popt.char_at(prev_short_opt_pos);
-                                }
-                            } else if o.typ == CompleteOptionType::DoubleLong {
-                                r#match = param_match(o, popt);
-                            }
-                            if r#match && self.conditions_test(&o.conditions) {
-                                if o.argument_policy.requires_param {
-                                    token_claimed = true;
-                                }
-                                file_policy = file_policy.max(o.argument_policy.files);
-                                self.complete_from_args(s, &o.comp, o.desc.localize(), o.flags);
                             }
                         }
                     }
@@ -2150,41 +2326,36 @@ mod active {
         fn complete_param_for_command(
             &mut self,
             cmd_orig: &wstr,
+            cmd_string: &CmdString,
             popt: &wstr,
             s: &wstr,
             use_switches: bool,
+            allow_autoload: bool,
         ) -> Result<FileCompletionPolicy, CompletionOverflow> {
             let mut file_policy = FileCompletionPolicy::Inherit;
 
-            let cmd_string = CmdString::new(cmd_orig, self.ctx.vars());
             let cmd_name = cmd_string.basename(cmd_orig);
 
-            #[cfg(unix)]
-            let lookup_command = cmd_name;
-            #[cfg(windows)]
-            let lookup_command = cmd_orig;
-            let cmd_exists = builtin_exists(cmd_name)
-                || function::exists_no_autoload(cmd_name)
-                || { path_get_path(lookup_command, self.ctx.vars()).is_some() };
-            if !cmd_exists {
-                // Do not load custom completions if the command does not exist
-                // This prevents errors caused during the execution of completion providers for
-                // tools that do not exist. Applies to both manual completions ("cm<TAB>", "cmd <TAB>")
-                // and automatic completions ("gi" autosuggestion provider -> git)
+            if !allow_autoload {
+                // Missing direct commands must not execute completion providers. Declared wrap
+                // targets may autoload metadata when the actual root command is available.
                 flog!(complete, "Skipping completions for non-existent command");
             } else if let Some(parser) = self.ctx.maybe_parser() {
-                complete_load(cmd_name, parser);
-            } else if !COMPLETION_AUTOLOADER
-                .lock()
-                .unwrap()
-                .has_attempted_autoload(cmd_name)
-            {
-                self.needs_load.push(cmd_name.to_owned());
+                complete_load(cmd_name, parser, cmd_string.case_sensitive);
+            } else {
+                // Native autoload hits and misses are revalidated against the real filesystem.
+                // A remembered attempt must not suppress main-thread reload after a file changes.
+                #[cfg(windows)]
+                self.needs_load.push((cmd_name.to_owned(), cmd_string.case_sensitive));
+                #[cfg(unix)]
+                if !COMPLETION_AUTOLOADER.lock().unwrap().has_attempted_autoload(cmd_name) {
+                    self.needs_load.push((cmd_name.to_owned(), cmd_string.case_sensitive));
+                }
             }
 
             // Make a list of lists of all options that we care about.
             let all_options: Vec<Arc<CompletionEntry>> =
-                Self::complete_entry_options_for_command(&cmd_string, cmd_name);
+                Self::complete_entry_options_for_command(cmd_string, cmd_name);
 
             // Now release the lock and test each option that we captured above. We have to do this outside
             // the lock because callouts (like the condition) may add or remove completions. See issue #2.
@@ -2440,16 +2611,68 @@ mod active {
         ///
         /// Returns `false` if unable to complete, `true` otherwise
         fn try_complete_user(&mut self, s: &wstr) -> bool {
-            #[cfg(any(target_os = "android", windows))]
+            #[cfg(target_os = "android")]
             {
-                // The getpwent() function does not exist on Android. A Linux user on Android isn't
-                // really a user - each installed app gets an UID assigned. Listing all UID:s is not
-                // possible without root access, and doing a ~USER type expansion does not make sense
-                // since every app is sandboxed and can't access each other.
-                // Native named-user homes are rejected by the expansion provider; Windows
-                // account names are not passwd entries and must not be synthesized here.
+                // Android app UIDs are not a meaningful inventory of named homes.
                 let _ = s;
                 return false;
+            }
+            #[cfg(windows)]
+            {
+                if !s.starts_with('~') {
+                    return false;
+                }
+                let Some(token) = unescape_string(
+                    s,
+                    UnescapeStringStyle::Script(UnescapeFlags {
+                        incomplete: true,
+                        ..Default::default()
+                    }),
+                ) else {
+                    return false;
+                };
+                if token.contains('/') {
+                    return false;
+                }
+                let user_name = &token[1..];
+                let Ok(current) = crate::native_services::accounts::current_account() else {
+                    return false;
+                };
+                let mut names = vec![format!("{}\\{}", current.domain, current.name)];
+                if user_name.contains('\\') {
+                    // Explicit domain accounts are resolved, never enumerated or guessed.
+                    names.push(user_name.to_string());
+                } else if let Ok(users) = crate::native_services::accounts::local_users() {
+                    names.extend(users.into_iter().map(|user| user.name));
+                }
+                names.sort();
+                names.dedup();
+                let mut result = false;
+                for name in names {
+                    if self.ctx.check_cancel() {
+                        break;
+                    }
+                    let name = fish_widestring::native_to_shell_text_owned(
+                        fish_widestring::str2wcstring(&name),
+                    );
+                    let Some(r#match) = StringFuzzyMatch::try_create(user_name, &name, true) else {
+                        continue;
+                    };
+                    if crate::native_services::accounts::profile_for_user(&name).is_err() {
+                        continue;
+                    }
+                    let mut flags = CompleteFlags::NO_SPACE;
+                    flags.replaces = Some(ReplacementScope::Token(Default::default()));
+                    flags.dont_escape_tildes();
+                    _ = self.completions.add(Completion::new(
+                        L!("~").to_owned() + &name[..],
+                        wgettext_fmt!(COMPLETE_USER_DESC, &name),
+                        r#match,
+                        flags,
+                    ));
+                    result = true;
+                }
+                return result;
             }
             #[cfg(all(unix, not(target_os = "android")))]
             {
@@ -2584,10 +2807,19 @@ mod active {
         }
 
         /// Complete a command by invoking user-specified completions.
-        fn complete_custom(&mut self, cmd: &wstr, cmdline: &wstr, ad: &mut CustomArgData) {
+        fn complete_custom(
+            &mut self,
+            cmd: &wstr,
+            cmdline: &wstr,
+            cursor_pos: usize,
+            ad: &mut CustomArgData,
+        ) {
             if self.ctx.check_cancel() {
                 return;
             }
+            // Conditions may inspect commandline or wrapper-local assignments. Share
+            // their answers only among options in this exact wrapped-command scope.
+            self.condition_cache.clear();
 
             let is_autosuggest = self.flags.autosuggestion();
             // Perhaps set a transient commandline so that custom completions
@@ -2598,20 +2830,40 @@ mod active {
                     .parser()
                     .libdata()
                     .transient_commandline
-                    .scoped_replace(Some(cmdline.to_owned()))
+                    .scoped_replace(Some(TransientCommandline {
+                        text: cmdline.to_owned(),
+                        cursor_pos,
+                    }))
             });
 
             // Maybe apply variable assignments.
             let block = self.apply_var_assignments(ad.var_assignments);
             if !self.ctx.check_cancel() {
+                let cmd_string = CmdString::new(cmd, self.ctx.vars());
+                let cmd_name = cmd_string.basename(cmd);
+                #[cfg(unix)]
+                let lookup_command = cmd_name;
+                #[cfg(windows)]
+                let lookup_command = cmd;
+                let allow_autoload = ad.root_command_exists
+                    || builtin_exists(cmd_name)
+                    || function::exists_no_autoload(cmd_name)
+                    || path_get_path(lookup_command, self.ctx.vars()).is_some();
+                if ad.wrap_depth == 0 {
+                    // Resolve root availability inside its variable-assignment scope. An existing
+                    // target of a missing root must not grant permission to deeper missing targets.
+                    ad.root_command_exists = allow_autoload;
+                }
                 // Invoke any custom completions for this command.
                 // Ignore overflow errors.
                 let file_policy = self
                     .complete_param_for_command(
                         cmd,
+                        &cmd_string,
                         &ad.previous_argument,
                         &ad.current_argument,
                         !ad.had_ddash,
+                        allow_autoload,
                     )
                     .unwrap_or_default();
                 // Across the wrap chain, the topmost command with an opinion wins.
@@ -2635,6 +2887,7 @@ mod active {
             &mut self,
             cmd: &wstr,
             cmdline: &wstr,
+            cursor_pos: usize,
             cmdrange: SourceRange,
             ad: &mut CustomArgData,
         ) {
@@ -2646,12 +2899,18 @@ mod active {
                 return;
             }
 
+            if !ad.active_wrapped_commands.insert(cmd.to_owned()) {
+                return;
+            }
+            let wrap_depth = ad.wrap_depth;
+            let mut ad = ScopeGuard::new(ad, |ad| {
+                ad.wrap_depth = wrap_depth;
+                ad.active_wrapped_commands.remove(cmd);
+            });
             // Extract command from the command line and invoke the receiver with it.
-            self.complete_custom(cmd, cmdline, ad);
+            self.complete_custom(cmd, cmdline, cursor_pos, &mut ad);
 
             let targets = complete_get_wrap_targets(cmd);
-            let wrap_depth = ad.wrap_depth;
-            let mut ad = ScopeGuard::new(ad, |ad| ad.wrap_depth = wrap_depth);
             ad.wrap_depth += 1;
 
             for wt in targets {
@@ -2689,16 +2948,26 @@ mod active {
                 else {
                     continue;
                 };
-
-                if !ad.visited_wrapped_commands.insert(wrapped_command.clone()) {
+                if ad.active_wrapped_commands.contains(&wrapped_command) {
                     continue;
                 }
+
+                let scope = (wrapped_command.clone(), ad.var_assignments.to_vec());
+                if !ad.visited_wrap_scopes.insert(scope) {
+                    continue;
+                }
+                ad.visited_wrapped_commands.insert(wrapped_command.clone());
 
                 // Construct a fake command line containing the wrap target.
                 // https://github.com/starkat99/widestring-rs/issues/37
                 let mut faux_commandline = cmdline.as_char_slice().to_vec();
                 faux_commandline.splice(std::ops::Range::from(cmdrange), wt.chars());
                 let faux_commandline = WString::from(faux_commandline);
+                // Argument completion is always after the command being replaced.
+                // Keep the insertion point attached to the same argument in the
+                // rewritten command line, including any text after the cursor.
+                debug_assert!(cursor_pos >= cmdrange.end());
+                let faux_cursor_pos = cursor_pos - cmdrange.length() + wt.len();
 
                 // Recurse with our new command and command line.
                 let faux_source_range = SourceRange::new(
@@ -2708,6 +2977,7 @@ mod active {
                 self.walk_wrap_chain(
                     &wrapped_command,
                     &faux_commandline,
+                    faux_cursor_pos,
                     faux_source_range,
                     ***ad,
                 );
@@ -2811,10 +3081,7 @@ mod active {
         fn new(cmd_orig: &wstr, vars: &dyn Environment) -> Self {
             let path_result = path_try_get_path(cmd_orig, vars);
             let found = path_result.err.is_none();
-            #[cfg(unix)]
             let mut path = path_result.path;
-            #[cfg(windows)]
-            let path = path_result.path;
             // Resolve commands that use relative paths because we compare full paths with "complete -p".
             #[cfg(unix)]
             if found && !path.is_empty() && path.as_char_slice().first() != Some(&'/') {
@@ -2837,6 +3104,12 @@ mod active {
             } else {
                 true
             };
+            #[cfg(windows)]
+            for character in path.as_char_slice_mut() {
+                if *character == '\\' {
+                    *character = '/';
+                }
+            }
 
             Self {
                 path,
@@ -2916,16 +3189,29 @@ mod active {
     /// Returns all completions of the command cmd.
     /// If `ctx` contains a parser, this will autoload functions and completions as needed.
     /// If it does not contain a parser, then any completions which need autoloading will be returned.
+    /// `cursor_pos` selects an insertion point in a full command line; `None` means
+    /// the end of the supplied text, as used by synthetic and background requests.
     pub fn complete(
         cmd_with_subcmds: &wstr,
+        cursor_pos: Option<usize>,
         flags: CompletionRequestOptions,
         ctx: &mut OperationContext<'_>,
-    ) -> (Vec<Completion>, Vec<WString>) {
-        // Determine the innermost subcommand.
-        let cmdsubst = get_cmdsubst_extent(cmd_with_subcmds, cmd_with_subcmds.len());
-        let cmd = cmd_with_subcmds[cmdsubst].to_owned();
+    ) -> (Vec<Completion>, Vec<(WString, bool)>) {
+        let cursor_pos = cursor_pos.unwrap_or(cmd_with_subcmds.len());
+        assert!(cursor_pos <= cmd_with_subcmds.len());
+        // Determine the innermost subcommand at the actual insertion point, not
+        // at the end of a possibly complete command substitution.
+        let cmdsubst = get_cmdsubst_extent(cmd_with_subcmds, cursor_pos);
+        let cursor_pos = cursor_pos - cmdsubst.start;
+        let cmd = &cmd_with_subcmds[cmdsubst];
+        let completion_end = if cursor_pos == cmd.len() {
+            cmd.len()
+        } else {
+            let (token, _) = get_token_extent(cmd, cursor_pos);
+            token.end.min(cmd.len())
+        };
         let mut completer = Completer::new(ctx, flags);
-        completer.perform_for_commandline(cmd);
+        completer.perform_for_commandline(cmd, cursor_pos, completion_end);
 
         (
             completer.acquire_completions(),
@@ -3017,7 +3303,7 @@ mod active {
             let do_complete = |ctx: &mut OperationContext<'_>,
                                cmd: &wstr,
                                flags: CompletionRequestOptions|
-             -> Vec<Completion> { complete(cmd, flags, ctx).0 };
+             -> Vec<Completion> { complete(cmd, None, flags, ctx).0 };
 
             let plain = CompletionRequestOptions::default();
             let autosuggest = CompletionRequestOptions::Autosuggestion;
@@ -3386,7 +3672,7 @@ mod active {
                 ));
             });
 
-            let completions = complete(L!("testabbrsonetwothree"), plain, ctx).0;
+            let completions = complete(L!("testabbrsonetwothree"), None, plain, ctx).0;
             assert_eq!(completions.len(), 2);
             // Abbreviations should not have a space after them.
             assert_eq!(completions[0].completion, L!("zero"));
@@ -3484,6 +3770,7 @@ mod active {
                 ($command:literal, $expected:literal, $vars:expr) => {
                     let mut comps = complete(
                         L!($command),
+                        None,
                         CompletionRequestOptions::Autosuggestion,
                         &mut OperationContext::background($vars, EXPANSION_LIMIT_BACKGROUND),
                     )
@@ -3504,6 +3791,7 @@ mod active {
                 ($command:literal, $expected:literal) => {
                     let mut comps = complete(
                         L!($command),
+                        None,
                         CompletionRequestOptions::default(),
                         &mut OperationContext::foreground(
                             parser,
@@ -3680,6 +3968,7 @@ mod active {
                 ($command:literal) => {
                     let comps = complete(
                         L!($command),
+                        None,
                         CompletionRequestOptions::Autosuggestion,
                         &mut OperationContext::empty(),
                     )
@@ -3701,3 +3990,81 @@ pub use active::*;
 #[cfg(all(test, windows))]
 #[path = "complete_metadata_tests.rs"]
 mod metadata_tests;
+
+#[cfg(test)]
+mod required_argument_tests {
+    use super::*;
+    use crate::{
+        builtins::BuiltinResultExt,
+        io::{IoChain, IoStreams, OutputStream, StringOutputStream},
+        parser::Parser,
+        tests::prelude::TestParser,
+    };
+    #[cfg(unix)]
+    use crate::tests::prelude::serial;
+
+    #[test]
+    #[cfg_attr(unix, serial)]
+    fn dash_prefixed_required_arguments() {
+        #[cfg(windows)]
+        {
+            if !crate::tests::prelude::run_native_test_in_child(
+                "complete::required_argument_tests::dash_prefixed_required_arguments",
+            ) {
+                return;
+            }
+            crate::threads::init();
+            crate::common::PROGRAM_NAME.set(L!("fish")).unwrap();
+        }
+        #[cfg(unix)]
+        crate::tests::prelude::test_init();
+
+        let mut test = TestParser::new();
+        let parser = &mut test.parser;
+        let setup = parser.eval(
+            L!("function __n7_arg_value; printf '%s\\n' $argv; end
+                complete -c __n7_arg_value -f
+                complete -c __n7_arg_value -s o -l output -r -f -a --value
+                complete -c __n7_arg_value -o target -r -f -a --value
+                complete -c __n7_arg_value -s a
+                complete -c __n7_arg_value -s b -r -f -a --value
+                complete -c __n7_arg_value -o ab -a --optional
+                complete -c __n7_arg_value -l mode -a --value
+                complete -c __n7_arg_value -l version"),
+            &IoChain::new(),
+        );
+        assert_eq!(setup.status.status_value(), 0);
+
+        let candidates = |parser: &mut Parser, text: &wstr| {
+            let mut out = OutputStream::String(StringOutputStream::new());
+            let mut err = OutputStream::String(StringOutputStream::new());
+            let chain = IoChain::new();
+            let mut streams = IoStreams::new(&mut out, &mut err, &chain);
+            let mut arguments = [L!("complete"), L!("-C"), text];
+            let result = crate::builtins::complete::complete(parser, &mut streams, &mut arguments);
+            assert_eq!(result.builtin_status_code(), 0, "{}", err.contents());
+            assert!(err.contents().is_empty(), "{}", err.contents());
+            out.contents()
+                .to_string()
+                .lines()
+                .map(|line| line.split('\t').next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        for (text, expected) in [
+            (L!("__n7_arg_value -o --v"), "--value"),
+            (L!("__n7_arg_value --output --v"), "--value"),
+            (L!("__n7_arg_value -target --v"), "--value"),
+            (L!("__n7_arg_value -ab --v"), "--version"),
+            (L!("__n7_arg_value --mode --v"), "--version"),
+            (L!("__n7_arg_value -o--v"), "-o--value"),
+            (L!("__n7_arg_value --mode=--v"), "--mode=--value"),
+        ] {
+            assert_eq!(candidates(parser, text), [expected.to_owned()], "{text}");
+        }
+        let cleanup = parser.eval(
+            L!("complete --erase --command __n7_arg_value; functions --erase __n7_arg_value"),
+            &IoChain::new(),
+        );
+        assert_eq!(cleanup.status.status_value(), 0);
+    }
+}

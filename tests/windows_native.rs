@@ -363,20 +363,8 @@ fn boundary(f: &Fixture) {
             "unsupported job launched native probe: {job}"
         );
     }
-    for extension in ["bat", "cmd", "ps1"] {
-        let path = f.root.join(format!("forbidden script.{extension}"));
-        let body = if extension == "ps1" {
-            format!(
-                "[IO.File]::WriteAllText('{}', 'launched')",
-                marker.display()
-            )
-        } else {
-            format!("@echo launched>\"{}\"\r\n", marker.display())
-        };
-        fs::write(&path, body).unwrap();
-        rejected(f.eval(&quote(path.to_str().unwrap())));
-        assert!(!marker.exists(), "script fallback ran {extension}");
-    }
+    // N8 owns admitted batch and PowerShell providers; they are no longer
+    // unsupported extensions. Keep this boundary on permanent exclusions.
     let mut code = OsString::from("echo '");
     use std::os::windows::ffi::OsStringExt;
     code.push(OsString::from_wide(&[0xd800]));

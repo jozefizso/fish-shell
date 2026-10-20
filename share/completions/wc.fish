@@ -12,7 +12,7 @@ else
     complete -c wc -s m -d "Print character count"
     complete -c wc -s l -d "Print number of lines"
     complete -c wc -s w -d "Print number of words"
-    switch (uname -s)
+    switch (__fish_uname)
         case FreeBSD NetBSD
             complete -c wc -s L -d "Print length of longest line"
         case OpenBSD

@@ -1,5 +1,88 @@
 # Binaries and shipped fish assets
 
+## N9 asset/tool implementation and remaining evidence boundary
+
+The file-level [N9 ledger](n9-assets.tsv) enumerates all 1,425 shipped files:
+277 functions, 1,097 completions, 13 prompts, 25 themes, 9 Python/web assets,
+`etc/config.fish` and the three `share/` root files. It records native-runtime,
+optional-native-tool, or genuinely platform-inapplicable dispositions, concrete
+consumer/dependency requirements and the owning behavior case. These are source
+dispositions, **not** substituted `native-tested` claims: `evidence=not-run` is
+intentional until native execution is recorded. `REQUIRED:` identifies 976
+still-uncovered applicable per-file consumer requirements; neither dormant source,
+load/parse success nor a static flag test closes a dynamic provider.
+The N9-ASSETS inventory family fails while any `REQUIRED:` row remains; executing
+the 314 static cases alone cannot certify the shipped collection.
+These are untriaged executable-coverage obligations, not 976 confirmed code defects
+or unavailable external dependencies. Aliases, static conditional tables, pure fish
+helpers and supported-but-unexercised native tool integrations remain among them.
+Their source classifications must be refined alongside real consumer assertions.
+
+Native extraction now uses private native temporary directories, native recursive
+directory creation and owned deletion on normal/error return. `funced` preserves
+editor argv, uses a fixed private `.fish` filename, compares complete text without
+external checksum tools, reads through native byte streams and atomically saves.
+Editor-reported cancellation and failed saves propagate failure and remove their
+workspace. Native cache readers/writers no longer require `cat`, `touch`, `chown`,
+`stat`, `mkdir`, `rm` or `/bin/sh`; generated-script caches retain the previous
+complete file on generator failure and invalidate on executable identity/mtime.
+`fish_delta` has a builtin stream fallback rather than mandatory `cat`.
+
+Account/process/network/drive consumers reuse N8 native services; Windows-oriented
+`cmd`, `cmdkey`, `reg` and `schtasks` completion paths no longer require WMIC,
+`awk`, `tail` or `tr` on native Windows. `open` passes literal items to native shell
+associations, while unsupported Unix signal/stop wrappers return explicit errors.
+All sample prompt date displays use the native timestamp service where applicable;
+Acidhub and SVN status formatting use fish builtins rather than coreutils.
+
+Native rustup completion providers use fish set membership and recursive globs,
+strip actual target suffixes rather than a Linux-only host suffix, keep toolchain
+option/value argv separate, and normalize native documentation paths. Its component
+and documentation consumers have real provisioned-rustup and absent-tool cases;
+no Unix `comm`, `sort`, `find` or temporary substitution protocol is required.
+Cargo dynamic probes first check the actual wrapped executable and do not invoke a
+JSON decoder when Cargo is absent. Python JSON readers explicitly use UTF-8; real
+manifest-feature/package and absent-Cargo consumers run against the existing native
+toolchain. Native parent traversal uses path primitives rather than splitting on
+Unix `/`; an actual nested npm manifest lookup covers drive/Unicode preservation.
+
+Optional Python tools require Python 3.8+ and probe actual interpreter versions,
+including native `python.exe` and the Python launcher. The web tool receives the
+calling image from `status fish-path`, uses its builtin formatter, binds loopback,
+retains random-key authorization and rejects non-whitelisted peers. Private
+redirect files are closed before browser access and removed in `finally`; input
+workers are cancellable, HTTP workers are joined, request reads are bounded, and
+owned fish/browser children are reaped. Native browser overrides use Windows argv
+quoting, not shell strings or colon splitting. The previous Python-3.12-only
+`delete_on_close` requirement is removed.
+
+Manual generation accepts real plain/gzip/bzip2/xz/lzma roff inputs, preserves UTF-8
+with legacy Latin-1 fallback, publishes complete scripts atomically and reports
+missing/corrupt input as failure. Native manual discovery uses explicit files or
+semicolon-separated `MANPATH`, never an invented Win32 manual inventory. Background
+generation uses N5 native disown with a private program copy owned/removed by the
+Python child; no shell-hosted stdin bridge must survive the initiating shell.
+Sphinx/catalog build ownership and matching packaged help remain with N9 help/N10.
+
+Authored tests are `tests/windows_n9/assets.rs` (13 families, including 314 actual
+static completion-flag consumers and real isolated clipboard consumers) and
+`tools.rs` (5 families, actual Python/manpage/browser/HTTP/lifetime consumers).
+They require the native Python floor and below-floor fixtures, Playwright with a
+native Edge/Chromium executable, all six native VCS dependencies (SVN also needs
+`svnadmin`/`svnversion`), and the existing fresh-logon clipboard fixture. No test,
+build or runtime pass is asserted by this implementation overlay.
+
+Helper files/directories now attach fs-owned capabilities to the existing N5/N8
+Job/caller lease protocol. Function return, error and Ctrl-C unwind release the
+owner, while accepted argv/env/descendant, cwd and redirected-file consumers retain
+their pre-resume acknowledgments. The detached updater explicitly calls
+`transfer-temp-file` only after successful disown, including the fast-completed-child
+case. Atomic writes check cancellation before reading and before commit instead of
+publishing a producer's partial EOF. The N9 probe drives real owned-console Ctrl-C
+through blocked `funced`, extraction, generated-cache and atomic-save workflows,
+then asserts child exit, prompt recovery, exact modes and resource cleanup. These
+are authored executable regressions, not an asserted native pass.
+
 ## Current N4 startup/core-assets overlay
 
 Native fish now supports normal config → ordered init commands → command/script/stdin execution;

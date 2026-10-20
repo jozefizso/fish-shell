@@ -121,6 +121,36 @@ will output to ``build/cargo/fish-docs/html/``. You can also run ``sphinx-build`
 
 will output HTML docs to ``/tmp/fish-doc``.
 
+``cargo xtask html-docs`` builds a host ``fish_indent`` for the platform running
+``xtask``, independent of a cross-compilation target selected for fish.
+Use ``cargo xtask html-docs --fish-indent /path/to/host/fish_indent`` to select
+an existing runnable formatter explicitly. On native Windows, use its ``.exe`` path.
+The documentation lexer receives the absolute formatter path through
+``FISH_INDENT_FOR_BUILDING_DOCS``; it does not require symlink privileges or a
+temporary PATH alias. Set the same environment variable when invoking
+``sphinx-build`` directly. Formatter failures are reported instead of silently
+producing empty highlighting.
+
+Maintainer Fluent rewrites have real CLI consumer regressions::
+
+    cargo test --locked -p xtask --test fluent_rewrite
+
+The Unicode rewrite is rendered by Fluent on both hosts. Native Windows also
+checks a destination held without delete sharing: replacement must fail, preserve
+the original, and remove the temporary file. Native ``Check`` requires both
+Windows cases to be discovered and executed without ignored cases.
+
+Gettext maintenance requires genuine ``msguniq``, ``msgmerge``, ``msgattrib``,
+``msgfmt`` and ``diff`` on the host PATH. Its real CLI/catalog regression is::
+
+    cargo test --locked -p xtask --test gettext_maintenance
+
+It checks read-only diffs, obsolete-row removal, Unicode/format preservation and
+GNU MO consumption. Native Windows file paths stay in Rust's native file I/O;
+GNU tools receive file handles and a generated template basename relative to
+its actual temporary directory, which may contain Unicode. No ASCII storage
+fallback or publisher wide-argv support is implied.
+
 After building them, you can open the HTML docs in a browser and see that it looks okay.
 
 

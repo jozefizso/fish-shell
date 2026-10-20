@@ -20,7 +20,7 @@ complete -c msgfmt -s P -l properties-input -d "Input files are in Java .propert
 complete -c msgfmt -l stringtable-input -d "Input files are in NeXTstep/GNUstep .strings syntax"
 complete -c msgfmt -s c -l check -d "Perform all the checks implied by --check-format, --check-header, --check-domain"
 complete -c msgfmt -l check-format -d "Check language dependent format strings"
-complete -c msgfmt -l chack-header -d "Verify presence and contents of the header entry"
+complete -c msgfmt -l check-header -d 'Verify presence and contents of the header entry'
 complete -c msgfmt -l check-domain -d "Check for conflicts between domain directives and the --output-file option"
 complete -c msgfmt -s C -l check-compatibility -d "Check that GNU msgfmt behaves like X/Open msgfmt"
 complete -c msgfmt -l check-accelerators -d "Check presence of keyboard accelerators for menu items"

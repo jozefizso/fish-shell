@@ -11,8 +11,18 @@ function __fish_sfdx_using_command
 end
 
 function __fish_sfdx_find_packagexml
-    # To find manifest (in other words package.xml)
-    printf '%s\n' (find . -type f -regex ".*/package.xml" | string sub -s 3)
+    set -l directory .
+    set -q argv[1]; and set directory $argv[1]
+    for entry in $directory/* $directory/.*
+        set -l name (path basename -- $entry)
+        contains -- $name . ..; and continue
+        test -L $entry; and continue
+        if test -d $entry
+            __fish_sfdx_find_packagexml $entry
+        else if test "$name" = package.xml; and test -f $entry
+            string replace -r '^\./' '' -- $entry
+        end
+    end
 end
 
 set -l sfdx_looking -c sfdx -n __fish_use_subcommand

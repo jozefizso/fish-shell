@@ -1,18 +1,21 @@
-# This function adjusts for options with arguments (-X, -W, etc.), ensures completions stop when a script/module is set (-c, -m, file, -)
+# Interpreter switches stop at the first script, module or command payload.
 function __fish_python_no_arg
-    set -l num 1
     set -l tokens (commandline -pxc)
-    set -l has_arg_list -X -W --check-hash-based-pycs
-    if contains -- - $tokens
-        set num (math $num - 1)
-    end
-    for has_arg in $has_arg_list
-        if contains -- $has_arg $tokens
-            set num (math $num + 1)
+    set -e tokens[1]
+    while set -q tokens[1]
+        switch $tokens[1]
+            case -X -W --check-hash-based-pycs
+                set -e tokens[1..2]
+            case -c -m
+                not set -q tokens[2]
+                return $status
+            case - -- '-c?*' '-m?*'
+                return 1
+            case '-*'
+                set -e tokens[1]
+            case '*'
+                return 1
         end
-    end
-    if test (__fish_number_of_cmd_args_wo_opts) -gt $num
-        return 1
     end
     return 0
 end
@@ -38,6 +41,6 @@ complete -c python3 -n __fish_python_no_arg -s q -d 'Don\'t print version and co
 complete -c python3 -n __fish_python_no_arg -s X -x -d 'Set implementation-specific option' -a 'faulthandler showrefcount tracemalloc showalloccount importtime dev utf8 pycache_prefix=PATH:'
 complete -c python3 -n __fish_python_no_arg -s b -d 'Issue warnings for possible misuse of `bytes` with `str`'
 complete -c python3 -n __fish_python_no_arg -o bb -d 'Issue errors for possible misuse of `bytes` with `str`'
-complete -c python3 -n __fish_python_no_arg -s m -d 'Run library module as a script (terminates option list)' -xa '(python3 -c "import pkgutil; print(\'\n\'.join([p[1] for p in pkgutil.iter_modules()]))")'
+complete -c python3 -n __fish_python_no_arg -s m -d 'Run library module as a script (terminates option list)' -xa '(command -sq python3; and command python3 -c "import pkgutil; print(\'\n\'.join([p[1] for p in pkgutil.iter_modules()]))" | string trim -r -c \r)'
 complete -c python3 -n __fish_python_no_arg -l check-hash-based-pycs -d 'Set pyc hash check mode' -xa "default always never"
 complete -c python3 -n __fish_python_no_arg -s I -d 'Run in isolated mode'

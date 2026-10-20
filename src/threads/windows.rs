@@ -41,12 +41,6 @@ unsafe extern "system" {
     fn SetEvent(event: RawHandle) -> i32;
     fn ResetEvent(event: RawHandle) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
-    fn WaitForMultipleObjects(
-        count: u32,
-        handles: *const RawHandle,
-        wait_all: i32,
-        milliseconds: u32,
-    ) -> u32;
     fn DuplicateHandle(
         source_process: RawHandle,
         source: RawHandle,
@@ -500,9 +494,9 @@ impl NativeRuntime {
                 cancellation.map_or(ptr::null_mut(), |token| token.handle().as_raw_handle()),
             ];
             let count = if cancellation.is_some() { 2 } else { 1 };
-            match unsafe {
-                WaitForMultipleObjects(count, handles.as_ptr(), 0, wait_milliseconds(remaining))
-            } {
+            match crate::console_windows::wait_for_evaluator_handles(
+                &handles[..count], wait_milliseconds(remaining),
+            )? {
                 WAIT_OBJECT_0 | WAIT_TIMEOUT => (),
                 value if value == WAIT_OBJECT_0 + 1 && cancellation.is_some() => {
                     return Err(io::Error::new(

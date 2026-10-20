@@ -313,11 +313,27 @@ impl Outputter {
         zelf
     }
 
+    /// String-only outputters intentionally generate control strings (e.g. set_color).
+    /// A retained native sink must actually be a VT-enabled console, not a redirected
+    /// file/pipe or a console whose host denied VT processing.
+    pub(crate) fn permits_terminal_controls(&self) -> bool {
+        #[cfg(windows)]
+        if let Some(handle) = &self.native_output {
+            let mut mode = 0;
+            return unsafe { GetConsoleMode(handle.as_raw_handle(), &mut mode) } != 0
+                && mode & 0x0004 != 0;
+        }
+        true
+    }
+
     pub(crate) fn write_command(&mut self, cmd: TerminalCommand<'_>) -> bool
     where
         Self: Sized,
     {
         use TerminalCommand::*;
+        if !self.permits_terminal_controls() {
+            return false;
+        }
         if is_dumb() {
             assert!(!matches!(cmd, CursorDown));
             return false;
@@ -771,15 +787,18 @@ impl DerefMut for BufferedOutputter<'_> {
 pub struct OutputterStyleWriter<'a> {
     out: &'a mut Outputter,
     param_count: u32,
+    controls: bool,
 }
 
 impl<'a> OutputterStyleWriter<'a> {
     const MAX_PARAMS: u32 = 16;
 
     fn new(out: &'a mut Outputter) -> Self {
+        let controls = out.permits_terminal_controls() && !is_dumb();
         Self {
             out,
             param_count: 0,
+            controls,
         }
     }
 
@@ -835,12 +854,18 @@ impl<'a> OutputterStyleWriter<'a> {
     }
 
     fn write_param_str(&mut self, count: u32, str: &[u8]) -> bool {
+        if !self.controls {
+            return false;
+        }
         self.prepare_for_params(count);
         self.out.write_bytes(str);
         true
     }
 
     fn write_param_fmt(&mut self, count: u32, args: std::fmt::Arguments<'_>) -> bool {
+        if !self.controls {
+            return false;
+        }
         self.prepare_for_params(count);
         crate::common::do_write_to_output(self.out, args);
         true
@@ -876,7 +901,7 @@ impl<'a> OutputterStyleWriter<'a> {
             return self.write_command(SgrTerminalCommand::SelectPaletteColor(paintable, idx));
         }
 
-        if only_grayscale() && color.is_grayscale() {
+        if only_grayscale() && !color.is_grayscale() {
             return false;
         }
 
@@ -920,6 +945,11 @@ impl<'a> Drop for OutputterStyleWriter<'a> {
         if self.param_count != 0 {
             self.out.write_bytes(b"m");
         }
+        if !self.controls {
+            // A denied write is not an observed terminal state. Force a reset if a
+            // foreground child later restores VT support on this retained console.
+            self.out.last = TextFace::unknown();
+        }
     }
 }
 
@@ -934,6 +964,32 @@ mod tests {
         Paintable::{Background, Foreground, Underline},
         SgrTerminalCommand::ExitAttributeMode,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn redirected_native_sink_denies_queries_and_styles() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fish-render-controls-{}-{}.bin",
+            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
+        let mut out = Outputter::new_buffering();
+        out.native_output = Some(file.into());
+        assert!(!out.permits_terminal_controls());
+        out.begin_buffering();
+        out.write_bytes(b"plain");
+        assert!(!out.write_command(super::TerminalCommand::QueryCursorPosition));
+        assert!(!out.write_command(super::TerminalCommand::QueryBackgroundColor));
+        assert!(!out.write_command(super::TerminalCommand::CursorDown));
+        assert!(!out.style_writer().write_command(super::SgrTerminalCommand::EnterBoldMode));
+        out.end_buffering();
+        out.flush().unwrap();
+        drop(out);
+        assert_eq!(std::fs::read(&path).unwrap(), b"plain");
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn sgr_combining() {

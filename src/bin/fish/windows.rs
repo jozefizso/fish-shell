@@ -101,6 +101,10 @@ fn run_shell() -> i32 {
         Ok(args) => args,
         Err(error) => return diagnostic(&format!("invalid native argument: {error}")),
     };
+    if args.get(1).is_some_and(|arg| arg == L!("--fish-native-resource-lease")) {
+        if args.len() != 2 { return diagnostic("resource keeper accepts no command or path arguments"); }
+        return fish::native_adapters::resource_lease_entrypoint();
+    }
     let mut refs: Vec<&wstr> = args.iter().map(|arg| arg.as_ref()).collect();
     const LONG: &[WOption<'static>] = &[
         wopt(L!("command"), RequiredArgument, 'c'),
@@ -178,7 +182,14 @@ fn run_shell() -> i32 {
             'P' => private = true,
             '\x03' => startup_profile_output = Some(options.woptarg.unwrap().to_owned()),
             'i' => force_interactive = true,
-            'h' => return diagnostic("help delivery requires N9"),
+            'h' => {
+                return match fish::print_help::help_text("fish")
+                    .and_then(|text| NativeOutput::stdout()?.write_all(text.as_bytes()))
+                {
+                    Ok(()) => 0,
+                    Err(error) => diagnostic(&format!("cannot show help: {error}")),
+                };
+            }
             '\x01' => print_rusage_self = true,
             ':' => {
                 return diagnostic(&format!(

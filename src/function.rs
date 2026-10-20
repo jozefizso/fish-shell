@@ -33,6 +33,17 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
+static FUNCTION_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Definition mutations invalidate reader work without treating every binding as an edit.
+pub(crate) fn function_revision() -> u64 {
+    FUNCTION_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn function_changed() {
+    FUNCTION_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
 #[derive(Clone)]
 pub struct FunctionProperties {
     /// Reference to the node, along with the parsed source.
@@ -85,6 +96,7 @@ impl FunctionSet {
     /// Return true if successful, false if it doesn't exist.
     fn remove(&mut self, name: &wstr) -> bool {
         if self.funcs.remove(name).is_some() {
+            function_changed();
             event::remove_function_handlers(name);
             true
         } else {
@@ -208,6 +220,7 @@ pub fn add(name: WString, props: Arc<FunctionProperties>) {
 
     // Create and store a new function.
     let existing = funcset.funcs.insert(name, props);
+    function_changed();
     assert!(
         existing.is_none(),
         "Function should not already be present in the table"
@@ -283,7 +296,9 @@ pub fn remove(name: &wstr) {
     let mut funcset = FUNCTION_SET.lock().unwrap();
     funcset.remove(name);
     // Prevent (re-)autoloading this function.
-    funcset.autoload_tombstones.insert(name.to_owned());
+    if funcset.autoload_tombstones.insert(name.to_owned()) {
+        function_changed();
+    }
 }
 
 // Return the body of a function (everything after the header, up to but not including the 'end').
@@ -325,6 +340,7 @@ pub(crate) fn set_desc(name: &wstr, desc: WString, parser: &mut Parser) {
         // the translation files available to fish.
         new_props.description = LocalizableString::from_external_source(desc);
         funcset.funcs.insert(name.to_owned(), Arc::new(new_props));
+        function_changed();
     }
 }
 
@@ -347,7 +363,10 @@ pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
 
     // Note this will NOT overwrite an existing function with the new name.
     // TODO: rationalize if this behavior is desired.
-    funcset.funcs.entry(new_name).or_insert(Arc::new(new_props));
+    if let std::collections::hash_map::Entry::Vacant(entry) = funcset.funcs.entry(new_name) {
+        entry.insert(Arc::new(new_props));
+        function_changed();
+    }
     true
 }
 
@@ -357,18 +376,25 @@ pub fn copy(name: &wstr, new_name: WString, parser: &Parser) -> bool {
 
 pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
     let mut names = HashSet::<WString>::new();
-    let funcset = FUNCTION_SET.lock().unwrap();
-    autoload_names(&mut names, vars, get_hidden);
-    for name in funcset.funcs.keys() {
-        // Maybe skip hidden.
-        if !get_hidden && (name.is_empty() || name.char_at(0) == '_') {
-            continue;
+    {
+        let funcset = FUNCTION_SET.lock().unwrap();
+        for name in funcset.funcs.keys() {
+            // Maybe skip hidden.
+            if !get_hidden && (name.is_empty() || name.char_at(0) == '_') {
+                continue;
+            }
+            names.insert(name.clone());
         }
-        names.insert(name.clone());
     }
+    // Do not hold the function-definition lock across filesystem discovery.
+    autoload_names(&mut names, vars, get_hidden);
 
-    for name in crate::autoload::Asset::iter() {
-        let Some(bname) = name.strip_prefix("functions/") else {
+    #[cfg(all(unix, debug_assertions))]
+    let (embedded_names, prefix) = (crate::autoload::FunctionNames::iter(), "");
+    #[cfg(not(all(unix, debug_assertions)))]
+    let (embedded_names, prefix) = (crate::autoload::Asset::iter(), "functions/");
+    for name in embedded_names {
+        let Some(bname) = name.strip_prefix(prefix) else {
             continue;
         };
         if !get_hidden && (bname.is_empty() || bname.starts_with('_')) {
@@ -388,7 +414,11 @@ pub fn get_names(get_hidden: bool, vars: &dyn Environment) -> Vec<WString> {
 pub fn invalidate_path() {
     // Remove all autoloaded functions and update the autoload path.
     let mut funcset = FUNCTION_SET.lock().unwrap();
+    let previous_count = funcset.funcs.len();
     funcset.funcs.retain(|_, props| !props.is_autoload.load());
+    if funcset.funcs.len() != previous_count {
+        function_changed();
+    }
     funcset.autoloader.clear();
 }
 

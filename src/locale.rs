@@ -5,7 +5,25 @@ use std::{ffi::CStr, sync::Mutex};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{configure_native_locale, format_history_timestamp};
+pub use windows::{configure_native_locale, format_history_timestamp, native_locale_names};
+
+/// Capture the Windows user's message locale without changing the CRT locale.
+#[cfg(windows)]
+pub fn native_message_locale() -> &'static str {
+    use std::sync::LazyLock;
+    static NAME: LazyLock<String> = LazyLock::new(|| {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetUserDefaultLocaleName(name: *mut u16, capacity: i32) -> i32;
+        }
+        let mut name = [0u16; 85];
+        let count = unsafe { GetUserDefaultLocaleName(name.as_mut_ptr(), name.len() as i32) };
+        assert!(count > 0, "cannot discover native message locale: {}", std::io::Error::last_os_error());
+        String::from_utf16(&name[..count as usize - 1])
+            .expect("Windows returned invalid locale UTF-16")
+    });
+    &NAME
+}
 
 /// Lock guarding libc `setlocale()` or `localeconv()` calls to avoid races.
 pub(crate) static LOCALE_LOCK: Mutex<()> = Mutex::new(());

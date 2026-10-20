@@ -1,5 +1,34 @@
 # Text, regex, numeric parsing, and localization
 
+## N9 catalog/help implementation overlay (verification pending)
+
+Native dispatch now configures the existing Fluent/gettext owners at startup and on locale
+variable changes. `status language` is available with `localize-messages`; explicit command
+selection wins until unset. Otherwise a C/POSIX message locale disables translation,
+`LANGUAGE` supplies the catalog list, and LC_ALL > LC_MESSAGES > LANG supplies the locale.
+With no explicit controls, `GetUserDefaultLocaleName` is captured as the native default.
+POSIX and native hyphenated names normalize to the existing catalog IDs. Region fallback
+is deterministic. The CRT remains C; N4's explicit numeric/time consumers are unchanged.
+
+Requested gettext generation now fails when `msgfmt` is absent instead of emitting an empty
+release map, and generated include paths escape native Windows separators. Requested
+`embed-manpages` requires Sphinx and generates both man pages and plain-text help under
+`fish-docs/help`. The explicit `--no-default-features` profile is English-only and can use
+external version-matched help. Installed resources live at `share/doc/fish/help`, with
+`fish-help-version` equal to the executable's build version and Sphinx's `cmds/*.txt` layout.
+Default embedded resources and external resources are selected by the current executable,
+not a fish on PATH. Native binary, builtin and function help needs no man, pager or shell.
+`status native-help 'fish#description'` selects a local heading fragment.
+
+`tests/windows_n9/locale.rs` supplies the unified N9 locale gate; the process-isolated
+`catalog_probe.rs` exercises actual non-English catalogs, precedence, fallback, Unicode
+arguments, missing-variable/key errors and post-error cache use. Help cases relocate all
+three binaries to a Unicode installation, put another actual fish first on PATH, exercise
+local sections and missing resources, and compare requested versus reported build features.
+Minimal-profile positive help tests require real generated Sphinx data via
+`FISH_N9_HELP_DIR` (or the resolved build help directory). These changes do not establish
+an executed gate or full N9 closure; the historical audits below predate this implementation.
+
 ## Current N4 numeric/time locale overlay
 
 `locale/windows.rs` now implements exported LC_ALL > category > LANG selection using NLS numeric

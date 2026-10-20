@@ -1,5 +1,6 @@
 # localization: skip(private)
 function __fish_print_hostnames -d "Print a list of known hostnames"
+    set -l native_host_status 0
     # This function used to primarily query `getent hosts` and only read from `/etc/hosts` if
     # `getent` did not exist or `getent hosts` failed, based off the (documented) assumption that
     # the former *might* return more hosts than the latter, which has never been officially noted
@@ -8,10 +9,19 @@ function __fish_print_hostnames -d "Print a list of known hostnames"
     # order is now reversed and `getent hosts` is only used if the hosts file is not found at
     # `/etc/hosts` for portability reasons.
 
-    __fish_print_hostnames_from_hosts (
-        test -r /etc/hosts && read -z </etc/hosts | string replace -r '#.*$' ''
-        or type -q getent && getent hosts 2>/dev/null
-    )
+    if builtin -q __fish_native_services
+        builtin __fish_native_services hostname
+        set native_host_status $status
+        builtin __fish_native_services hosts
+        if test $status -ne 0
+            set native_host_status 1
+        end
+    else
+        __fish_print_hostnames_from_hosts (
+            test -r /etc/hosts && read -z </etc/hosts | string replace -r '#.*$' ''
+            or type -q getent && getent hosts 2>/dev/null
+        )
+    end
 
     # Print nfs servers from /etc/fstab
     if test -r /etc/fstab
@@ -49,6 +59,21 @@ function __fish_print_hostnames -d "Print a list of known hostnames"
         end
     end
 
+    # An explicit -F also applies to the external client, without an ssh alias.
+    # Direct provider calls have no completion command line to inspect.
+    if set -l ssh_tokens (commandline -cpx 2>/dev/null)
+        if set -q ssh_tokens[1]
+            set -l client (path basename -- $ssh_tokens[1] | string lower)
+            if contains -- $client ssh ssh.exe scp scp.exe sftp sftp.exe ssh-copy-id sshfs
+                if argparse -i 'F=' -- $ssh_tokens 2>/dev/null
+                    if set -q _flag_F[-1]
+                        set ssh_config $_flag_F[-1]
+                    end
+                end
+            end
+        end
+    end
+
     # Extract ssh config paths from Include option
     function _ssh_include --argument-names ssh_config
         # Relative paths in Include directive use /etc/ssh or ~/.ssh depending on
@@ -79,8 +104,9 @@ function __fish_print_hostnames -d "Print a list of known hostnames"
                 set path (string replace -r '\${([^}]+)}' '$1' $path)
                 set -l expanded_path
                 # Scope "relative" paths in accordance to ssh path resolution
-                if string match -qrv '^[~/]' $path
-                    set path $relative_path/$path
+                set -l unquoted_path (string unescape -- $path)
+                if not string match -rq '^(~|/|[$]|[A-Za-z]:[\\\\/]|\\\\\\\\)' -- "$unquoted_path"
+                    set path (string escape -- $relative_path)/$path
                 end
                 # Use `eval` to expand paths (eg ~/.ssh/../test/* to /home/<user>/test/file1 /home/<user>/test/file2),
                 # and `set` will prevent "No matches for wildcard" messages
@@ -134,7 +160,7 @@ function __fish_print_hostnames -d "Print a list of known hostnames"
         string match -v -r '^\s*[!*|@#]' | string replace -rf '^\s*(\S+) .*' '$1' |
         string split ',' | string replace -r '\[?([^\]]+).*' '$1'
 
-    return 0
+    return $native_host_status
 end
 
 function __fish_print_hostnames_from_hosts -d "Extract hostnames from hosts file entries"

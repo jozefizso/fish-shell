@@ -4,26 +4,22 @@
 # to run the hg command (-R or --repository).  If that is on the commandline,
 # this function echoes the given path and returns 0.  Otherwise, it returns 1.
 function __fish_hg_get_repo
-    set -l cmdline (commandline -p)
-    if set -l match (string match -r -- "(-R|--repository) +([^ ]+)" $cmdline)
-        echo $match[3]
-        return 0
-    else
-        return 1
-    end
+    set -l tokens (commandline -xpc)
+    set -e tokens[1]
+    argparse -i 'R/repository=' -- $tokens 2>/dev/null; or return 1
+    set -q _flag_repository[-1]; or return 1
+    printf '%s\n' $_flag_repository[-1]
 end
 
 # Mercurial also has a global switch to specify a directory to which to switch
 # before running the command (--cwd).  If it is on the commandline, this
 # function echoes the given path and returns 0.  Otherwise, it returns 1.
 function __fish_hg_get_cwd
-    set -l cmdline (commandline -p)
-    if set -l match (string match -r -- "--cwd +([^ ]+)" $cmdline)
-        echo $match[2]
-        return 0
-    else
-        return 1
-    end
+    set -l tokens (commandline -xpc)
+    set -e tokens[1]
+    argparse -i 'cwd=' -- $tokens 2>/dev/null; or return 1
+    set -q _flag_cwd[-1]; or return 1
+    printf '%s\n' $_flag_cwd[-1]
 end
 
 function __fish_hg
@@ -348,7 +344,7 @@ function __fish_hg_get_command
     for token in $cmdline
         # if the last token was a switch that takes an argument, we just skip
         # the current token
-        if string match -r -q -- "-R|--repository|--cwd|--config|--encoding|--encodingmode|--color|--pager" $lasttoken
+        if contains -- "$lasttoken" -R --repository --cwd --config --encoding --encodingmode --color --pager
             set lasttoken ""
             continue
         end

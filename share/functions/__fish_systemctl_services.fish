@@ -1,8 +1,6 @@
 # localization: skip(private)
 function __fish_systemctl_services
-    if not type -q systemctl
-        return
-    end
+    command -sq systemctl; or return 127
 
     # We don't want to complete with ANSI color codes
     set -lu SYSTEMD_COLORS

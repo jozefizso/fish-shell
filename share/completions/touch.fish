@@ -21,7 +21,7 @@ if __fish_supports_version touch
     complete touch -l help -d "display help"
     complete touch -l version -d "display version"
 else # not GNU
-    set -l uname (uname -s)
+    set -l uname (__fish_uname)
     contains $uname Darwin DragonFly FreeBSD
     and complete touch -s A -d "adjust timestamps by relative value [-][hh]mm]SS" -x
     contains $uname Darwin DragonFly FreeBSD NetBSD

@@ -126,3 +126,63 @@ fn native_clear_session_restores_foreign_predecessor() {
         "undoing our repeat must restore the actual intervening foreign generation, not an obsolete baseline"
     );
 }
+
+#[test]
+fn native_reader_history_snapshot_is_owned_revision_cached_and_pending_aware() {
+    if !crate::threads::isolated_test(concat!(module_path!(), "::native_reader_history_snapshot_is_owned_revision_cached_and_pending_aware")) {
+        return;
+    }
+    let source = History::new_with_directory(HistoryId::Memory(MemoryHistoryId::PrivateMode), None);
+    source.add(item(L!("first"), 1), false);
+    let revision = source.revision();
+    let snapshot = source.reader_snapshot();
+    assert!(Arc::ptr_eq(&snapshot, &source.reader_snapshot()));
+    assert_eq!(snapshot.get_history(), vec![L!("first").to_owned()]);
+    source.size();
+    source.get_history();
+    source.resolve_pending();
+    assert_eq!(source.revision(), revision, "ordinary reads or no-op resolve changed revision");
+    source.add(item(L!("pending"), 2), true);
+    let pending = source.reader_snapshot();
+    assert_eq!(pending.get_history(), vec![L!("first").to_owned()]);
+    let before_resolve = source.revision();
+    source.resolve_pending();
+    assert_ne!(source.revision(), before_resolve);
+    assert_eq!(source.reader_snapshot().get_history(), vec![L!("pending").to_owned(), L!("first").to_owned()]);
+    source.remove(L!("first"));
+    assert_eq!(source.reader_snapshot().get_history(), vec![L!("pending").to_owned()]);
+    assert_eq!(snapshot.get_history(), vec![L!("first").to_owned()], "mutation rewrote a worker's pinned history");
+}
+
+#[test]
+fn native_history_search_cancels_between_nonmatching_entries() {
+    if !crate::threads::isolated_test(concat!(module_path!(), "::native_history_search_cancels_between_nonmatching_entries")) {
+        return;
+    }
+    let source = History::new_with_directory(HistoryId::Memory(MemoryHistoryId::BuiltinRead), None);
+    for index in 0..128 {
+        let command = WString::from(format!("entry-{index}").as_str());
+        source.imp().add(item(&command, index + 1), false, false);
+    }
+    let mut search = HistorySearch::new_with(
+        source.reader_snapshot(), L!("absent").to_owned(), SearchType::Prefix, SearchFlags::default(), 0,
+    );
+    let checks = std::cell::Cell::new(0);
+    let cancel = || {
+        checks.set(checks.get() + 1);
+        checks.get() >= 7
+    };
+    assert!(!search.go_to_next_match_with_cancel(SearchDirection::Backward, &cancel));
+    assert_eq!(checks.get(), 7, "cancellation was not checked per scanned entry");
+    let mut search = HistorySearch::new_with(
+        source.reader_snapshot(), L!("entry-").to_owned(), SearchType::Prefix, SearchFlags::default(), 0,
+    );
+    assert!(search.go_to_next_match(SearchDirection::Backward));
+    assert_eq!(search.current_string(), L!("entry-127"));
+    for _ in 0..32 {
+        assert!(search.go_to_next_match(SearchDirection::Backward));
+    }
+    checks.set(0);
+    search.search_forward_with_cancel(128, &cancel);
+    assert_eq!(checks.get(), 7, "forward search ignored cancellation");
+}

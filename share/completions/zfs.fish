@@ -16,7 +16,7 @@
 
 set -l OS ""
 set -l freebsd_version ""
-switch (uname)
+switch (__fish_uname)
     case Linux
         set OS Linux
     case Darwin
@@ -35,7 +35,10 @@ end
 # now includes FreeBSD 13 and above.
 if not type -q __fish_is_openzfs
     function __fish_is_openzfs --inherit-variable freebsd_version --inherit-variable OS
-        test $OS = Linux || test $OS = FreeBSD -a $freebsd_version -gt 1300000
+        if test "$OS" = Linux
+            return 0
+        end
+        test "$OS" = FreeBSD; and test "$freebsd_version" -gt 1300000
     end
 end
 
@@ -306,22 +309,26 @@ function __fish_zfs_list_permissions -V OS
         echo -e "casesensitivity\tCase sensitivity (sensitive, insensitive, mixed)"
     end
     # Permissions set; if none are found, or if permission sets are not supported, no output is expected, even an error
+    command -sq zfs; and command -sq zpool; or return 1
     for i in (zpool list -o name -H)
         zfs allow $i
     end | string match -r '@[[:alnum:]]*' | sort -u
 end
 
 function __fish_print_zfs_bookmarks -d "Lists ZFS bookmarks, if the feature is enabled"
+    command -sq zfs; or return 1
     if __fish_is_zfs_feature_enabled 'feature@bookmarks'
         zfs list -t bookmark -o name -H
     end
 end
 
 function __fish_print_zfs_filesystems -d "Lists ZFS filesystems"
+    command -sq zfs; or return 1
     zfs list -t filesystem -o name -H
 end
 
 function __fish_print_zfs_volumes -d "Lists ZFS volumes"
+    command -sq zfs; or return 1
     zfs list -t volume -o name -H
 end
 

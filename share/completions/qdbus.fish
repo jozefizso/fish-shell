@@ -1,4 +1,6 @@
 function __fish_qdbus_complete
+    command -sq qdbus
+    or return 127
     argparse system 'bus=' literal help -- (commandline --cut-at-cursor --tokens-expanded) 2>/dev/null
     or return
     if set -q _flag_help
@@ -12,6 +14,7 @@ function __fish_qdbus_complete
     if test $argc -le 3
         # avoid completion of property value
         qdbus $qdbus_flags $argv[2] $argv[3] | string replace --regex '^(?<kind>property\ (read)?(write)?|signal|method( Q_NOREPLY)?) (?<type>(\{.+\})|([^\ ]+)) (?<name>[^\(]+)(?<arguments>\(.+?\))?' '$name\t$kind $type $arguments' | string trim
+        return $pipestatus[1]
     end
 end
 

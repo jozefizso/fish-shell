@@ -164,7 +164,10 @@ pub fn format_localized(id: &str, args: &FluentArgs) -> LocalizedMessage {
         let Some(message) = bundle.get_message(id) else {
             continue;
         };
-        let pattern = message.value().expect("Message has no value.");
+        let Some(pattern) = message.value() else {
+            drop(bundle_precedence);
+            panic!("Message '{id}' has no value.");
+        };
         let value = bundle.format_pattern(pattern, Some(args), &mut errors);
         // NOTE: Unused arguments are not considered errors.
         if !errors.is_empty() {
@@ -175,10 +178,12 @@ pub fn format_localized(id: &str, args: &FluentArgs) -> LocalizedMessage {
             for error in errors {
                 _ = writeln!(error_message, "{error}");
             }
+            drop(bundle_precedence);
             panic!("{error_message}");
         }
         return value;
     }
+    drop(bundle_precedence);
     panic!("Message '{id}' not available in any catalog.")
 }
 

@@ -2,7 +2,10 @@
 complete -f tuned-adm
 
 #get profile list
-set profiles (tuned-adm list 2>&1 < /dev/null  | awk  '{print $2}' | tail -n +2 | head -n -1)
+set -l profiles
+if command -sq tuned-adm; and command -sq awk; and command -sq tail; and command -sq head
+    set profiles (command tuned-adm list 2>&1 < /dev/null | awk '{print $2}' | tail -n +2 | head -n -1)
+end
 
 # all tuned-adm actions
 set -l actions list available profiles active off profile profile_info recommend verify auto_profile profile_mode

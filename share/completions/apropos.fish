@@ -27,7 +27,7 @@ if apropos --version &>/dev/null
     complete -x -c apropos -s s -l sections -l section -d "Search only these sections (colon-separated)"
     complete -x -c apropos -s L -l locale -a "(command -sq locale; and locale -a)" -d "Set locale"
 else
-    set -l uname (uname -s)
+    set -l uname (__fish_uname)
     complete apropos -s s -d 'specify manual section' -x # common option
 
     contains $uname Darwin

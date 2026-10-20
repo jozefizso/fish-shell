@@ -68,6 +68,9 @@ function funced --description 'Edit function definition'
     set -l tmpdir (__fish_mktemp_relative -d fish-funced)
     or return 1
     set -l tmpname $tmpdir/$funcname.fish
+    if builtin -q __fish_native_fs
+        set tmpname $tmpdir/function.fish
+    end
 
     set -l writepath
 
@@ -75,26 +78,50 @@ function funced --description 'Edit function definition'
         echo $init >$tmpname
     else if functions --details -- $funcname | string match --invert --quiet --regex '^(?:-|stdin|embedded:.*)$'
         set writepath (functions --details -- $funcname)
-        # Use cat here rather than cp to avoid copying permissions
-        command cat "$writepath" >$tmpname
+        if builtin -q __fish_native_fs
+            __fish_native_fs read "$writepath" >$tmpname
+        else
+            command cat "$writepath" >$tmpname
+        end
     else if set -l path (functions --details -- $funcname | string match -rg '^embedded:(.*)$')
         status get-file $path >$tmpname
     else
         functions -- $funcname >$tmpname
     end
+    set -l stat $status
+    if test $stat != 0
+        if builtin -q __fish_native_fs
+            __fish_native_fs remove-temp-directory $tmpdir
+        else
+            command rm -f $tmpname
+            rmdir $tmpdir
+        end
+        return $stat
+    end
 
     # Repeatedly edit until it either parses successfully, or the user cancels
     # If the editor command itself fails, we assume the user cancelled or the file
     # could not be edited, and we do not try again
-    set -l checksum (__fish_md5 "$tmpname")
+    set -l checksum
+    if builtin -q __fish_native_fs
+        set checksum (string collect --no-trim-newlines <$tmpname)
+    else
+        set checksum (__fish_md5 "$tmpname")
+    end
     while true
         if not $editor $tmpname
             echo (_ "Editing failed or was cancelled")
+            set stat 1
         else
             # Verify the checksum (if present) to detect potential problems
             # with the editor command
             if set -q checksum[1]
-                set -l new_checksum (__fish_md5 "$tmpname")
+                set -l new_checksum
+                if builtin -q __fish_native_fs
+                    set new_checksum (string collect --no-trim-newlines <$tmpname)
+                else
+                    set new_checksum (__fish_md5 "$tmpname")
+                end
                 if test "$new_checksum" = "$checksum"
                     echo (_ "Editor exited but the function was not modified")
                     echo (_ "If the editor is still running, check if it waits for completion, maybe a '--wait' option?")
@@ -118,10 +145,13 @@ function funced --description 'Edit function definition'
                     continue
                 else if not contains $response {N,n}{O,o,}
                     echo "I don't understand '$response', assuming 'Yes'"
-                    sleep 2
+                    if not builtin -q __fish_native_fs
+                        sleep 2
+                    end
                     continue
                 end
                 echo (_ "Cancelled function editing")
+                set stat 1
             else if test -n "$writepath"
                 if not set -q _flag_save
                     echo (_ "Warning: the file containing this function has not been saved. Changes may be lost when fish is closed.")
@@ -138,26 +168,45 @@ function funced --description 'Edit function definition'
                 if set -q _flag_save
                     # try to write the file back
                     # cp preserves existing permissions, though it might overwrite the owner
-                    if cp $tmpname "$writepath" 2>&1
+                    set -l saved false
+                    if builtin -q __fish_native_fs
+                        __fish_native_fs atomic-write "$writepath" <$tmpname
+                        and set saved true
+                    else if cp $tmpname "$writepath" 2>&1
+                        set saved true
+                    end
+                    if $saved
                         printf (_ "Function saved to %s") "$writepath"
                         echo
                         # read it back again - this ensures that the output of `functions --details` is correct
                         source "$writepath"
+                        set stat $status
                     else
                         echo (_ "Saving to original location failed; saving to user configuration instead.")
                         set writepath $__fish_config_dir/functions/(path basename "$writepath")
-                        if cp $tmpname "$writepath"
+                        set saved false
+                        if builtin -q __fish_native_fs
+                            __fish_native_fs mkdir (path dirname -- "$writepath")
+                            and __fish_native_fs atomic-write "$writepath" <$tmpname
+                            and set saved true
+                        else if cp $tmpname "$writepath"
+                            set saved true
+                        end
+                        if $saved
                             printf (_ "Function saved to %s") "$writepath"
                             echo
                             # read it back again - this ensures that the output of `functions --details` is correct
                             source "$writepath"
+                            set stat $status
                         else
                             echo (_ "Saving to user configuration failed. Changes may be lost when fish is closed.")
+                            set stat 1
                         end
                     end
                 end
             else if set -q _flag_save
                 funcsave $funcname
+                set stat $status
             else
                 printf (_ "Run funcsave %s to save this function to the configuration directory.") $funcname
                 echo
@@ -166,8 +215,11 @@ function funced --description 'Edit function definition'
         break
     end
 
-    set -l stat $status
-    command rm $tmpname >/dev/null
-    and rmdir $tmpdir >/dev/null
+    if builtin -q __fish_native_fs
+        __fish_native_fs remove-temp-directory $tmpdir
+    else
+        command rm $tmpname >/dev/null
+        and rmdir $tmpdir >/dev/null
+    end
     return $stat
 end

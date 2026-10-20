@@ -1,5 +1,24 @@
 # localization: tier3
 function __fish_complete_ftp --argument-names ftp
+    if __fish_is_windows_command $ftp
+        complete -c $ftp -xa "(__fish_print_hostnames)" -d Hostname
+        complete -c $ftp -s v -d 'Suppress remote server responses'
+        complete -c $ftp -s d -d 'Enable debugging'
+        complete -c $ftp -s i -d 'Disable interactive prompting'
+        complete -c $ftp -s n -d 'Suppress automatic login'
+        complete -c $ftp -s g -d 'Disable file name globbing'
+        complete -c $ftp -s a -d 'Bind data connection using any local interface'
+        complete -c $ftp -s A -d 'Log in anonymously'
+        complete -c $ftp -o s: -d 'UTF-8 command file'
+        complete -c $ftp -f -n 'string match -q -- "-s:*" (commandline -ct)' \
+            -a '(__fish_complete_path (string sub -s 4 -- (commandline -ct)) | string replace -r -- "^" "-s:")'
+        complete -c $ftp -o x: -x -d 'Send buffer size'
+        complete -c $ftp -o r: -x -d 'Receive buffer size'
+        complete -c $ftp -o b: -x -d 'Asynchronous buffer count'
+        complete -c $ftp -o w: -x -d 'Transfer buffer size'
+        complete -c $ftp -s '?' -d 'Display help'
+        return
+    end
     # Common across all ftp implementations
     complete -c $ftp -xa "(__fish_print_hostnames)" -d Hostname
     complete -c $ftp -s 4 -d 'Use IPv4 only'
@@ -13,7 +32,7 @@ function __fish_complete_ftp --argument-names ftp
     complete -c $ftp -s t -d 'Enable packet tracing'
     complete -c $ftp -s n -d 'Disable autologin'
 
-    switch (uname -s)
+    switch (__fish_uname -s)
         case FreeBSD NetBSD OpenBSD
             complete -c $ftp -s o -d "Set output for auto-fetched files"
             complete -c $ftp -s a -d "Anonymous login"
@@ -22,13 +41,13 @@ function __fish_complete_ftp --argument-names ftp
             complete -c $ftp -s s -d 'Local address to bind to' -xa "(__fish_print_addresses)"
     end
 
-    switch (uname -s)
+    switch (__fish_uname -s)
         case FreeBSD NetBSD Linux
             complete -c $ftp -s N -d "Specify netrc file" -r
             complete -c $ftp -s v -d 'Enable verbose and progress meter'
     end
 
-    switch (uname -s)
+    switch (__fish_uname -s)
         case FreeBSD NetBSD
             complete -c $ftp -s f -d "Force cache reload"
             complete -c $ftp -s q -d "Seconds to wait before quitting stalled connection" -x
@@ -38,7 +57,7 @@ function __fish_complete_ftp --argument-names ftp
             complete -c $ftp -s V -d 'Disable verbose and progress meter'
     end
 
-    switch (uname -s)
+    switch (__fish_uname -s)
         case NetBSD
             complete -c $ftp -s x -d "Set buffer size" -x
         case OpenBSD

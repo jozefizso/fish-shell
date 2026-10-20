@@ -1,5 +1,145 @@
 # Build, installation, packaging, and documentation
 
+## Native x64 ZIP command and evidence contract
+
+`build_tools/native.ps1` is the native MSVC build/check/package/install/remove
+entrypoint. It runs real Cargo/Sphinx/SDK executables by argument arrays and
+propagates nonzero child status. It does not call `.sh` files or implement a
+second evaluator. Existing CMake/Unix/Linux/macOS/MSYS release hosts retain their
+separate contracts. `.github/workflows/windows-release.yml` builds unsigned ZIPs;
+it neither signs nor publishes an authorized release, and it does not claim N11.
+
+Declared baseline: x64 Windows `10.0.26300`, local NTFS, SDK `10.0.26100.0`,
+MSVC x64 SDK developer environment, Rust `1.85.0` and current stable, debug/release,
+and `default`/`minimal` feature profiles. Existing N1 UNC capability limitations
+remain unchanged. Native console/ConPTY evidence does not certify Windows
+Terminal GUI versions, other Windows builds/filesystems or ARM64.
+The dedicated restricted-user CI runner label is `fish-native-n10`, with
+`windows-26300`; an unavailable fixture is a blocked gate, not a successful skip.
+
+`default` uses the actual Cargo defaults (`embed-manpages`, `localize-messages`).
+Build requires native Sphinx/Python plus gettext `msgfmt`; missing/failing tools
+are fatal. `minimal` passes `--no-default-features` explicitly and uses English.
+Both ZIPs install version-matched help; packaging therefore requires Sphinx even
+when the runtime does not embed help. The Sphinx Python dependency set is
+`pyproject.toml`'s dependency set. Neither Python, gettext nor Sphinx is mandatory
+at shell startup. Python 3.8+ is an optional invoked-user-tool dependency.
+
+Layout: `bin/{fish,fish_indent,fish_key_reader}.exe`, `share/fish/` (the full
+shipped share tree), `etc/fish/config.fish`, `share/doc/fish/` (text help, COPYING,
+license text, notices and dependency-license files). Default catalogs are
+embedded PHF/gettext and Fluent resources, not runtime gettext DLLs. Minimal
+installed help lives under `share/doc/fish/help`, with `fish-help-version`
+matching the actual executable version. Runtime discovery is executable-relative
+and remains independent of user-state discovery and conflicting PATH binaries.
+
+`-C target-feature=+crt-static` and `PCRE2_SYS_STATIC=1` select static MSVC CRT
+and static PCRE2-32 (UTF-32, AMD64); `dumpbin /dependents` rejects undeployed
+non-system imports. Windows system/UCRT API DLLs remain OS prerequisites.
+Build with a redistribution-permitted licensed MSVC toolchain and preserve
+applicable CRT redistribution terms. Only release ZIPs are a distribution channel;
+debug binaries remain local test artifacts, not redistributable debug-CRT packages.
+`Package -Configuration debug` is rejected explicitly. Both debug/release native
+test harnesses execute the same extracted **release** ZIP for artifact/install gates.
+The package includes dependency license expressions/source links plus available
+license/notice files from Cargo's locked package sources, including vendored
+PCRE2 notices, and the project's combined `license.rst`. Keep corresponding
+source archives available through the release source channel; the ZIP is not
+a substitute for source-license obligations.
+
+`build_tools/windows_resource.rs`, included by `build.rs`, uses SDK `rc.exe` to
+link FileVersion/ProductVersion metadata into all three actual binaries.
+Version selection remains `fish_build_helper::version::acquire_version`:
+Git describe when available, the package version for no-Git source archives.
+Packaging reads actual `fish --version`, validates PE resources and AMD64 headers,
+records revision/toolchain/SDK/profile/features/lockfile hash/imports in
+`build-inputs.json`, and hashes actual source/resource/build-tool inputs in
+`source-inputs.json` (including dirty/no-Git inputs, not version equality alone).
+Every shipped file is hashed in schema-1 `package-manifest.json`. ZIP entries
+have ordinal order and fixed 1980 timestamps. There is deliberately **no**
+byte-reproducibility claim: compiler/linker debug paths, PE/linker behavior and
+dependency generators can vary. N10 compares declared build-input records across
+same-input builds; retain artifact hashes separately rather than inferring byte
+identity from version equality.
+
+Install verifies exact tracked files, hashes and version metadata in a sibling
+staging directory before a same-parent rename into a **new** version destination.
+Upgrade is side-by-side: select the new version explicitly, then remove the old
+version. Removal refuses modified/untracked contents, reparse points and active
+locks. Late deletion failures report the named `.removing-*` remainder and return
+nonzero. No operation edits PATH/Terminal/login-shell settings or independent
+LocalAppData/XDG/HOME config, history, universal variables or caches. README's
+native section is the user-visible extraction/relocation/version-selection and
+optional PATH/Windows Terminal procedure.
+
+### Exact N10 cases and prerequisites
+
+`tests/windows_n10.rs` discovers exactly three nonignored Rust test entrypoints:
+
+| Gate | Exact case | Implemented assertions |
+| --- | --- | --- |
+| N10-ARTIFACT | `n10_artifact` | Actual ZIP manifest/hashes/resources; three executable/version/help entrypoints; installed source-independent resources with conflicting PATH; PCRE2/printf/formatter; real installed key reader in ConPTY with restored modes; live DLL module paths with a process handshake; relocation; input-record comparison; state-preserving removal. |
+| N10-INSTALL | `n10_install` | Required declared clean restricted-user fixture; prior supported ZIP; side-by-side upgrade; existing/denied destination failures; held Windows file lock; corrupt/partial input; untracked-file refusal; state preservation and reinstall consumption. |
+| N10-MATRIX | `n10_matrix` | Real corrupt archive-validation failure, real Cargo metadata through the production captured-suite function from outside the workspace, and real Cargo compiler-wrapper launch failure propagated through native orchestration; full matrix evidence is CI, not inferred from this case. |
+
+Required environment (no absent-fixture skips):
+
+- `FISH_N10_PWSH`: absolute native PowerShell 7.4+ executable.
+- `FISH_N10_ARCHIVE`: actual ZIP produced by `-Action Package`.
+- `FISH_N10_REBUILT_ARCHIVE`: distinct same-input package build used for declared
+  metadata comparison (not a duplicate path or an inferred byte-identity result).
+- `FISH_N10_PRIOR_ARCHIVE`: distinct prior **supported** package with this manifest
+  and resource contract; a current package renamed to pretend it is prior is not evidence.
+- `FISH_N10_CLEAN_MACHINE=1`: external fixture provisioning attestation. Setting the
+  variable on a developer workstation does not create clean-machine evidence.
+- `FISH_N10_DENIED_PARENT`: existing directory whose ACL denies the fixture user
+  installation writes; fixture ownership/provisioning must permit independent cleanup.
+- Existing N1–N9 UNC/security/console/optional-tool fixtures remain required by the
+  complete native check path. Both profile-matched debug and release binaries are required.
+
+From the native SDK environment, after building both configurations and packaging
+the selected feature profile twice to distinct output directories:
+
+```powershell
+pwsh -NoProfile -File build_tools/native.ps1 -Action Build -Configuration debug -Features default
+pwsh -NoProfile -File build_tools/native.ps1 -Action Package -Configuration release -Features default -OutputDirectory D:\fish-n10\first
+pwsh -NoProfile -File build_tools/native.ps1 -Action Package -Configuration release -Features default -OutputDirectory D:\fish-n10\second
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
+$env:PCRE2_SYS_STATIC = '1'
+cargo test --locked --target x86_64-pc-windows-msvc --test windows_n10 -- --list
+cargo test --locked --target x86_64-pc-windows-msvc --test windows_n10 -- --nocapture
+pwsh -NoProfile -File build_tools/native.ps1 -Action Check -Configuration release -Features default
+```
+
+Set the required environment to the produced ZIPs and actual provisioned fixtures
+before the test commands. Repeat both `debug` and `release`, for `minimal` (with
+Cargo `--no-default-features`) and `default`, on minimum/current native toolchains.
+`Check` first builds all real binary/helper targets in both matching configurations,
+discovers mandatory suites, rejects zero-case/ignored suite cases, executes root
+units/doctests and runtime-crate tests, and never downgrades selected features.
+Minimal `Check` explicitly generates version-matched Sphinx text under the resolved
+target directory's `fish-docs/help` and supplies `FISH_N9_HELP_DIR`; it therefore
+requires native Sphinx independently of the disabled embedded-help feature.
+Captured Cargo processes use the source workspace as their explicit working
+directory, including when the entrypoint is invoked from another directory.
+Hidden untracked files participate in manifest/removal validation; the artifact
+gate sets a real Windows hidden attribute and asserts removal refusal preserves
+that file's contents.
+N8–N10 require exactly three discovered/executed Rust cases each. N8 also pins
+ARGV/TOOLS/POLICY family counts to 11/20/49 over both profiles. N9 pins thirteen
+asset and five tool families over both profiles and the locale marker to 19 localized/embedded-help
+or 21 English/installed-help cases.
+Captured native suite stdout/stderr is retained under
+`$CARGO_TARGET_DIR/n10-check-results/<configuration>-<features>/*.log`
+(or `target/n10-check-results` without an override), including real loaded DLL
+paths. The release workflow retains those logs, existing family evidence and
+native unsigned ZIPs/hash sidecars, and runs Unix workspace/extraction/documentation
+tools on their explicitly separate supported host.
+No build, test, clean-machine, upgrade-matrix or publication result is asserted by
+this implementation record. Missing prior packages/clean restricted fixtures,
+Windows Terminal GUI sequence evidence or SDK/tool dependencies block the relevant
+release gate; they are not N11 signoff or optional signing work.
+
 ## Current N4 runtime-layout overlay
 
 `env/config_paths.rs` now selects native executable-relative install assets, distinct from

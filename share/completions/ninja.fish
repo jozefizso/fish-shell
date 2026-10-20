@@ -1,4 +1,6 @@
 function __fish_ninja
+    command -sq ninja
+    or return 127
     set -l saved_args $argv
     set -l dir .
     if argparse -u C/dir= -- (commandline -xpc)
@@ -8,11 +10,18 @@ end
 
 function __fish_print_ninja_tools
     __fish_ninja -t list | string match -v '*:' | string replace -r '\s+(\w+).*' '$1'
+    return $pipestatus[1]
 end
 
 function __fish_print_ninja_targets
     __fish_ninja -t targets 2>/dev/null | string replace -r ':.*' ''
+    set -l targets_status $pipestatus[1]
     __fish_ninja -t targets all 2>/dev/null | string replace -r ':.*' '' | string match -e -r '\.(?:o|so|a)$'
+    set -l all_status $pipestatus[1]
+    if test $targets_status -ne 0
+        return $targets_status
+    end
+    return $all_status
 end
 complete -c ninja -f -a '(__fish_print_ninja_targets)' -d target
 complete -x -c ninja -s t -x -a "(__fish_print_ninja_tools)" -d subtool

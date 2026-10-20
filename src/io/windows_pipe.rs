@@ -54,12 +54,6 @@ unsafe extern "system" {
     fn SetEvent(event: RawHandle) -> i32;
     fn ResetEvent(event: RawHandle) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
-    fn WaitForMultipleObjects(
-        count: u32,
-        handles: *const RawHandle,
-        all: i32,
-        milliseconds: u32,
-    ) -> u32;
     fn ReadFile(
         handle: RawHandle,
         buffer: *mut u8,
@@ -193,20 +187,18 @@ impl Event {
         if !crate::threads::is_registered_main_thread() {
             return self.wait();
         }
-        let Some(cancellation) = crate::signal::console_control_cancellation() else {
-            return self.wait();
-        };
+        let cancellation = crate::signal::console_control_cancellation();
         let handles = [
             self.0.as_raw_handle(),
-            cancellation.handle().as_raw_handle(),
+            cancellation.as_ref().map_or(ptr::null_mut(), |token| token.handle().as_raw_handle()),
         ];
-        match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) } {
+        let count = if cancellation.is_some() { 2 } else { 1 };
+        match crate::console_windows::wait_for_evaluator_handles(&handles[..count], INFINITE)? {
             0 => Ok(()),
-            1 => Err(io::Error::new(
+            1 if cancellation.is_some() => Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "native IO interrupted by console control",
             )),
-            u32::MAX => Err(io::Error::last_os_error()),
             result => Err(io::Error::other(format!(
                 "unexpected native IO wait result {result}"
             ))),

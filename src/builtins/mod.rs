@@ -33,9 +33,13 @@ pub mod history;
 pub mod jobs;
 pub mod math;
 #[cfg(windows)]
+pub mod native_adapter;
+#[cfg(windows)]
 pub mod native_clipboard;
 #[cfg(windows)]
 pub mod native_fs;
+#[cfg(windows)]
+pub mod native_services;
 pub mod path;
 pub mod printf;
 pub mod pwd;
@@ -51,7 +55,7 @@ pub mod string;
 pub mod test;
 pub mod r#true;
 pub mod r#type;
-#[cfg(unix)]
+#[cfg_attr(windows, path = "ulimit_windows.rs")]
 pub mod ulimit;
 pub mod wait;
 

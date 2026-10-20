@@ -1,5 +1,9 @@
 # localization: skip(private)
 function __fish_cursor_xterm -d 'Set cursor (xterm)'
+    # Cursor-shape controls are meaningful only on a capable terminal stream.
+    # In particular, a redirected binding/helper must not contaminate its data.
+    isatty stdout; and test "$TERM" != dumb
+    or return 1
     set -l shape $argv[1]
 
     switch "$shape"

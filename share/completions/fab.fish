@@ -1,9 +1,20 @@
 function __fish_complete_fab_tasks
-    for task in (fab -l)
+    command -sq fab
+    or return 127
+    set -l tasks (command fab -l)
+    set -l producer_status $status
+    for task in $tasks
         set -l _matched (string match -r "^ +([^ ]*) *([^ ]?.*)" $task)
 
         printf "%s\t%s\n" "$_matched[2]" "$_matched[3]"
     end
+    return $producer_status
+end
+
+function __fish_complete_fab_shortlist
+    command -sq fab
+    or return 127
+    command fab --shortlist
 end
 
 # tasks
@@ -11,7 +22,7 @@ complete -x -c fab -a "(__fish_complete_fab_tasks)"
 
 # options
 complete -c fab -s h -l help -d "show this help message and exit"
-complete -x -c fab -s d -l display -a "(fab --shortlist)" -d "print detailed info about command NAME"
+complete -x -c fab -s d -l display -a "(__fish_complete_fab_shortlist)" -d "print detailed info about command NAME"
 complete -x -c fab -s F -l list-format -a "short normal nested" -d "formats --list, choices: short, normal, nested"
 complete -c fab -s I -l initial-password-prompt -d "Force password prompt up-front"
 complete -c fab -l initial-sudo-password-prompt -d "Force sudo password prompt up-front"

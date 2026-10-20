@@ -18,6 +18,7 @@
 //! expansion, etc.
 
 use super::{
+    context::{ContextStamp, ReaderContext},
     history_search::{ReaderHistorySearch, SearchMode, smartcase_flags},
     iothreads::{self, Debouncers},
     word_motion::{MoveWordDir, MoveWordStateMachine, MoveWordStyle},
@@ -61,7 +62,7 @@ use crate::{
     io::IoChain,
     key::ViewportPosition,
     kill::{kill_add, kill_replace, kill_yank, kill_yank_rotate},
-    operation_context::{OperationContext, get_bg_context},
+    operation_context::OperationContext,
     pager::{PageRendering, Pager, SelectionMotion},
     parse_constants::{ParseIssue, ParseTreeFlags, SourceRange},
     parse_util::{
@@ -315,6 +316,7 @@ fn querying_allowed(vars: &dyn Environment) -> bool {
             #[cfg(windows)]
             {
                 crate::console_windows::current_session().is_some()
+                    && Outputter::stdoutput().borrow().permits_terminal_controls()
             }
         }
 }
@@ -489,6 +491,9 @@ pub fn reader_push<'a>(
             "a native foreground child owns console input",
         ));
     }
+    if let Some(reader) = current_data() {
+        reader.request_context.invalidate();
+    }
     let debouncers = Debouncers::new()?;
     let inputfd = conf.inputfd;
     #[cfg(windows)]
@@ -545,8 +550,10 @@ pub fn reader_push<'a>(
 /// Return to previous reader environment.
 pub fn reader_pop() {
     assert_is_main_thread();
+    current_data().unwrap().request_context.invalidate();
     reader_data_stack().pop().unwrap();
     if let Some(new_reader) = current_data() {
+        new_reader.request_context.invalidate();
         new_reader
             .screen
             .reset_abandoning_line(Some(termsize_last().width()));
@@ -838,6 +845,8 @@ pub struct ReaderData {
     history_search: ReaderHistorySearch,
     /// In-pager history search.
     history_pager: Option<Range<usize>>,
+    /// A search-field edit is scheduled with the parser's current immutable context.
+    history_pager_refresh_needed: bool,
 
     /// The cursor selection mode.
     cursor_selection_mode: CursorSelectionMode,
@@ -873,10 +882,13 @@ pub struct ReaderData {
     last_jump_direction: JumpDirection,
     last_jump_precision: JumpPrecision,
 
-    /// The text of the most recent asynchronous highlight and autosuggestion requests.
-    /// If these differs from the text of the command line, then we must kick off a new request.
-    in_flight_highlight_request: WString,
-    in_flight_autosuggest_request: WString,
+    /// Reader-local context shared by immutable worker requests.
+    request_context: ReaderContext,
+    in_flight_highlight_request: Option<ContextStamp>,
+    in_flight_autosuggest_request: Option<ContextStamp>,
+    applied_highlight_context: Option<ContextStamp>,
+    applied_autosuggestion_context: Option<ContextStamp>,
+    in_flight_history_pager_request: Option<ContextStamp>,
 
     rls: Option<ReadlineLoopState>,
 
@@ -906,23 +918,71 @@ impl<'a> std::ops::DerefMut for Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    fn refresh_request_context(&mut self) -> ContextStamp {
+        self.data.request_context.refresh(
+            self.parser.vars(),
+            self.data.command_line.text(),
+            self.data.command_line.position(),
+            &self.data.history,
+        )
+    }
+    #[cfg(windows)]
+    pub(super) fn reconcile_evaluation_input(
+        &mut self,
+        guard: &crate::console_windows::EvaluationInputGuard,
+    ) -> bool {
+        if !guard.cancelled() {
+            return false;
+        }
+        // A yield without an input reset is not a new edit. Invalidating its
+        // worker generation would continually requeue results ahead of the
+        // still-pending keys, preventing the real consumer from draining them.
+        if guard.take_input_reset() {
+            self.request_context.invalidate();
+            let had_paste = self.input_data.paste_buffer.is_some();
+            self.input_data.clear_evaluation_cancelled_input();
+            native_reader_interrupt();
+            if reader_reading_interrupted(self) != 0 {
+                self.enqueue_interrupt_key();
+            } else {
+                self.push_front(CharEvent::from_check_exit());
+            }
+            if had_paste {
+                self.push_front(CharEvent::from_readline(ReadlineCmd::EndUndoGroup, vec![]));
+            }
+        }
+        true
+    }
+
+
     /// Return the variable set used for e.g. command duration.
     fn vars(&self) -> &dyn Environment {
         self.parser.vars()
     }
 
     pub(super) fn service_debounced_results(&mut self) {
-        // Some iothread operation completed, indicating a debouncer has a new result.
-        // Check all of them.
-        if let Some(r) = self.debouncers.autosuggestions.take_result() {
+        #[cfg(windows)]
+        let native_evaluation = crate::console_windows::begin_evaluation_input();
+        // Drain every source before invoking callbacks. A cancelled callback
+        // must not leave the shared notification permanently signaled.
+        let autosuggestion = self.debouncers.autosuggestions.take_result();
+        let highlight = self.debouncers.highlight.take_result();
+        let history_pager = self.debouncers.history_pager.take_result();
+        if let Some(r) = autosuggestion {
             self.autosuggest_completed(r);
         }
-        if let Some(r) = self.debouncers.highlight.take_result() {
+        #[cfg(windows)]
+        if self.reconcile_evaluation_input(&native_evaluation) {
+            return;
+        }
+        if let Some(r) = highlight {
             self.highlight_completed(r);
         }
-        if let Some(cb) = self.debouncers.history_pager.take_result() {
+        if let Some(cb) = history_pager {
             cb(self);
         }
+        #[cfg(windows)]
+        self.reconcile_evaluation_input(&native_evaluation);
     }
 }
 
@@ -1005,15 +1065,29 @@ pub fn reader_read_interactive(parser: &mut Parser) -> io::Result<()> {
         }
 
         // Got a command. Disable tty protocols while we execute it.
+        #[cfg(unix)]
         tty.disable_tty_protocols();
         reader.clear(EditableLineTag::Commandline);
         reader.update_buff_pos(EditableLineTag::Commandline, None);
         BufferedOutputter::new(Outputter::stdoutput()).write_command(Osc133CommandStart(&command));
+        #[cfg(windows)]
+        tty.enable_tty_protocols();
+        #[cfg(windows)]
+        let native_preexec = crate::console_windows::begin_evaluation_input();
         event::fire_generic(
             reader.parser,
             L!("fish_preexec").to_owned(),
             vec![command.clone()],
         );
+        #[cfg(windows)]
+        {
+            let cancelled = reader.reconcile_evaluation_input(&native_preexec);
+            drop(native_preexec);
+            tty.disable_tty_protocols();
+            if cancelled {
+                continue;
+            }
+        }
         let eval_res = reader_run_command(reader.parser, &command)?;
         signal_clear_cancel();
         if !eval_res.no_status {
@@ -1027,7 +1101,16 @@ pub fn reader_read_interactive(parser: &mut Parser) -> io::Result<()> {
         BufferedOutputter::new(Outputter::stdoutput()).write_command(Osc133CommandFinished {
             exit_status: reader.parser.last_status(),
         });
+        #[cfg(windows)]
+        tty.enable_tty_protocols();
+        #[cfg(windows)]
+        let native_postexec = crate::console_windows::begin_evaluation_input();
         event::fire_generic(reader.parser, L!("fish_postexec").to_owned(), vec![command]);
+        #[cfg(windows)]
+        {
+            reader.reconcile_evaluation_input(&native_postexec);
+            drop(native_postexec);
+        }
         // Allow any pending history items to be returned in the history array.
         reader.history.resolve_pending();
 
@@ -1244,8 +1327,16 @@ pub fn reader_change_history(history_id: HistoryId) {
     };
 
     data.history.save();
+    data.clear_transient_edit();
     data.history = History::new(history_id);
-    commandline_state_snapshot().history = Some(data.history.clone());
+    data.history_search.reset();
+    data.autosuggestion.clear();
+    data.saved_autosuggestion = None;
+    data.clear_pager();
+    data.request_context.invalidate();
+    // History changes may undo a transient search edit during a script callback.
+    // Publish that edit too, or callback reconciliation restores the stale match.
+    data.update_commandline_state();
 }
 
 #[cfg(windows)]
@@ -1607,6 +1698,7 @@ impl ReaderData {
             history,
             history_search: Default::default(),
             history_pager: None,
+            history_pager_refresh_needed: false,
             cursor_selection_mode: CursorSelectionMode::Exclusive,
             cursor_end_mode: CursorEndMode::Exclusive,
             selection: Default::default(),
@@ -1622,8 +1714,12 @@ impl ReaderData {
             last_jump_target: Default::default(),
             last_jump_direction: JumpDirection::Forward,
             last_jump_precision: JumpPrecision::To,
+            request_context: ReaderContext::default(),
             in_flight_highlight_request: Default::default(),
             in_flight_autosuggest_request: Default::default(),
+            applied_highlight_context: None,
+            applied_autosuggestion_context: None,
+            in_flight_history_pager_request: None,
             rls: None,
             debouncers,
         }))
@@ -1691,6 +1787,7 @@ impl ReaderData {
             EditableLineTag::Commandline => {
                 // Update the gen count.
                 GENERATION.fetch_add(1, Ordering::Relaxed);
+                self.request_context.invalidate();
                 let saved_autosuggestion = self.saved_autosuggestion.take();
                 use AutosuggestionUpdate::*;
                 match autosuggestion_update {
@@ -1707,11 +1804,8 @@ impl ReaderData {
             }
             EditableLineTag::SearchField => {
                 if self.history_pager.is_some() {
-                    self.fill_history_pager(
-                        HistoryPagerInvocation::Anew,
-                        Some(SelectionMotion::Next),
-                        SearchDirection::Backward,
-                    );
+                    self.request_context.invalidate();
+                    self.history_pager_refresh_needed = true;
                     return;
                 }
                 if self.pager.is_empty() {
@@ -2101,7 +2195,8 @@ impl<'a> Reader<'a> {
         let (full_line, autosuggested_range) = if self.conf.in_silent_mode {
             (
                 Cow::Owned(
-                    wstr::from_char_slice(&[get_obfuscation_read_char()]).repeat(cmd_line.len()),
+                    wstr::from_char_slice(&[get_obfuscation_read_char()])
+                        .repeat(cmd_line.char_count()),
                 ),
                 None,
             )
@@ -2160,6 +2255,27 @@ impl<'a> Reader<'a> {
                 *color = selection_color;
             }
         }
+        // Silent input exposes editing scalars, not the number of byte-marker
+        // characters needed to preserve a reserved Unicode scalar internally.
+        #[cfg(windows)]
+        let position = if self.conf.in_silent_mode {
+            let mut source = 0;
+            let mut target = 0;
+            let mut cursor = 0;
+            while source < cmd_line.len() {
+                colors[target] = colors[source];
+                cursor += usize::from(source < data.position);
+                source = crate::native_text::next_boundary(cmd_line.text(), source);
+                target += 1;
+            }
+            colors.truncate(target);
+            cursor
+        } else {
+            data.position
+        };
+        #[cfg(unix)]
+        let position = data.position;
+
 
         // Extend our colors with the autosuggestion.
         let pos = autosuggested_range.start;
@@ -2191,7 +2307,7 @@ impl<'a> Reader<'a> {
             autosuggested_range,
             colors,
             indents,
-            data.position,
+            position,
             data.pager_search_field_position,
             self.parser.vars(),
             pager,
@@ -2896,6 +3012,10 @@ impl<'a> Reader<'a> {
         }
         self.first_prompt = false;
 
+        #[cfg(windows)]
+        tty.enable_tty_protocols();
+        #[cfg(windows)]
+        let native_startup = crate::console_windows::begin_evaluation_input();
         if !self.conf.event.is_empty() {
             event::fire_generic(self.parser, self.conf.event.to_owned(), vec![]);
         }
@@ -2910,6 +3030,11 @@ impl<'a> Reader<'a> {
             )),
             background_color: Some(BackgroundColorQuery::default()),
         });
+        #[cfg(windows)]
+        {
+            self.reconcile_evaluation_input(&native_startup);
+            drop(native_startup);
+        }
 
         while !check_exit_loop_maybe_warning(Some(self)) {
             // Enable tty protocols while we read input.
@@ -2925,7 +3050,8 @@ impl<'a> Reader<'a> {
                     break;
                 }
             }
-            if self.handle_char_event(None).is_break() || self.rls().finished {
+            let should_break = self.handle_char_event(None).is_break();
+            if should_break || self.rls().finished {
                 break;
             }
         }
@@ -3005,8 +3131,11 @@ impl<'a> Reader<'a> {
 
     fn eval_bind_cmd(&mut self, cmd: &wstr) {
         let last_statuses = self.parser.vars().last_statuses();
-        // Disable TTY protocols while we run a bind command, because it may call out.
+        // Unix needs protocol suppression for signal delivery. Native callbacks
+        // retain raw paste framing; only an actual child donates the console.
+        #[cfg(unix)]
         let mut scoped_tty = TtyHandoff::new(reader_save_screen_state);
+        #[cfg(unix)]
         scoped_tty.disable_tty_protocols();
         #[cfg(windows)]
         if native_reader_failed() {
@@ -3109,6 +3238,13 @@ impl<'a> Reader<'a> {
 
     // A helper that kicks off syntax highlighting, autosuggestion computing, and repaints.
     fn color_suggest_repaint_now(&mut self) {
+        if std::mem::take(&mut self.history_pager_refresh_needed) && self.history_pager.is_some() {
+            self.fill_history_pager(
+                HistoryPagerInvocation::Anew,
+                Some(SelectionMotion::Next),
+                SearchDirection::Backward,
+            );
+        }
         if self.conf.inputfd == STDIN_FILENO {
             self.update_autosuggestion();
             self.super_highlight_me_plenty();
@@ -3128,8 +3264,19 @@ impl<'a> Reader<'a> {
         // Perhaps update the termsize. This is cheap if it has not changed.
         reader_update_termsize(self.parser);
 
-        // Repaint as needed.
-        self.color_suggest_repaint_now();
+        // Injected functions run inside a binding's evaluator scope. Refresh
+        // asynchronous work only in the owning read loop, not against temporary
+        // helper locals/status before the requested action consumes editor state.
+        if injected_event.is_none() {
+            #[cfg(windows)]
+            let repaint_evaluation = crate::console_windows::begin_evaluation_input();
+            self.color_suggest_repaint_now();
+            #[cfg(windows)]
+            {
+                self.reconcile_evaluation_input(&repaint_evaluation);
+                drop(repaint_evaluation);
+            }
+        }
 
         if self
             .rls()
@@ -3168,6 +3315,15 @@ impl<'a> Reader<'a> {
             return ControlFlow::Continue(());
         };
 
+        #[cfg(windows)]
+        let evaluation = crate::console_windows::begin_evaluation_input();
+        let result = self.dispatch_char_event(event_needing_handling);
+        #[cfg(windows)]
+        self.reconcile_evaluation_input(&evaluation);
+        result
+    }
+
+    fn dispatch_char_event(&mut self, event_needing_handling: CharEvent) -> ControlFlow<()> {
         match event_needing_handling {
             CharEvent::Readline(readline_cmd_evt) => {
                 if !matches!(
@@ -3537,7 +3693,9 @@ impl<'a> Reader<'a> {
                     // Either the user hit tab only once, or we had no visible completion list.
                     // Disable tty protocols while we compute completions, so that control-C
                     // triggers SIGINT (suppressed by CSI-U).
+                    #[cfg(unix)]
                     let mut tty = TtyHandoff::new(reader_save_screen_state);
+                    #[cfg(unix)]
                     tty.disable_tty_protocols();
                     self.compute_and_apply_completions(c);
                 }
@@ -4940,6 +5098,9 @@ impl<'a> Reader<'a> {
 impl ReaderData {
     // Ensure we have no pager contents.
     fn clear_pager(&mut self) {
+        self.request_context.invalidate();
+        self.history_pager_refresh_needed = false;
+        self.in_flight_history_pager_request = None;
         self.pager.clear();
         self.history_pager = None;
         self.clear(EditableLineTag::SearchField);
@@ -5505,7 +5666,12 @@ impl<'a> Reader<'a> {
 
         // Suppress TTY protocols in a scoped way so that e.g. control-C can cancel the prompt.
         let mut scoped_tty = TtyHandoff::new(reader_save_screen_state);
+        #[cfg(unix)]
         scoped_tty.disable_tty_protocols();
+        #[cfg(windows)]
+        scoped_tty.enable_tty_protocols();
+        #[cfg(windows)]
+        let native_evaluation = crate::console_windows::begin_evaluation_input();
 
         // Update the termsize now.
         // This allows prompts to react to $COLUMNS.
@@ -5582,6 +5748,8 @@ impl<'a> Reader<'a> {
         let exit_current_script = self.parser.libdata().exit_current_script;
         self.exit_loop_requested |= exit_current_script;
         self.parser.libdata_mut().exit_current_script = false;
+        #[cfg(windows)]
+        self.reconcile_evaluation_input(&native_evaluation);
     }
 }
 
@@ -5620,11 +5788,12 @@ pub(super) struct AutosuggestionResult {
     // The autosuggestion.
     autosuggestion: Autosuggestion,
 
-    // The commandline this result is based off.
-    command_line: WString,
+    // The immutable request whose result may be published.
+    context: Option<ContextStamp>,
+    error: Option<io::Error>,
 
     // The list of completions which may need loading.
-    needs_load: Vec<WString>,
+    needs_load: Vec<(WString, bool)>,
 }
 
 impl std::ops::Deref for AutosuggestionResult {
@@ -5636,7 +5805,6 @@ impl std::ops::Deref for AutosuggestionResult {
 
 impl AutosuggestionResult {
     fn new(
-        command_line: WString,
         search_string_range: Range<usize>,
         text: WString,
         icase_matched_codepoints: Option<usize>,
@@ -5649,32 +5817,44 @@ impl AutosuggestionResult {
                 icase_matched_codepoints,
                 is_whole_item_from_history,
             },
-            command_line,
+            context: None,
             needs_load: vec![],
+            error: None,
         }
     }
 
     /// The line which was searched for.
     fn search_string(&self) -> &wstr {
-        &self.command_line[self.search_string_range.clone()]
+        &self.context.as_ref().unwrap().snapshot.text[self.search_string_range.clone()]
     }
 }
 
 // Returns a function that can be invoked (potentially
 // on a background thread) to determine the autosuggestion
 fn get_autosuggestion_performer(
-    parser: &Parser,
-    command_line: WString,
-    cursor_pos: usize,
-    history: Arc<History>,
+    stamp: ContextStamp,
 ) -> impl FnOnce() -> AutosuggestionResult + use<> {
-    let generation_count = read_generation_count();
-    let vars = parser.vars().snapshot();
-    let working_directory = parser.vars().get_pwd_slash();
     move || {
-        assert_is_background_thread();
-        let nothing = AutosuggestionResult::default();
-        let ctx = &mut get_bg_context(&vars, generation_count);
+        let mut result = compute_autosuggestion(&stamp);
+        result.context = Some(stamp);
+        result
+    }
+}
+
+fn compute_autosuggestion(stamp: &ContextStamp) -> AutosuggestionResult {
+    assert_is_background_thread();
+    let command_line = &stamp.snapshot.text;
+    let cursor_pos = stamp.snapshot.cursor;
+    let history = &stamp.snapshot.history;
+    #[cfg(unix)]
+    let working_directory = stamp.snapshot.get_pwd_slash();
+    #[cfg(windows)]
+    let working_directory = match stamp.snapshot.get_working_directory() {
+        Ok(path) => path,
+        Err(error) => return AutosuggestionResult { error: Some(error), ..Default::default() },
+    };
+    let nothing = AutosuggestionResult::default();
+    let ctx = &mut stamp.operation_context();
         if ctx.check_cancel() {
             return nothing;
         }
@@ -5717,7 +5897,10 @@ fn get_autosuggestion_performer(
                 0,
             );
 
-            while !ctx.check_cancel() && searcher.go_to_next_match(SearchDirection::Backward) {
+            while searcher.go_to_next_match_with_cancel(
+                SearchDirection::Backward,
+                &|| ctx.check_cancel(),
+            ) {
                 let item = searcher.current_item();
 
                 let full = item.str();
@@ -5781,7 +5964,6 @@ fn get_autosuggestion_performer(
                     // The command autosuggestion was handled specially, so we're done.
                     let is_whole = suggested_range.len() == item.str().len();
                     let result = AutosuggestionResult::new(
-                        command_line.clone(),
                         range.clone(),
                         full[suggested_range].into(),
                         icase.then(|| searcher.canon_term().char_count()),
@@ -5824,7 +6006,7 @@ fn get_autosuggestion_performer(
         let complete_flags = CompletionRequestOptions::Autosuggestion;
         let mut would_be_cursor = line_range.end;
         let (mut completions, needs_load) =
-            complete(&command_line[..would_be_cursor], complete_flags, ctx);
+            complete(&command_line[..would_be_cursor], None, complete_flags, ctx);
 
         let suggestion = if completions.is_empty() {
             // If there are no completions to suggest, fall back to icase history.
@@ -5844,7 +6026,7 @@ fn get_autosuggestion_performer(
             }
 
             let full_line = completion_apply_to_command_line(
-                &mut OperationContext::background_interruptible(&vars),
+                ctx,
                 &comp.completion,
                 comp.flags,
                 &command_line,
@@ -5856,7 +6038,6 @@ fn get_autosuggestion_performer(
         };
         let lowercase_char_count = lowercase(command_line[line_range.clone()].chars()).count();
         let mut result = AutosuggestionResult::new(
-            command_line,
             line_range,
             suggestion,
             Some(lowercase_char_count), // normal completions are case-insensitive
@@ -5864,7 +6045,6 @@ fn get_autosuggestion_performer(
         );
         result.needs_load = needs_load;
         result
-    }
 }
 
 enum AutosuggestionPortion {
@@ -5894,30 +6074,38 @@ impl<'a> Reader<'a> {
     // Called after an autosuggestion has been computed on a background thread.
     fn autosuggest_completed(&mut self, result: AutosuggestionResult) {
         assert_is_main_thread();
-        if result.command_line == self.data.in_flight_autosuggest_request {
-            self.data.in_flight_autosuggest_request.clear();
+        let Some(stamp) = result.context.as_ref() else {
+            return;
+        };
+        let current = self.refresh_request_context();
+        if self.in_flight_autosuggest_request.as_ref() == Some(stamp) {
+            self.in_flight_autosuggest_request = None;
         }
-        if result.command_line != self.command_line.text() {
-            // This autosuggestion is stale.
+        if stamp != &current || !stamp.is_current() {
+            self.update_autosuggestion();
             return;
         }
-        // Maybe load completions for commands discovered by this autosuggestion.
-        let mut loaded_new = false;
-        for to_load in &result.needs_load {
-            if complete_load(to_load, self.parser) {
-                flogf!(
-                    complete,
-                    "Autosuggest found new completions for %s, restarting",
-                    to_load
-                );
-                loaded_new = true;
+        if let Some(error) = &result.error {
+            if error.kind() != io::ErrorKind::Interrupted {
+                flog!(warning, "Cannot compute autosuggestion:", error);
             }
+            return;
+        }
+        // Autoload can evaluate code and alter definitions, variables or history.
+        // Revalidate before either publishing or scheduling another request.
+        let mut loaded_new = false;
+        for (to_load, case_sensitive) in &result.needs_load {
+            loaded_new |= complete_load(to_load, self.parser, *case_sensitive);
         }
         if loaded_new {
-            // We loaded new completions for this command.
-            // Re-do our autosuggestion.
+            self.request_context.invalidate();
+        }
+        let current = self.refresh_request_context();
+        if stamp != &current || !stamp.is_current() {
             self.update_autosuggestion();
-        } else if !result.is_empty()
+            return;
+        }
+        if !result.is_empty()
             && self.can_autosuggest()
             && string_prefixes_string_maybe_case_insensitive(
                 result.icase_matched_codepoints.is_some(),
@@ -5925,7 +6113,7 @@ impl<'a> Reader<'a> {
                 &result.text,
             )
         {
-            // Autosuggestion is active and the search term has not changed, so we're good to go.
+            self.applied_autosuggestion_context = Some(stamp.clone());
             self.autosuggestion = result.autosuggestion;
             if self.is_repaint_needed(None) {
                 self.layout_and_repaint(L!("autosuggest"));
@@ -5934,40 +6122,33 @@ impl<'a> Reader<'a> {
     }
 
     fn update_autosuggestion(&mut self) {
-        // If we can't autosuggest, just clear it.
         if !self.can_autosuggest() {
-            self.data.in_flight_autosuggest_request.clear();
-            self.data.autosuggestion.clear();
+            self.in_flight_autosuggest_request = None;
+            self.applied_autosuggestion_context = None;
+            self.autosuggestion.clear();
             return;
         }
-
-        let el = &self.data.command_line;
-        if self.is_at_line_with_autosuggestion() {
+        let stamp = self.refresh_request_context();
+        if self.is_at_line_with_autosuggestion()
+            && self.applied_autosuggestion_context.as_ref()
+                .is_some_and(|old| old.same_environment(&stamp))
+        {
             let autosuggestion = &self.autosuggestion;
             assert!(string_prefixes_string_maybe_case_insensitive(
                 autosuggestion.icase_matched_codepoints.is_some(),
-                &el.text()[autosuggestion.search_string_range.clone()],
+                &self.command_line.text()[autosuggestion.search_string_range.clone()],
                 &autosuggestion.text
             ));
             return;
         }
-
-        // Do nothing if we've already kicked off this autosuggest request.
-        if el.text() == self.in_flight_autosuggest_request {
+        if self.in_flight_autosuggest_request.as_ref() == Some(&stamp) {
             return;
         }
-        self.data.in_flight_autosuggest_request = el.text().to_owned();
-
-        // Clear the autosuggestion and kick it off in the background.
+        self.in_flight_autosuggest_request = Some(stamp.clone());
+        self.applied_autosuggestion_context = None;
+        self.autosuggestion.clear();
         flog!(reader_render, "Autosuggesting");
-        self.data.autosuggestion.clear();
-        let performer = get_autosuggestion_performer(
-            self.parser,
-            el.text().to_owned(),
-            el.position(),
-            self.history.clone(),
-        );
-        self.debouncers.autosuggestions.perform(performer);
+        self.debouncers.autosuggestions.perform(get_autosuggestion_performer(stamp));
     }
 
     fn is_at_end(&self) -> bool {
@@ -6044,6 +6225,11 @@ impl<'a> Reader<'a> {
                         return;
                     }
                     let start = autosuggestion_text.len() - available;
+                    #[cfg(windows)]
+                    let count = crate::native_text::ceil_boundary(
+                        &autosuggestion_text[start..],
+                        count,
+                    );
                     (
                         pos..pos,
                         autosuggestion_text[start..start + count].to_owned(),
@@ -6098,45 +6284,45 @@ impl<'a> Reader<'a> {
 #[derive(Default)]
 pub(super) struct HighlightResult {
     colors: Vec<HighlightSpec>,
-    text: WString,
     error: Option<io::Error>,
-    generation: u32,
+    context: Option<ContextStamp>,
 }
 
 // Given text and  whether IO is allowed, return a function that performs highlighting. The function
 // may be invoked on a background thread.
 fn get_highlight_performer(
-    parser: &Parser,
-    el: &EditableLine,
+    stamp: ContextStamp,
     io_ok: bool,
 ) -> impl FnOnce() -> HighlightResult + use<> {
-    let vars = parser.vars().snapshot();
-    let generation_count = read_generation_count();
-    let position = el.position();
-    let text = el.text().to_owned();
     move || {
-        if text.is_empty() {
-            return HighlightResult::default();
-        }
-        let ctx = &mut get_bg_context(&vars, generation_count);
         let mut colors = vec![];
-        let error = highlight_shell(&text, &mut colors, ctx, io_ok, Some(position)).err();
-        HighlightResult {
-            colors,
-            text,
-            error,
-            generation: generation_count,
-        }
+        let error = if stamp.snapshot.text.is_empty() {
+            None
+        } else {
+            highlight_shell(
+                &stamp.snapshot.text,
+                &mut colors,
+                &mut stamp.operation_context(),
+                io_ok,
+                Some(stamp.snapshot.cursor),
+            ).err()
+        };
+        HighlightResult { colors, error, context: Some(stamp) }
     }
 }
 
 impl<'a> Reader<'a> {
     fn highlight_completed(&mut self, result: HighlightResult) {
         assert_is_main_thread();
-        if result.text == self.in_flight_highlight_request {
-            self.in_flight_highlight_request.clear();
+        let Some(stamp) = result.context.as_ref() else {
+            return;
+        };
+        let current = self.refresh_request_context();
+        if self.in_flight_highlight_request.as_ref() == Some(stamp) {
+            self.in_flight_highlight_request = None;
         }
-        if result.generation != read_generation_count() {
+        if stamp != &current || !stamp.is_current() {
+            self.super_highlight_me_plenty();
             return;
         }
         if let Some(error) = result.error {
@@ -6145,12 +6331,11 @@ impl<'a> Reader<'a> {
             }
             return;
         }
-        if result.text == self.command_line.text() {
-            assert_eq!(result.colors.len(), self.command_line.len());
-            if self.is_repaint_needed(Some(&result.colors)) {
-                self.command_line.set_colors(result.colors);
-                self.layout_and_repaint(L!("highlight"));
-            }
+        assert_eq!(result.colors.len(), self.command_line.len());
+        self.applied_highlight_context = Some(stamp.clone());
+        if self.is_repaint_needed(Some(&result.colors)) {
+            self.command_line.set_colors(result.colors);
+            self.layout_and_repaint(L!("highlight"));
         }
     }
 
@@ -6159,61 +6344,41 @@ impl<'a> Reader<'a> {
         if !self.conf.highlight_ok {
             return;
         }
-
-        // Do nothing if this text is already in flight.
-        if self.command_line.text() == self.in_flight_highlight_request {
+        let stamp = self.refresh_request_context();
+        if self.in_flight_highlight_request.as_ref() == Some(&stamp)
+            || self.applied_highlight_context.as_ref() == Some(&stamp)
+        {
             return;
         }
-        self.in_flight_highlight_request = self.command_line.text().to_owned();
-
+        self.in_flight_highlight_request = Some(stamp.clone());
         flog!(reader_render, "Highlighting");
-        let highlight_performer =
-            get_highlight_performer(self.parser, &self.command_line, /*io_ok=*/ true);
-        self.debouncers.highlight.perform(highlight_performer);
+        self.debouncers.highlight.perform(get_highlight_performer(stamp, true));
     }
 
     /// Finish up any outstanding syntax highlighting, before execution.
     /// This plays some tricks to not block on I/O for too long.
     fn finish_highlighting_before_exec(&mut self) {
-        // Early-out if highlighting is not OK.
         if !self.conf.highlight_ok {
             return;
         }
-
-        // Decide if our current highlighting is OK. If not we will do a quick highlight without I/O.
-        let mut current_highlight_ok = false;
-        if self.in_flight_highlight_request.is_empty() {
-            // There is no in-flight highlight request. Two possibilities:
-            // 1: The user hit return after highlighting finished, so current highlighting is correct.
-            // 2: The user hit return before highlighting started, so current highlighting is stale.
-            // We can distinguish these based on what we last rendered.
-            current_highlight_ok = self.rendered_layout.text == self.command_line.text();
-        } else if self.in_flight_highlight_request == self.command_line.text() {
-            // The user hit return while our in-flight highlight request was still processing the text.
-            // Wait for its completion to run, but not forever.
-            let mut now = Instant::now();
-            let deadline = now + HIGHLIGHT_TIMEOUT_FOR_EXECUTION;
-            while now < deadline {
-                let timeout = deadline - now;
+        let stamp = self.refresh_request_context();
+        let mut current_highlight_ok = self.applied_highlight_context.as_ref() == Some(&stamp);
+        if !current_highlight_ok && self.in_flight_highlight_request.as_ref() == Some(&stamp) {
+            let deadline = Instant::now() + HIGHLIGHT_TIMEOUT_FOR_EXECUTION;
+            while let Some(timeout) = deadline.checked_duration_since(Instant::now()) {
                 if let Some(result) = self.debouncers.highlight.take_result_with_timeout(timeout) {
                     self.highlight_completed(result);
                 }
-                if self.in_flight_highlight_request.is_empty() {
+                current_highlight_ok = self.applied_highlight_context.as_ref() == Some(&stamp)
+                    && stamp.is_current();
+                if current_highlight_ok || self.in_flight_highlight_request.as_ref() != Some(&stamp) {
                     break;
                 }
-                now = Instant::now();
             }
-
-            // If our in_flight_highlight_request is now empty, it means it completed and we highlighted
-            // successfully.
-            current_highlight_ok = self.in_flight_highlight_request.is_empty();
         }
-
         if !current_highlight_ok {
-            // We need to do a quick highlight without I/O.
-            let highlight_no_io =
-                get_highlight_performer(self.parser, &self.command_line, /*io_ok=*/ false);
-            self.highlight_completed(highlight_no_io());
+            let stamp = self.refresh_request_context();
+            self.highlight_completed(get_highlight_performer(stamp, false)());
         }
     }
 }
@@ -6233,12 +6398,17 @@ pub(super) enum HistoryPagerInvocation {
 }
 
 fn history_pager_search(
-    history: &Arc<History>,
+    stamp: &ContextStamp,
     direction: SearchDirection,
     motion: Option<SelectionMotion>,
     history_index: usize,
     search_string: &wstr,
-) -> HistoryPagerResult {
+) -> Option<HistoryPagerResult> {
+    let cancel = || !stamp.is_current();
+    if cancel() {
+        return None;
+    }
+    let history = &stamp.snapshot.history;
     // Limit the number of elements to half the screen like we do for completions
     // Note that this is imperfect because we could have a multi-column layout.
     //
@@ -6257,19 +6427,25 @@ fn history_pager_search(
         )
     };
     let mut search = new_search(SearchType::ContainsGlob);
-    if !search.go_to_next_match(direction) && !contains_wildcards(search_string) {
+    if !search.go_to_next_match_with_cancel(direction, &cancel) && !contains_wildcards(search_string) {
+        if cancel() {
+            return None;
+        }
         // If there were no matches, and the user is not intending for
         // wildcard search, try again with subsequence search.
         search = new_search(SearchType::ContainsSubsequence);
-        search.go_to_next_match(direction);
+        search.go_to_next_match_with_cancel(direction, &cancel);
     }
     // When searching, first we need to find the element before first shown.
-    search.search_forward(match direction {
-        SearchDirection::Forward => page_size,
-        SearchDirection::Backward => 0,
-    });
+    search.search_forward_with_cancel(
+        match direction {
+            SearchDirection::Forward => page_size,
+            SearchDirection::Backward => 0,
+        },
+        &cancel,
+    );
     let first_index = search.current_index();
-    let mut next_match_found = search.go_to_next_match(SearchDirection::Backward);
+    let mut next_match_found = search.go_to_next_match_with_cancel(SearchDirection::Backward, &cancel);
     let first_shown = search.current_index();
     while completions.len() < page_size && next_match_found {
         let item = search.current_item();
@@ -6284,29 +6460,32 @@ fn history_pager_search(
                 ..Default::default()
             },
         ));
-        next_match_found = search.go_to_next_match(SearchDirection::Backward);
+        next_match_found = search.go_to_next_match_with_cancel(SearchDirection::Backward, &cancel);
+    }
+    if cancel() {
+        return None;
     }
     let last_index = search.current_index();
     let range = first_index..last_index;
     if completions.is_empty() && range != (0..history.size() + 1) {
         history_pager_search(
-            history,
+            stamp,
             SearchDirection::Forward,
             Some(SelectionMotion::Prev),
             history.size() + 1,
             search_string,
         )
     } else {
-        HistoryPagerResult {
+        Some(HistoryPagerResult {
             matched_commands: completions,
             range,
             first_shown,
             motion,
-        }
+        })
     }
 }
 
-impl ReaderData {
+impl<'a> Reader<'a> {
     fn fill_history_pager(
         &mut self,
         why: HistoryPagerInvocation,
@@ -6336,12 +6515,13 @@ impl ReaderData {
             }
         }
         let search_term = self.pager.search_field_line.text().to_owned();
-        // Get a performer that produces the history pager result.
-        let history = self.history.clone();
+        self.request_context.invalidate();
+        let stamp = self.refresh_request_context();
+        self.in_flight_history_pager_request = Some(stamp.clone());
         let performer = move || -> iothreads::Callback {
-            let result = history_pager_search(&history, direction, motion, index, &search_term);
+            let result = history_pager_search(&stamp, direction, motion, index, &search_term);
             Box::new(move |r: &mut Reader| {
-                r.fill_history_pager_complete(result, why, old_pager_index);
+                r.fill_history_pager_complete(result, stamp, why, old_pager_index);
             })
         };
         self.debouncers.history_pager.perform(performer);
@@ -6351,10 +6531,27 @@ impl ReaderData {
 impl<'a> Reader<'a> {
     fn fill_history_pager_complete(
         &mut self,
-        result: HistoryPagerResult,
+        result: Option<HistoryPagerResult>,
+        stamp: ContextStamp,
         why: HistoryPagerInvocation,
         old_pager_index: Option<usize>,
     ) {
+        if self.in_flight_history_pager_request.as_ref() != Some(&stamp) {
+            return;
+        }
+        self.in_flight_history_pager_request = None;
+        let current = self.refresh_request_context();
+        if stamp != current || !stamp.is_current() || result.is_none() {
+            if self.history_pager.is_some() {
+                self.fill_history_pager(
+                    HistoryPagerInvocation::Anew,
+                    Some(SelectionMotion::Next),
+                    SearchDirection::Backward,
+                );
+            }
+            return;
+        }
+        let result = result.unwrap();
         let history_size = self.history.size();
         let Some(history_pager) = self.history_pager.as_mut() else {
             return; // Pager has been closed.
@@ -6554,7 +6751,18 @@ pub fn reader_expand_abbreviation_at_cursor(
     };
 
     let token_str = &cmdline[Range::<usize>::from(range)];
-    let replacers = abbrs_match(token_str, position, cmd.unwrap_or(L!("")));
+    let replacers = match abbrs_match(token_str, position, cmd.unwrap_or(L!(""))) {
+        Ok(replacers) => replacers,
+        Err(error) => {
+            eprintf!(
+                "abbr: regular expression for %s failed: %s\n",
+                escape(&error.name),
+                error.error.to_string()
+            );
+            parser.set_last_statuses(Statuses::just(STATUS_CMD_ERROR));
+            return None;
+        }
+    };
     for replacer in replacers {
         if let Some(replacement) = expand_replacer(range, token_str, &replacer, parser) {
             return Some(replacement);
@@ -7323,6 +7531,9 @@ impl<'a> Reader<'a> {
     /// Compute completions and update the pager and/or commandline as needed.
     fn compute_and_apply_completions(&mut self, c: ReadlineCmd) {
         assert_matches!(c, ReadlineCmd::Complete | ReadlineCmd::CompleteAndSearch);
+        #[cfg(windows)]
+        let native_evaluation = crate::console_windows::begin_evaluation_input();
+        #[cfg(unix)]
         assert!(
             !get_tty_protocols_active(),
             "should not be called with TTY protocols active"
@@ -7355,19 +7566,10 @@ impl<'a> Reader<'a> {
         }
         token_range.start += cmdsub_range.start;
         token_range.end += cmdsub_range.start;
-        #[cfg(windows)]
-        if let Some(error) = crate::complete::native_completion_request_error(
-            &self.command_line.text()[cmdsub_range.start..token_range.end],
-        ) {
-            self.screen
-                .reset_abandoning_line(Some(termsize_last().width()));
-            eprintf!("fish: %s\n", error);
-            crate::screen::invalidate_native_screen();
-            return;
-        }
 
         // Check if we have a wildcard within this string; if so we first attempt to expand the
         // wildcard; if that succeeds we don't then apply user completions (#8593).
+        let request = self.refresh_request_context();
         let mut wc_expanded = WString::new();
         match try_expand_wildcard(
             self.parser,
@@ -7388,6 +7590,18 @@ impl<'a> Reader<'a> {
                 return;
             }
             ExpandResultCode::Ok => {
+                #[cfg(windows)]
+                if self.reconcile_evaluation_input(&native_evaluation) {
+                    return;
+                }
+                if !request.allows_synchronous_publication(
+                    self.parser.vars(),
+                    self.command_line.text(),
+                    self.command_line.position(),
+                    &self.history,
+                ) {
+                    return;
+                }
                 self.rls_mut().completion_action = None;
                 self.push_edit(
                     EditableLineTag::Commandline,
@@ -7397,14 +7611,30 @@ impl<'a> Reader<'a> {
             }
         }
 
-        // Construct a copy of the string from the beginning of the command substitution
-        // up to the end of the token we're completing.
-
+        // Tab completes the whole token, even when the physical cursor is in
+        // its middle. Give providers the same logical insertion point as the
+        // matcher, while retaining trailing arguments in the immutable buffer.
         let complete_options = CompletionRequestOptions::default();
-        let (mut comp, _needs_load) = {
-            let cmdsub = &self.data.command_line.text()[cmdsub_range.start..token_range.end];
-            complete(cmdsub, complete_options, &mut self.parser.context())
-        };
+        let (mut comp, _needs_load) = complete(
+            &request.snapshot.text,
+            Some(token_range.end),
+            complete_options,
+            &mut self.parser.context(),
+        );
+        #[cfg(windows)]
+        if self.reconcile_evaluation_input(&native_evaluation) {
+            return;
+        }
+        let can_publish = request.allows_synchronous_publication(
+            self.parser.vars(),
+            self.command_line.text(),
+            self.command_line.position(),
+            &self.history,
+        );
+        self.refresh_request_context();
+        if !can_publish {
+            return;
+        }
 
         let el = &self.command_line;
         // User-supplied completions may have changed the commandline - prevent buffer

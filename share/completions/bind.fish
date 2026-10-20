@@ -33,7 +33,8 @@ function __fish_bind_complete --inherit-variable bind_optspecs
     argparse $bind_optspecs -- (commandline -xpc)[2..] 2>/dev/null
     or return 1
     set -l token (commandline -ct)
-    if test (count $argv) = 0 && set -l prefix (string match -r -- '(.*,)?(ctrl-|alt-|shift-|super-)*' $token)
+    if test (count $argv) = 0
+        set -l prefix (string match -r -- '^(?:.*,)?(?:ctrl-|alt-|shift-|super-)*' "$token" | string collect --allow-empty)
         printf '%salt-\tAlt modifier…\n' $prefix
         printf '%sctrl-\tCtrl modifier…\n' $prefix
         printf '%sshift-\tShift modifier…\n' $prefix

@@ -4,7 +4,7 @@
 #
 
 # No effect on POSIX systems that don't use O_BINARY/O_TEXT
-uname -s | string match -q CYGWIN\*
+__fish_uname | string match -q CYGWIN\*
 and complete -c patch -l binary -d "Read & write data in binary mode"
 
 complete -c patch -s b -l backup -d "Back up the original contents of each file"

@@ -351,7 +351,8 @@ pub fn expand_escape_string(el: &wstr) -> WString {
 pub fn expand_tilde(input: &mut WString, vars: &dyn Environment) {
     if input.chars().next() == Some('~') {
         input.replace_range(0..1, wstr::from_char_slice(&[HOME_DIRECTORY]));
-        expand_home_directory(input, vars);
+        // Best-effort callers retain the original spelling when a named profile is unavailable.
+        let _ = expand_home_directory(input, vars);
     }
 }
 
@@ -1211,12 +1212,13 @@ fn get_home_directory_name<'a>(input: &'a wstr, out_tail_idx: &mut usize) -> &'a
     }
 }
 
-/// Attempts tilde expansion of the string specified, modifying it in place.
-fn expand_home_directory(input: &mut WString, vars: &dyn Environment) {
+/// Attempts tilde expansion in place. Native named accounts use SID/profile lookup;
+/// failure is returned to command expansion rather than publishing a guessed home.
+fn expand_home_directory(input: &mut WString, vars: &dyn Environment) -> std::io::Result<()> {
     let starts_with_tilde = input.as_char_slice().first() == Some(&HOME_DIRECTORY);
     *input = input.replace([HOME_DIRECTORY], L!("~"));
     if !starts_with_tilde {
-        return;
+        return Ok(());
     }
 
     let mut tail_idx = usize::MAX;
@@ -1227,7 +1229,7 @@ fn expand_home_directory(input: &mut WString, vars: &dyn Environment) {
         match vars.get_unless_empty(L!("HOME")) {
             None => {
                 input.clear();
-                return;
+                return Ok(());
             }
             Some(home_var) => {
                 home = Some(home_var.as_string());
@@ -1240,6 +1242,10 @@ fn expand_home_directory(input: &mut WString, vars: &dyn Environment) {
         if let Ok(Some(userinfo)) = User::from_name(&username.to_string()) {
             home = Some(osstr2wcstring(userinfo.dir));
         }
+        #[cfg(windows)]
+        {
+            home = Some(crate::native_services::accounts::profile_for_user(username)?);
+        }
     }
 
     if let Some(home) = home {
@@ -1248,6 +1254,7 @@ fn expand_home_directory(input: &mut WString, vars: &dyn Environment) {
         #[cfg(windows)]
         input.replace_range(..tail_idx, &home);
     }
+    Ok(())
 }
 
 /// Expand the %self escape. Note this can only come at the beginning of the string.
@@ -1508,20 +1515,15 @@ impl<'a, 'b, 'c> Expander<'a, 'b, 'c> {
     ) -> ExpandResult {
         remove_internal_separator(&mut input, self.flags.skip_wildcards);
 
-        #[cfg(windows)]
-        if input.as_char_slice().first() == Some(&HOME_DIRECTORY) {
-            let mut tail_idx = 0;
-            if !get_home_directory_name(&input, &mut tail_idx).is_empty() {
-                append_syntax_error!(
-                    self.errors,
-                    0,
-                    "Named-user home expansion is not supported on native Windows"
-                );
-                return ExpandResult::make_error(STATUS_EXPAND_ERROR);
-            }
+        if let Err(error) = expand_home_directory(&mut input, self.ctx.vars()) {
+            append_syntax_error!(
+                self.errors,
+                0,
+                "Unable to resolve Windows account profile for home expansion: %s",
+                error.to_string()
+            );
+            return ExpandResult::make_error(STATUS_EXPAND_ERROR);
         }
-
-        expand_home_directory(&mut input, self.ctx.vars());
         if !feature_test(FeatureFlag::RemovePercentSelf) {
             expand_percent_self(&mut input);
         }
@@ -2213,7 +2215,8 @@ mod tests {
 
         // Helper to expand an abbreviation, enforcing we have no more than one result.
         let abbr_expand_1 = |token, pos| -> Option<WString> {
-            let result = with_abbrs(|abbrset| abbrset.r#match(token, pos, L!("")));
+            let result = with_abbrs(|abbrset| abbrset.r#match(token, pos, L!("")))
+                .expect("literal abbreviation matching must succeed");
             if result.is_empty() {
                 return None;
             }

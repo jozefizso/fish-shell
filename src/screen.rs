@@ -28,7 +28,7 @@ use crate::termsize::Termsize;
 use crate::text_helpers::escape_code_length;
 #[cfg(unix)]
 use crate::wutil::fstat;
-use fish_fallback::{fish_wcswidth_canonicalizing, fish_wcwidth};
+use fish_fallback::fish_wcwidth;
 use fish_wcstringutil::{fish_wcwidth_visible, string_prefixes_string};
 use fish_widestring::ELLIPSIS_CHAR;
 #[cfg(unix)]
@@ -103,7 +103,7 @@ impl Line {
         highlight: HighlightSpec,
         offset_in_cmdline: CharOffset,
     ) {
-        for c in txt.chars() {
+        for (_, c, _) in crate::native_text::display_scalars(txt) {
             self.append(c, highlight, offset_in_cmdline);
         }
     }
@@ -142,6 +142,10 @@ impl Line {
             result += wcwidth_rendered_min_0(c.character);
         }
         result
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<char> {
+        self.text.pop().map(|c| c.character)
     }
 }
 
@@ -411,6 +415,7 @@ impl Screen {
         // Output the command line.
         let mut i = 0;
         assert!(cursor_pos <= effective_commandline.len());
+        let cursor_pos = crate::native_text::floor_boundary(&effective_commandline, cursor_pos);
         let scrolled_cursor = loop {
             // Grab the current cursor's x,y position if this character matches the cursor's offset.
             if i == cursor_pos {
@@ -435,6 +440,8 @@ impl Screen {
             if i == effective_commandline.len() {
                 break scrolled_cursor.unwrap();
             }
+            let (display_character, scalar_len) =
+                crate::native_text::display_scalar(&effective_commandline, i);
             if !self.desired_append_char(
                 if pager.search_field_shown {
                     CharOffset::None
@@ -456,19 +463,19 @@ impl Screen {
                         }
                     })
                 },
-                effective_commandline.as_char_slice()[i],
+                display_character,
                 colors[i],
                 usize::try_from(indent[i]).unwrap(),
                 commandline_indent,
-                wcwidth_rendered_min_0(effective_commandline.as_char_slice()[i]),
+                wcwidth_rendered_min_0(display_character),
             ) {
                 break scrolled_cursor.unwrap();
             }
-            i += 1;
+            i += scalar_len;
         };
 
         // Add an empty line if there are no lines or if the last line was soft wrapped (but not by autosuggestion).
-        if self.desired.line_datas.last().unwrap().len() == screen_width
+        if self.desired.line_datas.last().unwrap().wcswidth_min_0(usize::MAX) == screen_width
             && (commandline.is_empty()
                 || autosuggestion.is_empty()
                 || !explicit_after_suggestion.is_empty())
@@ -831,6 +838,15 @@ impl Screen {
             }
             self.desired.create_line(line_no);
 
+            // A zero-width continuation belongs to the preceding glyph even when that
+            // glyph filled the last column. Keep the deferred wrap for the next base.
+            if cw == 0 && self.desired.cursor.x == 0 && line_no > 0
+                && self.desired.line(line_no - 1).is_soft_wrapped
+            {
+                self.desired.line_mut(line_no - 1).append(b, c, offset_in_cmdline);
+                return true;
+            }
+
             // Check if we are at the end of the line. If so, continue on the next line.
             if screen_width.is_none_or(|sw| (self.desired.cursor.x + cw) > sw) {
                 if self.desired.cursor.y + 1 > max_y {
@@ -1014,7 +1030,10 @@ impl Screen {
     /// Convert a wide character to a multibyte string and append it to the buffer.
     fn write_char(&mut self, c: char, width: usize) {
         self.actual.cursor.x = self.actual.cursor.x.wrapping_add(width);
-        self.outp.borrow_mut().writech(c);
+        // Screen lines contain decoded display scalars, not canonical byte markers.
+        // In particular literal U+F600 must not be converted back into a raw byte.
+        let mut utf8 = [0; 4];
+        self.outp.borrow_mut().write_bytes(c.encode_utf8(&mut utf8).as_bytes());
         if Some(self.actual.cursor.x) == self.actual.screen_width {
             self.soft_wrap_location = Some(Cursor {
                 x: 0,
@@ -1701,7 +1720,9 @@ fn measure_run_from(
             width = next_tab_stop(width);
         } else {
             // Ordinary char. Add its width with care to ignore control chars which have width -1.
-            if let Ok(ww) = usize::try_from(fish_wcwidth_visible(input.char_at(idx))) {
+            let (character, len) = crate::native_text::display_scalar(input, idx);
+            idx += len - 1;
+            if let Ok(ww) = usize::try_from(fish_wcwidth_visible(character)) {
                 width += ww;
             } else {
                 width = width.saturating_sub(1);
@@ -1726,10 +1747,19 @@ fn truncate_run(
         return;
     }
 
-    // Bravely prepend ellipsis char and skip it.
-    // Ellipsis is always width 1.
-    run.insert(0, ELLIPSIS_CHAR);
-    curr_width += 1;
+    // Use the same user width policy as the rest of the prompt, including ambiguous width.
+    if desired_width == 0 {
+        run.clear();
+        *width = 0;
+        return;
+    }
+    let ellipsis = if wcwidth_rendered_min_0(ELLIPSIS_CHAR) <= desired_width {
+        ELLIPSIS_CHAR
+    } else {
+        '.'
+    };
+    run.insert(0, ellipsis);
+    curr_width += wcwidth_rendered_min_0(ellipsis);
 
     // Start removing characters after ellipsis.
     // Note we modify 'run' inside this loop.
@@ -1751,10 +1781,19 @@ fn truncate_run(
             idx = 0;
         } else {
             // FIXME: In case of backspace, this would remove the last width.
-            let char_width = usize::try_from(fish_wcwidth_visible(c)).unwrap_or(0);
+            let (character, len) = crate::native_text::display_scalar(run, idx);
+            let char_width = usize::try_from(fish_wcwidth_visible(character)).unwrap_or(0);
             curr_width -= std::cmp::min(curr_width, char_width);
-            run.remove(idx);
+            run.replace_range(idx..idx + len, L!(""));
         }
+    }
+    // Do not leave combining marks attached to the newly inserted ellipsis.
+    while idx < run.len() {
+        let (character, len) = crate::native_text::display_scalar(run, idx);
+        if wcwidth_rendered(character) != Some(0) {
+            break;
+        }
+        run.replace_range(idx..idx + len, L!(""));
     }
     *width = curr_width;
 }
@@ -1797,6 +1836,19 @@ fn line_shared_prefix(a: &Line, b: &Line) -> usize {
             break;
         }
         idx += 1;
+    }
+    // Adding/removing a trailing combining mark also changes the preceding base,
+    // even though the shorter line was otherwise an exact prefix.
+    if idx == max && a.len() != b.len() {
+        let longer = if a.len() > b.len() { a } else { b };
+        if matches!(fish_wcwidth(longer.char_at(idx)), None | Some(0)) {
+            while idx > 0 {
+                idx -= 1;
+                if !matches!(fish_wcwidth(longer.char_at(idx)), None | Some(0)) {
+                    break;
+                }
+            }
+        }
     }
     idx
 }
@@ -1858,17 +1910,12 @@ fn compute_layout(
     let right_prompt_width = right_prompt_layout.last_line_width;
 
     // Get the width of the first line, and if there is more than one line.
-    let first_command_line_width: usize = line_at_cursor(commandline_before_suggestion, 0)
-        .chars()
-        .map(wcwidth_rendered_min_0)
-        .sum();
-    let autosuggestion_line_explicit_width: usize = line_at_cursor(
+    let first_command_line_width =
+        wcswidth_rendered(line_at_cursor(commandline_before_suggestion, 0));
+    let autosuggestion_line_explicit_width = wcswidth_rendered(line_at_cursor(
         commandline_before_suggestion,
         commandline_before_suggestion.len(),
-    )
-    .chars()
-    .map(wcwidth_rendered_min_0)
-    .sum();
+    ));
 
     // Here are the layouts we try:
     // 1. Right prompt visible.
@@ -1945,7 +1992,7 @@ fn compute_layout(
             autosuggestion_line: &wstr,
         ) -> Result<usize, &wstr> {
             let mut lines = 1;
-            for (i, ch) in autosuggestion_line.char_indices() {
+            for (i, ch, _) in crate::native_text::display_scalars(autosuggestion_line) {
                 let ch_width = wcwidth_rendered_min_0(ch);
                 let new_column = column + ch_width;
                 if new_column >= screen_width {
@@ -1991,9 +2038,7 @@ fn compute_layout(
     {
         // Hide the right prompt if it doesn't fit on the first line.
         let first_command_line_suggestion_width = if commandline_before_suggestion_lines == 0 {
-            suggestion_lines.first().map_or(0, |line| {
-                line.chars().map(wcwidth_rendered_min_0).sum::<usize>()
-            })
+            suggestion_lines.first().map_or(0, |line| wcswidth_rendered(line))
         } else {
             0
         };
@@ -2041,6 +2086,10 @@ fn compute_layout(
 fn rendered_character(c: char) -> char {
     if c <= '\x1F' {
         char::from_u32(u32::from(c) + 0x2400).unwrap()
+    } else if c == '\x7f' {
+        '\u{2421}'
+    } else if ('\u{80}'..='\u{9f}').contains(&c) {
+        char::REPLACEMENT_CHARACTER
     } else {
         c
     }
@@ -2053,7 +2102,9 @@ pub fn wcwidth_rendered(c: char) -> Option<usize> {
     fish_wcwidth(rendered_character(c))
 }
 pub fn wcswidth_rendered(s: &wstr) -> usize {
-    fish_wcswidth_canonicalizing(s, rendered_character).unwrap_or_default()
+    crate::native_text::display_scalars(s)
+        .map(|(_, c, _)| wcwidth_rendered_min_0(c))
+        .sum()
 }
 
 #[cfg(test)]
@@ -2067,6 +2118,42 @@ mod tests {
     use crate::tests::prelude::*;
     use fish_wcstringutil::join_strings;
     use fish_widestring::ELLIPSIS_CHAR;
+
+    #[test]
+    fn literal_controls_cannot_become_terminal_commands() {
+        assert_eq!(super::rendered_character('\x1b'), '\u{241b}');
+        assert_eq!(super::rendered_character('\x7f'), '\u{2421}');
+        for c in '\u{80}'..='\u{9f}' {
+            assert_eq!(super::rendered_character(c), char::REPLACEMENT_CHARACTER);
+        }
+        assert_eq!(super::rendered_character('\u{f600}'), '\u{f600}');
+    }
+
+    #[test]
+    fn trailing_combining_change_repaints_base() {
+        use super::{CharOffset, Line, line_shared_prefix};
+        let line = |text: &wstr| {
+            let mut line = Line::new();
+            line.append_str(text, HighlightSpec::new(), CharOffset::None);
+            line
+        };
+        assert_eq!(line_shared_prefix(&line(L!("Ae\u{301}")), &line(L!("Ae"))), 1);
+        assert_eq!(line_shared_prefix(&line(L!("Ae")), &line(L!("Ae\u{301}"))), 1);
+        assert_eq!(line_shared_prefix(&line(L!("Ae")), &line(L!("AeZ"))), 2);
+    }
+
+    #[test]
+    fn literal_private_use_width_and_prompt_truncation() {
+        let encoded: WString = [0xef, 0x98, 0x80].into_iter()
+            .map(fish_widestring::encode_byte_to_char).collect();
+        assert_eq!(super::wcswidth_rendered(&encoded), super::wcwidth_rendered('\u{f600}').unwrap());
+        let mut cache = LayoutCache::new();
+        let prompt = encoded + L!("abcdef");
+        let mut truncated = WString::new();
+        let layout = cache.calc_prompt_layout(&prompt, Some(&mut truncated), 4);
+        assert_eq!(layout.last_line_width, 4);
+        assert_eq!(truncated, L!("…def"));
+    }
 
     #[test]
     #[serial]

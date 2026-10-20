@@ -11,7 +11,7 @@ use crate::{
 };
 use fish_common::{EscapeFlags, EscapeStringStyle, escape_string};
 use fish_wcstringutil::string_fuzzy_match_string;
-use fish_widestring::{ELLIPSIS_CHAR, decoded_width};
+use fish_widestring::ELLIPSIS_CHAR;
 use std::{
     borrow::Cow,
     collections::{HashMap, hash_map::Entry},
@@ -109,6 +109,7 @@ pub struct Pager {
     // This tracks if the completion list has been changed since we last rendered. If yes,
     // then we definitely need to re-render.
     have_unrendered_completions: bool,
+    measured_width_policy: (usize, usize),
 
     prefix: Cow<'static, wstr>,
     highlight_prefix: bool,
@@ -310,13 +311,11 @@ impl Pager {
 
         // Add the search field.
         let mut search_field_text = self.search_field_line.text().to_owned();
-        // Append spaces to make it at least the required width.
-        if search_field_text.len() < PAGER_SEARCH_FIELD_WIDTH {
-            search_field_text.extend(std::iter::repeat_n(
-                ' ',
-                PAGER_SEARCH_FIELD_WIDTH - search_field_text.len(),
-            ));
-        }
+        let search_width = wcswidth_rendered(&search_field_text);
+        search_field_text.extend(std::iter::repeat_n(
+            ' ',
+            PAGER_SEARCH_FIELD_WIDTH.saturating_sub(search_width),
+        ));
         let search_field = rendering.screen_data.insert_line_at_index(0);
 
         // We limit the width to term_width - 1.
@@ -345,8 +344,10 @@ impl Pager {
     }
 
     fn measure_completion_infos(&mut self) {
+        self.measured_width_policy = width_policy();
         let prefix_len = wcswidth_rendered(&self.prefix);
         for comp in &mut self.unfiltered_completion_infos {
+            comp.comp_width = 0;
             let comp_strings = &mut comp.comp;
 
             let show_prefix = comp.representative.wants_pager_prefix();
@@ -679,12 +680,22 @@ impl Pager {
 
     // Sets the prefix.
     pub fn set_prefix(&mut self, prefix: Cow<'static, wstr>, highlight: bool /* = true */) {
-        self.prefix = prefix;
-        self.highlight_prefix = highlight;
+        if self.prefix != prefix || self.highlight_prefix != highlight {
+            self.prefix = prefix;
+            self.highlight_prefix = highlight;
+            self.measure_completion_infos();
+            self.refilter_completions();
+            self.have_unrendered_completions = true;
+        }
     }
 
     // Sets the terminal size.
     pub fn set_term_size(&mut self, ts: &Termsize) {
+        if self.measured_width_policy != width_policy() {
+            self.measure_completion_infos();
+            self.refilter_completions();
+            self.have_unrendered_completions = true;
+        }
         self.available_term_width = ts.width();
         self.available_term_height = ts.height();
     }
@@ -1028,6 +1039,7 @@ impl Pager {
 
     // Updates the completions list per the filter.
     pub fn refilter_completions(&mut self) {
+        self.have_unrendered_completions = true;
         self.completion_infos.clear();
         for comp in &self.unfiltered_completion_infos {
             if self.completion_info_passes_filter(comp) {
@@ -1060,17 +1072,26 @@ impl Pager {
 
     // Position of the cursor.
     pub fn cursor_position(&self) -> usize {
-        let mut result = decoded_width(&sprintf!(
-            "%s %s",
-            wgettext!(SEARCH_FIELD_PROMPT),
-            self.search_field_line.text()
-        ));
+        let end = crate::native_text::floor_boundary(
+            self.search_field_line.text(), self.search_field_line.position(),
+        );
+        let mut result = wcswidth_rendered(wgettext!(SEARCH_FIELD_PROMPT))
+            + 1
+            + wcswidth_rendered(&self.search_field_line.text()[..end]);
         // Clamp it to the right edge.
         if self.available_term_width > 0 && result + 1 > self.available_term_width {
             result = self.available_term_width - 1;
         }
         result
     }
+}
+
+fn width_policy() -> (usize, usize) {
+    use std::sync::atomic::Ordering;
+    (
+        fish_fallback::FISH_AMBIGUOUS_WIDTH.load(Ordering::Relaxed),
+        fish_fallback::FISH_EMOJI_WIDTH.load(Ordering::Relaxed),
+    )
 }
 
 /// Data structure describing one or a group of related completions.
@@ -1144,30 +1165,36 @@ fn print_max_impl(
     has_more: bool,
     line: &mut Line,
 ) -> usize {
-    let mut chars = chars.into_iter().peekable();
+    let start = line.len();
     let mut remaining = max;
-    let mut i = 0;
-    while let Some(c) = chars.next() {
+    let mut truncated = false;
+    let mut last_color = None;
+    for (i, c) in crate::native_text::display_char_indices(chars) {
         let Some(width_c) = wcwidth_rendered(c) else {
-            // skip non-printable characters
             continue;
         };
-
+        let current_color = color(i);
+        last_color = Some(current_color);
         if width_c > remaining {
+            truncated = true;
             break;
         }
-
-        let ellipsis = ELLIPSIS_CHAR;
-        if (width_c == remaining) && (has_more || chars.peek().is_some()) {
-            line.append(ellipsis, color(i), offset_in_cmdline);
-            remaining = remaining.saturating_sub(wcwidth_rendered(ellipsis).unwrap());
-            break;
+        line.append(c, current_color, offset_in_cmdline);
+        remaining -= width_c;
+    }
+    truncated |= has_more && remaining == 0;
+    if truncated {
+        let ellipsis_width = wcwidth_rendered(ELLIPSIS_CHAR).unwrap();
+        // Remove complete base/combining tails until the ellipsis fits. A wide glyph
+        // is never split and a trailing combining mark never replaces its base.
+        while remaining < ellipsis_width && line.len() > start {
+            let c = line.pop().unwrap();
+            remaining += wcwidth_rendered(c).unwrap_or(0);
         }
-
-        line.append(c, color(i), offset_in_cmdline);
-        remaining = remaining.checked_sub(width_c).unwrap();
-
-        i += 1;
+        if ellipsis_width <= remaining {
+            line.append(ELLIPSIS_CHAR, last_color.unwrap_or_else(|| color(0)), offset_in_cmdline);
+            remaining -= ellipsis_width;
+        }
     }
 
     // return how much we consumed
@@ -1316,6 +1343,105 @@ mod tests {
     use fish_wcstringutil::StringFuzzyMatch;
     use std::borrow::Cow;
     use std::num::NonZeroU16;
+
+    #[test]
+    fn display_truncation_retains_complete_cells() {
+        use crate::{highlight::HighlightSpec, screen::{CharOffset, Line}};
+        for (text, max, expected) in [
+            ("Ae\u{301}", 2, "Ae\u{301}"),
+            ("Ae\u{301}Z", 2, "A…"),
+            ("界Z", 2, "…"),
+            ("A界", 2, "A…"),
+            ("界", 1, "…"),
+            ("界", 0, ""),
+        ] {
+            let mut line = Line::new();
+            let used = super::print_max(
+                CharOffset::None, text.chars(), HighlightSpec::new(), max, false, &mut line,
+            );
+            let actual: String = (0..line.len()).map(|i| line.char_at(i)).collect();
+            assert_eq!(actual, expected, "{text:?} in {max} cells");
+            assert!(used <= max);
+            assert_eq!(used, line.wcswidth_min_0(usize::MAX));
+        }
+    }
+
+    #[test]
+    fn escaped_private_use_is_one_pager_scalar() {
+        use crate::{highlight::HighlightSpec, screen::{CharOffset, Line}};
+        let text: WString = [0xef, 0x98, 0x80].into_iter()
+            .map(fish_widestring::encode_byte_to_char).chain(['Z']).collect();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let mut line = Line::new();
+        super::print_max_impl(
+            CharOffset::None, text.chars(),
+            |i| { seen.borrow_mut().push(i); HighlightSpec::new() },
+            10, false, &mut line,
+        );
+        assert_eq!(line.len(), 2);
+        assert_eq!(line.char_at(0), '\u{f600}');
+        assert_eq!(line.char_at(1), 'Z');
+        assert_eq!(&*seen.borrow(), &[0, 3]);
+    }
+
+    #[test]
+    fn search_cursor_uses_cursor_prefix_not_text_length() {
+        let mut pager = Pager::default();
+        pager.available_term_width = 40;
+        pager.search_field_line.push_edit(
+            crate::editable_line::Edit::new(0..0, L!("界e\u{301}tail").to_owned()), false,
+        );
+        pager.search_field_line.set_position(1);
+        assert_eq!(pager.cursor_position(), 10);
+        pager.search_field_line.set_position(3);
+        assert_eq!(pager.cursor_position(), 11);
+        pager.available_term_width = 9;
+        assert_eq!(pager.cursor_position(), 8);
+    }
+
+    #[test]
+    #[serial]
+    fn grouped_description_filter_narrow_layout_and_prefix_remeasure() {
+        #[cfg(unix)]
+        test_init();
+        let completions: Vec<_> = [("alpha", "shared description"), ("beta", "shared description"),
+            ("gamma", "other description")].into_iter().map(|(c, d)| Completion::new(
+                WString::from(c), WString::from(d), StringFuzzyMatch::exact_match(),
+                CompleteFlags::default(),
+            )).collect();
+        let mut pager = Pager::default();
+        pager.set_prefix(Cow::Borrowed(L!("-")), false);
+        pager.set_completions(&completions, true);
+        assert_eq!(pager.completion_infos.len(), 2);
+        let old_width = pager.completion_infos[0].comp_width;
+        pager.measure_completion_infos();
+        assert_eq!(pager.unfiltered_completion_infos[0].comp_width, old_width);
+        pager.set_prefix(Cow::Borrowed(L!("long-")), false);
+        assert_eq!(pager.completion_infos[0].comp_width, old_width + 8);
+        pager.set_term_size(&Termsize::new(
+            NonZeroU16::new(16).unwrap(), NonZeroU16::new(6).unwrap(),
+        ));
+        pager.search_field_shown = true;
+        pager.search_field_line.push_edit(
+            crate::editable_line::Edit::new(0..0, L!("other").to_owned()), false,
+        );
+        pager.refilter_completions();
+        assert_eq!(pager.completion_infos.len(), 1);
+        let render = pager.render();
+        assert_eq!(render.cols, 1);
+        for i in 0..render.screen_data.line_count() {
+            assert!(render.screen_data.line(i).wcswidth_min_0(usize::MAX) <= 16);
+        }
+        pager.select_next_completion_in_direction(SelectionMotion::Next, &render);
+        assert_eq!(pager.selected_completion_idx, Some(0));
+        pager.search_field_line.push_edit(
+            crate::editable_line::Edit::new(0..pager.search_field_line.len(),
+                L!("no such description").to_owned()), false,
+        );
+        pager.refilter_completions();
+        assert!(pager.completion_infos.is_empty());
+        assert!(pager.rendering_needs_update(&render));
+    }
 
     #[test]
     #[serial]

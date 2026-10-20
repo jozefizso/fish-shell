@@ -81,6 +81,12 @@ unsafe extern "system" {
     fn GetUserDefaultLocaleName(name: *mut u16, capacity: i32) -> i32;
     fn IsValidLocaleName(name: *const u16) -> i32;
     fn GetLocaleInfoEx(name: *const u16, kind: u32, data: *mut u16, capacity: i32) -> i32;
+    fn EnumSystemLocalesEx(
+        callback: unsafe extern "system" fn(*mut u16, u32, isize) -> i32,
+        flags: u32,
+        parameter: isize,
+        reserved: *mut c_void,
+    ) -> i32;
     fn GetDynamicTimeZoneInformation(zone: *mut DynamicTimeZoneInformation) -> u32;
     fn EnumDynamicTimeZoneInformation(index: u32, zone: *mut DynamicTimeZoneInformation) -> u32;
     fn SystemTimeToTzSpecificLocalTimeEx(
@@ -244,6 +250,64 @@ fn locale_name(value: &str) -> io::Result<Vec<u16>> {
         return Err(invalid("unknown Windows locale name"));
     }
     Ok(name)
+}
+
+/// Enumerate canonical Windows locale names usable by both native categories.
+/// Alternate-sort names contain underscores that our parser normalizes as
+/// language/region separators, so they are deliberately not completion values.
+pub fn native_locale_names() -> io::Result<Vec<WString>> {
+    unsafe extern "system" fn collect(name: *mut u16, flags: u32, parameter: isize) -> i32 {
+        if flags & 0x04 != 0 {
+            // LOCALE_ALTERNATE_SORTS
+            return 1;
+        }
+        // EnumSystemLocalesEx supplies a terminated LOCALE_NAME_MAX_LENGTH name.
+        let mut length = 0;
+        while unsafe { *name.add(length) } != 0 {
+            length += 1;
+        }
+        let name = unsafe { std::slice::from_raw_parts(name, length + 1) };
+        // Canonical names must pass the same ASCII grammar and NLS validation as
+        // locale_name, without its optional suffix/underscore normalization.
+        if length == 0
+            || !name[..length].iter().all(|&unit| {
+                matches!(unit, 0x2d | 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
+            })
+            || unsafe { IsValidLocaleName(name.as_ptr()) } == 0
+            || numeric_from_name(name).is_err()
+            || TimeLocale::new(name).is_err()
+        {
+            return 1;
+        }
+        // The validated ASCII name needs only one allocation, directly into
+        // shell text; do not round-trip NLS UTF-16 through UTF-8 and back.
+        let names = unsafe { &mut *(parameter as *mut Vec<WString>) };
+        names.push(name[..length].iter().map(|&unit| char::from(unit as u8)).collect());
+        1
+    }
+
+    let mut names = vec![
+        L!("C").to_owned(),
+        L!("POSIX").to_owned(),
+        L!("C.UTF-8").to_owned(),
+        L!("C.utf8").to_owned(),
+    ];
+    // LOCALE_ALL includes installed Windows, supplemental, and neutral locales;
+    // the synchronous callback receives only this invocation's local state.
+    if unsafe {
+        EnumSystemLocalesEx(
+            collect,
+            0,
+            &mut names as *mut Vec<WString> as isize,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    names.sort_unstable();
+    names.dedup();
+    Ok(names)
 }
 
 fn locale_info(name: &[u16], kind: u32) -> io::Result<String> {

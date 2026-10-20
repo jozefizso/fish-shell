@@ -5,7 +5,7 @@ function fish_prompt -d "Write out the prompt"
     set -l laststatus $status
 
     set -l git_info
-    if git rev-parse 2>/dev/null
+    if command -sq git; and command git rev-parse 2>/dev/null
         set -l git_branch (
             command git symbolic-ref HEAD 2>/dev/null | string replace 'refs/heads/' ''
             or command git describe HEAD 2>/dev/null
@@ -16,7 +16,7 @@ function fish_prompt -d "Write out the prompt"
         if git rev-parse --quiet --verify HEAD >/dev/null
             and not command git diff-index --quiet HEAD --
 
-            for i in (git status --porcelain | string sub -l 2 | sort | uniq)
+            for i in (git status --porcelain | string sub -l 2 | path sort -u)
                 switch $i
                     case "."
                         set git_status "$git_status"(set_color green)✚

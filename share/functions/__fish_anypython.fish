@@ -1,35 +1,33 @@
 # localization: skip(private)
 function __fish_anypython
-    if set -l path (command -s python3)
-        # Do not consider the stub /usr/bin/python3 that comes installed on Darwin to be Python
-        # unless Xcode reports a real directory path.
-        and not begin
-            string match -q Darwin -- "$(uname)"
-            and string match -q /usr/bin/python3 -- $path
-            and type -q xcode-select
-            and not xcode-select --print-path &>/dev/null
+    # Probe the interpreter, not its filename: python.exe may be an App
+    # Execution Alias, and python3 need not satisfy the optional tools' floor.
+    set -l candidates python3 python
+    if builtin -q __fish_native_fs
+        set -a candidates py
+    end
+    for candidate in $candidates
+        set -l executable (command -s $candidate)
+        set -q executable[1]; or continue
+        if test "$executable" = /usr/bin/python3
+            and command -sq xcode-select
+            and not command xcode-select --print-path &>/dev/null
+            continue
         end
-        echo $path
-        return 0
-    end
-    set -l best_path
-    set -l best_minor_version
-    set -l minor_version
-    for path in (path filter -fx -- $PATH/python3.*)
-        string match -rq -- '.*/python3\.(?<minor_version>\d+)$' $path
-        and test $minor_version -ge 5 # Python 3.5+
-        or continue
-        and begin
-            not set -q best_path[1]
-            or test $minor_version -gt $best_minor_version
+        set -l python_args
+        if test $candidate = py
+            set python_args -3
         end
-        set best_path $path
-        set best_minor_version $minor_version
+        if command $executable $python_args -c 'import sys; sys.exit(not ((3, 8) <= sys.version_info < (4, 0)))' &>/dev/null
+            printf '%s\n' $executable $python_args
+            return 0
+        end
     end
-    if set -q best_path[1]
-        echo $best_path
-        return 0
+    for executable in (path filter -fx -- $PATH/python3.*)
+        if command $executable -c 'import sys; sys.exit(not ((3, 8) <= sys.version_info < (4, 0)))' &>/dev/null
+            printf '%s\n' $executable
+            return 0
+        end
     end
-    # We have no python.
     return 1
 end

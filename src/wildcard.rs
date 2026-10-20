@@ -64,23 +64,14 @@ impl PartialEq for WildcardResult {
     }
 }
 
-// This does something horrible refactored from an even more horrible function.
-fn resolve_description(
-    full_completion: &wstr,
-    completion: &mut &wstr,
-    expand_flags: ExpandFlags,
-    description_func: Option<&dyn Fn(&wstr) -> WString>,
-) -> WString {
-    if let Some(complete_sep_loc) = completion.find_char(PROG_COMPLETE_SEP) {
-        // This completion has an embedded description, do not use the generic description.
-        let description = completion[complete_sep_loc + 1..].to_owned();
-        *completion = &completion[..complete_sep_loc];
-        return description;
+fn resolve_description(params: &WcCompletePack) -> WString {
+    if let Some(description) = params.embedded_description {
+        return description.to_owned();
     }
 
-    if let Some(f) = description_func {
-        if expand_flags.gen_descriptions {
-            return f(full_completion);
+    if let Some(f) = params.desc_func {
+        if params.expand_flags.gen_descriptions {
+            return f(params.orig);
         }
     }
 
@@ -90,6 +81,7 @@ fn resolve_description(
 // A transient parameter pack needed by wildcard_complete.
 struct WcCompletePack<'orig, 'f> {
     pub orig: &'orig wstr,
+    pub embedded_description: Option<&'orig wstr>,
     pub desc_func: Option<&'f dyn Fn(&wstr) -> WString>,
     pub expand_flags: ExpandFlags,
 }
@@ -155,16 +147,11 @@ fn wildcard_complete_internal(
         // If we are not replacing the token, be careful to only store the part of the string after
         // the wildcard.
         assert!(!full_replacement || wc.len() <= s.len());
-        let mut out_completion = match full_replacement {
+        let out_completion = match full_replacement {
             true => params.orig,
             false => s.slice_from(wc.len()),
         };
-        let out_desc = resolve_description(
-            params.orig,
-            &mut out_completion,
-            params.expand_flags,
-            params.desc_func,
-        );
+        let out_desc = resolve_description(params);
 
         // Note: out_completion may be empty if the completion really is empty, e.g. tab-completing
         // 'foo' when a file 'foo' exists.
@@ -290,8 +277,15 @@ pub fn wildcard_complete(
     expand_flags: ExpandFlags,
     flags: CompleteFlags,
 ) -> WildcardResult {
+    // Embedded descriptions are display metadata, not part of the candidate:
+    // neither fuzzy matching nor wildcard recursion may consume their text.
+    let (s, embedded_description) = match s.find_char(PROG_COMPLETE_SEP) {
+        Some(index) => (&s[..index], Some(&s[index + 1..])),
+        None => (s, None),
+    };
     let params = WcCompletePack {
         orig: s,
+        embedded_description,
         desc_func,
         expand_flags,
     };
@@ -1555,6 +1549,53 @@ pub fn wildcard_has(s: impl AsRef<wstr>) -> bool {
 mod tests {
     use super::*;
     use fish_feature_flags::with_overridden_feature;
+
+    #[test]
+    fn completion_descriptions_are_not_matching_input() {
+        let candidate = L!("alpha\tsecret_scope 雪");
+        let expand_flags = ExpandFlags {
+            fuzzy_match: true,
+            gen_descriptions: true,
+            ..Default::default()
+        };
+        for pattern in [L!("secret_scope"), L!("*secret_scope"), L!("a*secret_scope")] {
+            let wildcard = crate::parse_util::unescape_wildcards(pattern);
+            assert_eq!(
+                wildcard_complete(
+                    candidate,
+                    &wildcard,
+                    None,
+                    None,
+                    expand_flags,
+                    CompleteFlags::default(),
+                ),
+                WildcardResult::NoMatch,
+                "description matched {pattern}"
+            );
+        }
+        for (pattern, expected) in [
+            (L!("alp"), L!("ha")),
+            (L!("ALP"), L!("alpha")),
+            (L!("alpha"), L!("")),
+            (L!("a*"), L!("")),
+        ] {
+            let wildcard = crate::parse_util::unescape_wildcards(pattern);
+            let mut output = CompletionReceiver::new(16);
+            assert_eq!(
+                wildcard_complete(
+                    candidate,
+                    &wildcard,
+                    None,
+                    Some(&mut output),
+                    expand_flags,
+                    CompleteFlags::default(),
+                ),
+                WildcardResult::Match
+            );
+            assert_eq!(output[0].completion, expected);
+            assert_eq!(output[0].description, L!("secret_scope 雪"));
+        }
+    }
 
     #[test]
     fn test_wildcards() {

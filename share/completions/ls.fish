@@ -3,7 +3,7 @@
 #
 
 # Shared ls switches
-set -l uname (uname -s)
+set -l uname (__fish_uname)
 test "$uname" != SunOS
 and complete -c ls -s S -d "Sort by size"
 

@@ -40,7 +40,7 @@ function fish_config --description "Launch fish's web based configuration"
     if test $cmd = browse
         if set -l python (__fish_anypython)
             function __fish_config_webconfig -V python -a web_config
-                set -lx fish_bin_dir $__fish_bin_dir
+                set -lx fish_bin_path (status fish-path)
                 set -lx __fish_terminal_color_theme $fish_terminal_color_theme
                 $python $web_config/webconfig.py
             end
@@ -56,13 +56,14 @@ function fish_config --description "Launch fish's web based configuration"
 
         else
             echo (set_color $fish_color_error)Cannot launch the web configuration tool:(set_color --reset)
-            echo (set_color -o)"fish_config browse"(set_color --reset) requires Python.
+            echo (set_color -o)"fish_config browse"(set_color --reset) requires Python 3.8 or newer.
             echo Installing python will fix this, and also enable completions to be
             echo automatically generated from man pages.\n
             echo To change your prompt, use (set_color -o)"fish_config prompt"(set_color --reset) or create a (set_color -o)"fish_prompt"(set_color --reset) function.
             echo To list the samples use (set_color -o)"fish_config prompt show"(set_color --reset).\n
 
             echo You can tweak your colors by setting the (set_color $fish_color_search_match)\$fish_color_\*(set_color --reset) variables.
+            return 1
         end
         return 0
     end
@@ -152,7 +153,14 @@ function fish_config --description "Launch fish's web based configuration"
                         if functions -q $func
                             funcsave $func
                         else
-                            command rm -f $__fish_config_dir/functions/$func.fish
+                            if builtin -q __fish_native_fs
+                                if test -f $__fish_config_dir/functions/$func.fish
+                                    __fish_native_fs remove $__fish_config_dir/functions/$func.fish
+                                    or return
+                                end
+                            else
+                                command rm -f $__fish_config_dir/functions/$func.fish
+                            end
                         end
                     end
                     if not functions -q fish_mode_prompt

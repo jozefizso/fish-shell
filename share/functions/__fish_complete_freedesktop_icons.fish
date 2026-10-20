@@ -6,7 +6,11 @@ function __fish_complete_freedesktop_icons -d 'List installed icon names accordi
     # 1. $HOME/.icons
     # 2. $XDG_DATA_DIRS/icons
     # 3. /usr/share/pixmaps
-    set -l dirs (path filter -rd -- ~/.icons $XDG_DATA_DIRS/icons /usr/share/pixmaps)
+    set -l data_dirs $XDG_DATA_DIRS
+    if builtin -q __fish_native_fs
+        set data_dirs (string split ';' -- $data_dirs)
+    end
+    set -l dirs (path filter -rd -- ~/.icons $data_dirs/icons /usr/share/pixmaps)
 
     # https://specifications.freedesktop.org/icon-theme-spec/0.13/#definitions
     # .png, .svg and .xpm are valid icon file formats

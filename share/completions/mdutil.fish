@@ -1,6 +1,7 @@
 # completion for mdutil (macOS)
 
 function __fish_mdutil_volumes
+    command -sq mdutil; or return 127
     command mdutil -a -s | while read -l line
         if string match -q \t"*" -- $line
             printf "%s\n" $line

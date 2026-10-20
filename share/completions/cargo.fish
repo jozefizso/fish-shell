@@ -2,7 +2,13 @@
 
 ## --- WRITTEN MANUALLY ---
 
+function __fish_cargo_available
+    set -l executable $__fish_cargo_wrapping cargo
+    type -q -- $executable[1]
+end
+
 function __fish_cargo
+    __fish_cargo_available; or return 127
     set -l tmp $__fish_cargo_wrapping cargo --color=never $argv
     RUSTUP_AUTO_INSTALL=0 $tmp
 end
@@ -34,27 +40,30 @@ end
 # Ideally, we'd use rustup's "installed targets" but fall back to completions from rustc's "all targets" list, but we don't
 # have an easy way to do that in the `complete` machinery at this time.
 function __fish_cargo_targets
+    __fish_cargo_available; or return 127
     if command -q rustup
         rustup target list | string replace -rf "^(\S+) \(installed\)" '$1'
-    else
+    else if command -q rustc
         rustc --print target-list
     end
 end
 
 function __fish_cargo_features
+    __fish_cargo_available; or return 127
     if command -q jq
-        __fish_cargo read-manifest | jq -r '.features | keys | .[]' | __fish_concat_completions
+        __fish_cargo read-manifest | jq -r '.features | keys | .[]' | string trim -r --chars \r | __fish_concat_completions
     else if set -l python (__fish_anypython)
-        __fish_cargo read-manifest | command $python -Sc "import sys, json"\n"print(*json.load(sys.stdin)['features'].keys(), sep='\n')" | __fish_concat_completions
+        __fish_cargo read-manifest | command $python -X utf8 -Sc "import sys, json"\n"print(*json.load(sys.stdin)['features'].keys(), sep='\n')" | string trim -r --chars \r | __fish_concat_completions
     end
 end
 
 function __fish_cargo_packages
+    __fish_cargo_available; or return 127
     if command -q jq
-        __fish_cargo metadata --no-deps --format-version 1 | jq -r '.packages | .[] | .name' | __fish_concat_completions
+        __fish_cargo metadata --no-deps --format-version 1 | jq -r '.packages | .[] | .name' | string trim -r --chars \r | __fish_concat_completions
     else if set -l python (__fish_anypython)
         __fish_cargo metadata --no-deps --format-version 1 |
-            command $python -Sc "import sys, json"\n"print(*[x['name'] for x in json.load(sys.stdin)['packages']], sep='\n')"
+            command $python -X utf8 -Sc "import sys, json"\n"print(*[x['name'] for x in json.load(sys.stdin)['packages']], sep='\n')" | string trim -r --chars \r
     end
 end
 complete -c cargo -n '__fish_seen_subcommand_from r run t test b build debug c check clippy' -s p -l package \

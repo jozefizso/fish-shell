@@ -1,3 +1,5 @@
+command -sq jj; or return
+
 # The reason for `__this-command-does-not-exist` is that, if dynamic completion
 # is not implemented, we'd like to get an error reliably. However, the
 # behavior of `jj` without arguments depends on the value of a config, see

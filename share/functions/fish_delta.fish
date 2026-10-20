@@ -5,6 +5,10 @@ function fish_delta
         __fish_print_help fish_delta
         return 0
     end
+    set -l dir_sep /
+    if builtin -q __fish_native_fs
+        set dir_sep '\\'
+    end
 
     type -q diff
     or set -l _flag_d --no-diff
@@ -31,7 +35,7 @@ function fish_delta
 
     set -l user_function_path
     set -l user_complete_path
-    set -l user_conf_path $__fish_config_dir/conf.d $__fish_sysconf_dir/conf.d
+    set -l user_conf_path $__fish_config_dir$dir_sep'conf.d' $__fish_sysconf_dir$dir_sep'conf.d'
     test "$vendormode" = user && set -a user_conf_path $__fish_vendor_confdirs
 
     for dir in $fish_function_path
@@ -49,7 +53,7 @@ function fish_delta
         end
         # We don't care about generated completions.
         # They shouldn't be compared at all.
-        contains -- $dir $default_complete_path $__fish_cache_dir/generated_completions
+        contains -- $dir $default_complete_path $__fish_cache_dir$dir_sep'generated_completions'
         or set -a user_complete_path $dir
     end
 
@@ -86,6 +90,9 @@ function fish_delta
         set -f colors "" "" "" "" ""
         set -f pager cat # cannot use a builtin here
     end
+    if builtin -q __fish_native_fs; and test "$pager" = cat
+        set pager string collect --no-trim-newlines
+    end
 
     begin
         while set -q vars[1]
@@ -102,9 +109,9 @@ function fish_delta
             test "$vars[2]" = default_function_path
             and set dir functions
             set -e vars[..2]
-            set -l files (path filter -rf -- $user_var/$argv.fish)
+            set -l files (path filter -rf -- $user_var$dir_sep$argv.fish)
             set -q argv[1]
-            or set files (path filter -rf -- $user_var/*)
+            or set files (path filter -rf -- $user_var$dir_sep*)
             set -q files[1]
             and set have_diff 1
 
@@ -135,7 +142,11 @@ function fish_delta
                         set -l tmpfile (__fish_mktemp_relative fish-delta)
                         status get-file $dir/$bn >$tmpfile
                         __fish_delta_diff $tmpfile
-                        command rm $tmpfile
+                        if builtin -q __fish_native_fs
+                            __fish_native_fs remove $tmpfile
+                        else
+                            command rm $tmpfile
+                        end
                     else
                         __fish_delta_diff /dev/null
                     end
@@ -153,17 +164,20 @@ function fish_delta
                 not set -q argv[1]
                 or contains -- config $argv
             end
-            for file in (path filter -rf -- $__fish_sysconf_dir/config.fish $__fish_config_dir/config.fish)
+            for file in (path filter -rf -- $__fish_sysconf_dir$dir_sep'config.fish' $__fish_config_dir$dir_sep'config.fish')
                 # We count these as "changed" so they show up.
                 printf (_ "%sChanged%s: %s\n") $colors[3] $colors[1] $file
                 not set -ql _flag_d[1]
                 and diff -u -- /dev/null $file
             end
         end
+        # Carry discovery status through the producer job, not a mutation of
+        # the caller's environment across a native pipeline evaluation.
+        test $have_diff -eq 0
         # Instead of using diff's --color=always, just do the coloring ourselves.
     end | string replace -r -- '^(-.*)$' "$colors[5]\$1$colors[1]" |
         string replace -r -- '^(\+.*)$' "$colors[4]\$1$colors[1]" |
         $pager
 
-    return $have_diff
+    return $pipestatus[1]
 end

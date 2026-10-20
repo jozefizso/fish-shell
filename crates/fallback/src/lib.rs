@@ -10,6 +10,8 @@ use std::sync::{
     LazyLock,
     atomic::{AtomicUsize, Ordering},
 };
+#[cfg(windows)]
+use std::sync::atomic::AtomicBool;
 
 /// Width of ambiguous East Asian characters and, as of TR11, all private-use characters.
 /// 1 is the typical default, but we accept any non-negative override via `$fish_ambiguous_width`.
@@ -27,6 +29,23 @@ pub static FISH_AMBIGUOUS_WIDTH: AtomicUsize = AtomicUsize::new(1);
 // For some reason, this is declared here and exposed here, but is set in `env_dispatch`.
 pub static FISH_EMOJI_WIDTH: AtomicUsize = AtomicUsize::new(2);
 
+/// The active native console's measured legacy policy counts nonspacing
+/// characters as cells. Non-console and Unix consumers retain wcwidth semantics.
+#[cfg(windows)]
+pub static FISH_CONSOLE_LEGACY_WIDTHS: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn nonspacing_width() -> usize {
+    #[cfg(windows)]
+    {
+        usize::from(FISH_CONSOLE_LEGACY_WIDTHS.load(Ordering::Relaxed))
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
 static WC_LOOKUP_TABLE: LazyLock<WcLookupTable> = LazyLock::new(WcLookupTable::new);
 
 pub fn fish_wcwidth(c: char) -> Option<usize> {
@@ -38,20 +57,24 @@ pub fn fish_wcwidth(c: char) -> Option<usize> {
     if c == variation_selector_16 {
         return Some(1);
     } else if c == variation_selector_15 {
-        return Some(0);
+        return Some(nonspacing_width());
     }
 
     // Check for Emoji_Modifier property. Only the Fitzpatrick modifiers have this, in range
     // 1F3FB..1F3FF. This is a hack because such an emoji appearing on its own would be drawn as
     // width 2, but that's unlikely to be useful. See #8275.
     if ('\u{1F3FB}'..='\u{1F3FF}').contains(&c) {
+        #[cfg(windows)]
+        if FISH_CONSOLE_LEGACY_WIDTHS.load(Ordering::Relaxed) {
+            return Some(FISH_EMOJI_WIDTH.load(Ordering::Relaxed));
+        }
         return Some(0);
     }
 
     let width = WC_LOOKUP_TABLE.classify(c);
     Some(match width {
         WcWidth::NonPrint => return None,
-        WcWidth::NonCharacter | WcWidth::Combining | WcWidth::Unassigned => 0,
+        WcWidth::NonCharacter | WcWidth::Combining | WcWidth::Unassigned => nonspacing_width(),
         WcWidth::Ambiguous | WcWidth::PrivateUse => {
             // TR11: "All private-use characters are by default classified as Ambiguous".
             FISH_AMBIGUOUS_WIDTH.load(Ordering::Relaxed)

@@ -321,7 +321,7 @@ fn command_role(
     }
 
     let abbreviation_ok = decoration == StatementDecoration::None;
-    if abbreviation_ok && with_abbrs(|set| set.has_match(cmd, abbrs::Position::Command, L!(""))) {
+    if abbreviation_ok && with_abbrs(|set| set.has_match(cmd, abbrs::Position::Command, L!("")).unwrap_or(false)) {
         return Some(Command);
     }
 

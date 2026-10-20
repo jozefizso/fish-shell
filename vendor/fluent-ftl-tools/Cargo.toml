@@ -1,0 +1,29 @@
+# Modified by fish-shell contributors on 2026-10-20: library-only native dependency manifest.
+[package]
+name = "fluent-ftl-tools"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "AGPL-3.0-only OR GPL-2.0-only"
+repository = "https://github.com/danielrainer/fluent-ftl-tools"
+autobins = false
+
+[package.metadata.upstream]
+revision = "17be1e678558d776f2bde068eacedf5fa79bf6fb"
+# Redistribution with fish selects GPL-2.0-only; see COPYING.GPL-2.
+# Library snapshot only; upstream CLI-only dependencies are not retained.
+
+[dependencies]
+anyhow = "1.0.102"
+fluent = { git = "https://github.com/projectfluent/fluent-rs", rev = "0f87afbbc3fe7d20c61a3fc75cb5d0e123aefdda" }
+fluent-syntax = { git = "https://github.com/projectfluent/fluent-rs", rev = "0f87afbbc3fe7d20c61a3fc75cb5d0e123aefdda" }
+unic-langid = "0.9.6"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+fish-tempfile = { path = "../../crates/tempfile" }
+
+# Keep this third-party dependency outside fish's own workspace member inventory.
+[workspace]

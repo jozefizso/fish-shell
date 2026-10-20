@@ -22,6 +22,7 @@ function __fish_iptables_current_table
 end
 
 function __fish_iptables_user_chains
+    command -sq iptables; or return 127
     # There can be user-defined chains so we need iptables' help
     set -l tablearg
     set -l table (__fish_iptables_current_table)

@@ -1,5 +1,40 @@
 # Tests, benchmarks, and CI
 
+## N11 native quality automation (unexecuted implementation)
+
+The exact new target is `windows_n11`, with nonignored serial cases `n11_coverage`,
+`n11_faults`, `n11_quality`. They install and validate the actual N10 ZIP before
+executing installed binaries, reuse established N2–N5 real OS failure/ownership cases
+and the N3 CLI family, and use the N6 owned ConPTY/editor observation helpers.
+Four writers and an interactive console synchronize every sustained save/job/edit
+round with named events and closed-file barriers. Native handle/thread/private-memory/
+working-set traces, durable merge/restart assertions, actual cancellation, orderly TCP
+disconnect/reconnect and a deliberately terminated owned child are behavior fixtures,
+not source assertions or green inventory counts. Fixture cleanup owns only its roots,
+retained children and newly created nested jobs.
+
+`benchmarks/windows_quality.py` retains the unchanged N6 reader measurement method and
+raw samples, plus separately named drained-pipe startup/child/large-pipeline/glob/history/
+completion workloads. It requires actual artifact/host/tool/sink/protection metadata and
+pre-adopted budgets; a pipe is never substituted for rendered ConPTY. The existing
+[`baselines/N6.json`](baselines/N6.json) remains authoritative for matching N6 metrics.
+N1 baseline/budgets are absent, so supplemental samples cannot establish passing quality.
+
+`tests/windows_n11/reconcile.py` executes exact native harness discovery and every declared
+case before checking the component/crate/CLI/asset/retained-Unix map. It hard-fails empty,
+ignored, undiscovered and unresolved coverage, and requires executed positive/failure and
+optional-tool present/absent references. The applicable original Unix suites are untouched
+and remain separate evidence; this infrastructure does not claim their wholesale migration.
+
+The installed daily keyboard journey asserts real editor/native-screen/result/state
+observations and restart/help behavior. Clean restricted-user machine evidence and named
+keyboard-only plus screen-reader journeys remain independent mandatory records. Automated
+screen capture is not assistive-output proof. See [N11's fixture schemas and exact intended
+commands](GOAL_11.md#implemented-automation-and-unresolved-prerequisites) and the
+[semantic-difference/evidence ledger](coverage.md#n11-closure-reconciliation--implemented-automation-no-passing-closure-evidence).
+No build/test/benchmark/manual signoff was exercised for this implementation, and N11 is
+not marked complete.
+
 ## Current N4 acceptance registry and evidence boundary
 
 `tests/windows_n4.rs` is authoritative: exactly `N4_STARTUP`, `N4_SHARING`, `N4_RECOVERY`,

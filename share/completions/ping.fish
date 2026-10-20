@@ -1,6 +1,31 @@
+if __fish_is_windows_command ping; or begin; builtin -q __fish_native_fs; and not command -sq ping; end
+    complete -c ping -xa '(__fish_print_hostnames)'
+    complete -c ping -s t -d 'Ping until interrupted'
+    complete -c ping -s a -d 'Resolve addresses to hostnames'
+    complete -c ping -s n -x -d 'Set request count'
+    complete -c ping -s l -x -d 'Set send buffer size'
+    complete -c ping -s f -d 'Set the IPv4 do-not-fragment flag'
+    complete -c ping -s i -x -d 'Set time to live'
+    complete -c ping -s v -x -d 'Set type of service'
+    complete -c ping -s r -xa '1 2 3 4 5 6 7 8 9' -d 'Record route for the specified number of hops'
+    complete -c ping -s s -xa '1 2 3 4' -d 'Timestamp the specified number of hops'
+    complete -c ping -s j -x -d 'Use loose source route'
+    complete -c ping -s k -x -d 'Use strict source route'
+    complete -c ping -s w -x -d 'Set timeout in milliseconds'
+    complete -c ping -s R -d 'Trace the IPv6 round-trip path'
+    complete -c ping -s S -xa '(__fish_print_addresses | string match -r "^[^\\t]*:.*")' -d 'Set IPv6 source address'
+    complete -c ping -s 4 -d 'Use IPv4'
+    complete -c ping -s 6 -d 'Use IPv6'
+    complete -c ping -a '/?' -d 'Show help'
+    return
+end
+
 complete -c ping -xa "(__fish_print_hostnames)"
 
-set -l ping_version (ping -V 2>&1 | string collect)
+set -l ping_version ''
+if command -sq ping
+    set ping_version (command ping -V 2>&1 | string collect)
+end
 
 switch $ping_version
     case '*iputils*'
@@ -83,7 +108,7 @@ switch $ping_version
         complete -c ping -s p -d "Payload pattern" -x
 
     case '*'
-        set -l ping_os_version (uname)
+        set -l ping_os_version (__fish_uname)
         switch $ping_os_version
             case '*FreeBSD*' '*Darwin*'
                 # In common with FreeBSD and Apple

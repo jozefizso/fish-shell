@@ -10,7 +10,7 @@
 
 set -l OS ""
 set -l freebsd_version ""
-switch (uname)
+switch (__fish_uname)
     case Linux
         set OS Linux
     case Darwin
@@ -29,7 +29,10 @@ end
 # now includes FreeBSD 13 and above.
 if not type -q __fish_is_openzfs
     function __fish_is_openzfs --inherit-variable freebsd_version --inherit-variable OS
-        test $OS = Linux || test $OS = FreeBSD -a $freebsd_version -gt 1300000
+        if test "$OS" = Linux
+            return 0
+        end
+        test "$OS" = FreeBSD; and test "$freebsd_version" -gt 1300000
     end
 end
 

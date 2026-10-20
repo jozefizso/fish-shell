@@ -12,11 +12,18 @@ function __rsync_parse_flags -d "Print info|help FLAGS from help output"
     end
 end
 
+function __rsync_complete_flags
+    command -sq rsync
+    or return 127
+    set -l helptext (command rsync --$argv[1]=help)
+    set -l producer_status $status
+    __rsync_parse_flags $helptext
+    return $producer_status
+end
+
 complete -c rsync -s v -l verbose -d "Increase verbosity"
-complete -c rsync -l info -d "Fine-grained informational verbosity" -xa "
-(__rsync_parse_flags (rsync --info=help))"
-complete -c rsync -l debug -d "Fine-grained debug verbosity" -xa "
-(__rsync_parse_flags (rsync --debug=help))"
+complete -c rsync -l info -d "Fine-grained informational verbosity" -xa '(__rsync_complete_flags info)'
+complete -c rsync -l debug -d "Fine-grained debug verbosity" -xa '(__rsync_complete_flags debug)'
 complete -c rsync -l stderr -xa 'errors all client' -d "change stderr output mode, default: errors"
 complete -c rsync -s q -l quiet -d "Suppress non-error messages"
 complete -c rsync -l no-motd -d "Suppress daemon-mode MOTD"
@@ -85,10 +92,10 @@ complete -c rsync -l ignore-missing-args -d "Ignore missing source args without 
 complete -c rsync -l delete-missing-args -d "Delete missing source args from destination"
 complete -c rsync -l ignore-errors -d "Delete even if there are I/O errors"
 complete -c rsync -l force -d "Force deletion of dirs even if not empty"
-complete -c rsync -l max-delete -xa '(seq 0 10)' -d "Don’t delete more than NUM files"
-complete -c rsync -l max-size -xa '(seq 0 10){K,M,G}' -d "Don’t transfer any file larger than SIZE"
-complete -c rsync -l min-size -xa '(seq 0 10){K,M,G}' -d "Don’t transfer any file smaller than SIZE"
-complete -c rsync -l max-alloc -xa '(seq 0 10){K,M,G}' -d "Change process memory allocation limit"
+complete -c rsync -l max-delete -xa '0 1 2 3 4 5 6 7 8 9 10' -d "Don’t delete more than NUM files"
+complete -c rsync -l max-size -xa '{0,1,2,3,4,5,6,7,8,9,10}{K,M,G}' -d "Don’t transfer any file larger than SIZE"
+complete -c rsync -l min-size -xa '{0,1,2,3,4,5,6,7,8,9,10}{K,M,G}' -d "Don’t transfer any file smaller than SIZE"
+complete -c rsync -l max-alloc -xa '{0,1,2,3,4,5,6,7,8,9,10}{K,M,G}' -d "Change process memory allocation limit"
 complete -c rsync -l partial -d "Keep partially transferred files"
 complete -c rsync -l partial-dir -xa '(__fish_complete_directories)' -d "Put a partially transferred file into DIR"
 complete -c rsync -l delay-updates -d "Put all updated files into place at end"
@@ -140,7 +147,7 @@ complete -c rsync -l log-file-format -x -d "log updates using the specified FMT"
 complete -c rsync -l password-file -r -d "Read password from FILE"
 complete -c rsync -l early-input -d "Use FILE for daemon's early exec input"
 complete -c rsync -l list-only -d "List the files instead of copying them"
-complete -c rsync -l bwlimit -xa '(seq 0 10){K,M,G}' -d "Limit I/O bandwidth; optional unit (KB/s default)"
+complete -c rsync -l bwlimit -xa '{0,1,2,3,4,5,6,7,8,9,10}{K,M,G}' -d "Limit I/O bandwidth; optional unit (KB/s default)"
 complete -c rsync -l stop-after -x -d "Stop rsync after MINS minutes have elapsed"
 complete -c rsync -l stop-at -x -d "Stop rsync at the specified point in time"
 complete -c rsync -l write-batch -r -d "Write a batched update to FILE"
@@ -166,7 +173,7 @@ complete -c rsync -d Hostname -a "
 
 (
     # Prepend any username specified in the completion to the hostname.
-    commandline -ct |sed -ne 's/\(.*@\).*/\1/p'
+    commandline -ct | string match -r '^.*@'
 )(__fish_print_hostnames):
 
 (__fish_print_users)@\tUsername
@@ -187,20 +194,21 @@ complete -c rsync -d Hostname -a "
 # commit to it. For example, on Arch at the time of writing the version line is:
 # rsync  version 3.5.0-g471e17dc  protocol version 32
 
-# Assume new escaping style introduced in 3.2.4
-set -l new_escaping true
+if command -sq rsync
+    # Assume new escaping style introduced in 3.2.4
+    set -l new_escaping true
 
-set -l rsync_ver (rsync --version |
-                  string replace -rf '^rsync +version\D+([\d.]+).*' '$1' |
-                  string split .)
+    set -l rsync_ver (command rsync --version |
+                      string replace -rf '^rsync +version\D+([\d.]+).*' '$1' |
+                      string split .)
 
-if test "$rsync_ver[1]" -lt 3
-    or test "$rsync_ver[1]" -eq 3 -a "$rsync_ver[2]" -lt 2
-    or test "$rsync_ver[1]" -eq 3 -a "$rsync_ver[2]" -eq 2 -a "$rsync_ver[3]" -lt 4
-    set new_escaping false
-end
+    if test "$rsync_ver[1]" -lt 3
+        or test "$rsync_ver[1]" -eq 3 -a "$rsync_ver[2]" -lt 2
+        or test "$rsync_ver[1]" -eq 3 -a "$rsync_ver[2]" -eq 2 -a "$rsync_ver[3]" -lt 4
+        set new_escaping false
+    end
 
-complete -c rsync -d "Remote path" -n "commandline -ct | string match -q '*:*'" -xa "
+    complete -c rsync -d "Remote path" -n "commandline -ct | string match -q '*:*'; and command -sq rsync" -xa "
 (
     # Prepend any user@host:/path information supplied before the remote completion.
         __rsync_remote_target
@@ -211,3 +219,4 @@ complete -c rsync -d "Remote path" -n "commandline -ct | string match -q '*:*'" 
         string match --invert './' $($new_escaping; or echo ' | string escape -n'; echo)
 )
 "
+end

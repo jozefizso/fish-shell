@@ -373,6 +373,7 @@ fn read_native_console_null(
 ) -> std::io::Result<BuiltinResult> {
     use crate::fd_readable_set::Timeout;
     use crate::input::{CharEvent, InputEventTrigger, NativeInput, WaitSources};
+    let _consumer = crate::console_windows::suspend_evaluation_input();
     let mut scope = crate::tty_handoff::NativeEditorScope::enter()?;
     let result = (|| {
         scope.disable_protocols()?;

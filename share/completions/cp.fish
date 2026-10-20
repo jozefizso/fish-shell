@@ -32,7 +32,7 @@ if __fish_supports_version cp
     complete -c cp -s Z -d "Set SELinux context of copy to default type"
     complete -c cp -s X -l context -r -d "Set SELinux context of copy to CONTEXT"
 else # BSD/macOS
-    set -l uname (uname -s)
+    set -l uname (__fish_uname)
     # Solaris:   cp [-R | r [H | L | P ]] [-fi ] [-p        ]
     # openbsd:   cp	[-R |   [H | L | P ]] [-fi ] [-pv       ]
     # macos:     cp [-R |   [H | L | P ]] [-fin] [-pvalxscX ] # -c: clone -X: copy xattrs

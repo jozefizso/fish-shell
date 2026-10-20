@@ -87,7 +87,7 @@ complete -c configure -l target -d "Configure for building compilers for TARGET"
 # use autoconf's --help to generate completions:
 complete -c configure -a '(for tok in (commandline -xpc)
     if string match -q "*configure" -- $tok
-        __fish_parse_configure $tok
+        test -e "$tok"; and __fish_parse_configure "$tok"
         break
     end
 end)'

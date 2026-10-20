@@ -1,3 +1,20 @@
+if __fish_is_windows_command sort
+    set -l windows_sort -c sort -n 'not __fish_prev_arg_in /m /l /rec /t /o'
+    complete $windows_sort -a /r -d 'Reverse sort order'
+    complete $windows_sort -a /+ -d 'Start comparison at the specified character position'
+    complete $windows_sort -a /m -d 'Set memory limit in kilobytes'
+    complete $windows_sort -a /l -d 'Override sort locale'
+    complete -c sort -n '__fish_prev_arg_in /l' -xa C -d 'Binary character order'
+    complete $windows_sort -a /rec -d 'Set maximum record length'
+    complete -c sort -n '__fish_prev_arg_in /m /rec' -f
+    complete $windows_sort -a /t -d 'Set temporary directory'
+    complete -c sort -n '__fish_prev_arg_in /t' -xa '(__fish_complete_directories)'
+    complete $windows_sort -a /o -d 'Write output to file'
+    complete $windows_sort -a /unique -d 'Return unique lines'
+    complete $windows_sort -a '/?' -d 'Show help'
+    return
+end
+
 complete -c sort -s b -l ignore-leading-blanks -d "Ignore leading blanks"
 complete -c sort -s d -l dictionary-order -d "Consider only blanks and alphanumerics"
 complete -c sort -s f -l ignore-case -d "Ignore case"

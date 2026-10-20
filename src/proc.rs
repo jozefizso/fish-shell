@@ -693,15 +693,20 @@ pub struct Job {
     pub(crate) native_terminal: RefCell<Option<crate::tty_handoff::NativeChildDonation>>,
     #[cfg(windows)]
     pub(crate) native_failure: Cell<Option<i32>>,
+    #[cfg(windows)]
+    pub(crate) native_substitutions: crate::native_adapters::SubstitutionCaller,
 }
 
 impl Job {
     pub fn new(properties: JobProperties, command_str: WString) -> Self {
         static NEXT_INTERNAL_JOB_ID: AtomicU64 = AtomicU64::new(1);
+        let internal_job_id = InternalJobId(NEXT_INTERNAL_JOB_ID.fetch_add(1, Ordering::Relaxed));
         Job {
             properties,
             command_str,
-            internal_job_id: InternalJobId(NEXT_INTERNAL_JOB_ID.fetch_add(1, Ordering::Relaxed)),
+            internal_job_id,
+            #[cfg(windows)]
+            native_substitutions: crate::native_adapters::SubstitutionCaller(internal_job_id),
             ..Default::default()
         }
     }
@@ -999,6 +1004,7 @@ impl Job {
 pub fn is_interactive_session() -> bool {
     IS_INTERACTIVE_SESSION.load()
 }
+
 pub fn set_interactive_session(flag: bool) {
     IS_INTERACTIVE_SESSION.store(flag);
 }

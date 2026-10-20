@@ -5,6 +5,10 @@
 # The string replace command takes into account GECOS-formatted description fields, by retaining
 # only the first field, the relevant one, from the comma-separated list
 function __fish_complete_users --description "Print a list of local users, with the real user name as a description"
+    if builtin -q __fish_native_services
+        builtin __fish_native_services users
+        return $status
+    end
     if command -sq getent
         command getent passwd | while read -l line
             string split -f 1,5 : -- $line | string join \t | string replace -r ',.*' ''

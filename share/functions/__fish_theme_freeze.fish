@@ -20,7 +20,7 @@ function __fish_theme_freeze
         mkdir -p -- $__fish_config_dir/conf.d
     end
     or return
-    printf >$__fish_config_dir$separator$relative_path %s\n \
+    set -l frozen_theme (printf %s\n \
         $(test $data_source = __fish_theme_migrate &&
             echo "\
 # This file was created by fish when upgrading to version 4.3, to migrate
@@ -35,5 +35,11 @@ function __fish_theme_freeze
         $(test $data_source = __fish_theme_migrate &&
             echo '# See also the release notes for fish 4.3.0 (run `help relnotes`).') \
         "" \
-        'set --global '$theme_data
+        'set --global '$theme_data)
+    if builtin -q __fish_native_fs
+        printf '%s\n' $frozen_theme |
+            __fish_native_fs atomic-write $__fish_config_dir$separator$relative_path
+    else
+        printf '%s\n' $frozen_theme >$__fish_config_dir$separator$relative_path
+    end
 end

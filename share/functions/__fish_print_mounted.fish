@@ -1,5 +1,9 @@
 # localization: skip(private)
 function __fish_print_mounted --description 'Print mounted devices'
+    if builtin -q __fish_native_services
+        __fish_native_services drives | string replace -r '\t.*$' ''
+        return $pipestatus[1]
+    end
     if test -r /etc/mtab
         # In mtab, spaces are replaced by a literal '\040'
         # So it's safe to get the second "field" and then replace it

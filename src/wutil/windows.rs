@@ -404,8 +404,8 @@ pub fn native_directory_case_sensitive(path: &wstr) -> io::Result<bool> {
 
 /// These predicates ask whether this token can actually open the object for the requested data
 /// rights, not whether a read-only attribute or guessed POSIX mode looks permissive. They do not
-/// promise a subsequent operation cannot race. X_OK is FILE_TRAVERSE for directories and the same
-/// .exe provider + FILE_EXECUTE policy as discovery for regular files.
+/// promise a subsequent operation cannot race. X_OK is FILE_TRAVERSE for directories; files use
+/// the same native/script classification, provider availability and access policy as discovery.
 pub fn waccess(path: &wstr, mode: AccessFlags) -> io::Result<()> {
     let original = path;
     let path = object_path(path, true)?;
@@ -423,9 +423,11 @@ pub fn waccess(path: &wstr, mode: AccessFlags) -> io::Result<()> {
                 return Err(io::Error::from_raw_os_error(5));
             }
             let original = native_path_text(&resolved(original)?)?;
-            crate::path::native_resolve_executable(&original)?;
+            crate::path::native_classify_command(&original)?;
+        } else {
+            rights |= 0x20;
         }
-        rights |= 0x20;
+        // The classifier checked FILE_EXECUTE for images/interpreters and read access for scripts.
     }
     native_open(&path, rights, true).map(|_| ())
 }

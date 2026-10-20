@@ -4,7 +4,7 @@ mod native_queries;
 use std::{
     ffi::{OsStr, OsString, c_void},
     fs,
-    os::windows::{ffi::OsStrExt, io::AsRawHandle},
+    os::windows::{ffi::OsStrExt, io::{AsRawHandle, FromRawHandle, OwnedHandle}},
     path::Path,
     ptr::null_mut,
     sync::atomic::{AtomicPtr, Ordering},
@@ -38,6 +38,8 @@ unsafe extern "system" {
     fn SetEvent(event: Handle) -> i32;
     fn CloseHandle(handle: Handle) -> i32;
     fn WaitForSingleObject(handle: Handle, timeout: u32) -> u32;
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+    fn GetExitCodeProcess(process: Handle, status: *mut u32) -> i32;
     fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
     fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
     fn ReadConsoleInputW(input: Handle, records: *mut Record, count: u32, read: *mut u32) -> i32;
@@ -111,6 +113,26 @@ impl Drop for Event {
         }
     }
 }
+/// Open only an acknowledged owned client, while its release event is held.
+/// Keeping the handle makes its eventual DWORD independent of PID reuse.
+pub struct RetainedProcess(OwnedHandle);
+impl RetainedProcess {
+    pub fn acknowledged(pid: u32) -> Self {
+        let raw = unsafe { OpenProcess(0x0010_1000, 0, pid) };
+        assert!(!raw.is_null(), "open acknowledged owned process {pid}: {}", std::io::Error::last_os_error());
+        Self(unsafe { OwnedHandle::from_raw_handle(raw) })
+    }
+    pub fn running(&self, description: &str) {
+        assert_eq!(unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) }, 258, "{description}");
+    }
+    pub fn wait_status(&self, description: &str) -> u32 {
+        assert_eq!(unsafe { WaitForSingleObject(self.0.as_raw_handle(), 30_000) }, 0,
+            "acknowledged {description} did not exit inside its bound");
+        let mut status = 0;
+        check(unsafe { GetExitCodeProcess(self.0.as_raw_handle(), &mut status) });
+        status
+    }
+}
 static CONTROL: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 unsafe extern "system" fn ignore_control(kind: u32) -> i32 {
     if kind <= 1 {
@@ -166,6 +188,7 @@ pub fn run(mode: &str, args: Vec<OsString>) {
             if mode == "n6-case-ignore-control" {
                 CONTROL.store(controlled.handle, Ordering::Relaxed);
                 check(unsafe { SetConsoleCtrlHandler(Some(ignore_control), 1) });
+                fs::write(root.join("child-pid"), std::process::id().to_string()).unwrap();
             }
             let changed = modes(i, o);
             fs::write(

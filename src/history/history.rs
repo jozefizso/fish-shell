@@ -55,6 +55,7 @@ use std::{
     num::NonZeroUsize,
     ops::ControlFlow,
     sync::{Arc, Mutex, MutexGuard},
+    sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
 #[cfg(unix)]
@@ -366,6 +367,8 @@ impl NativeSavedCommand {
 }
 
 struct HistoryImpl {
+    /// Shared with readers so cancellation never waits for history disk I/O.
+    revision: Arc<AtomicU64>,
     /// The name of this list. Used for picking a suitable filename and for switching modes.
     name: WString,
     /// Optional custom directory for the history file. If None, uses path_get_data().
@@ -451,6 +454,7 @@ impl HistoryImpl {
         if item.contents.is_empty() {
             return;
         }
+        self.revision.fetch_add(1, Ordering::Release);
 
         // Pin the native baseline before a first automatic save can publish our own items.
         #[cfg(windows)]
@@ -501,6 +505,7 @@ impl HistoryImpl {
 
     /// Internal function.
     fn clear_file_state(&mut self) {
+        self.revision.fetch_add(1, Ordering::Release);
         #[cfg(unix)]
         {
             self.file_contents = None;
@@ -610,6 +615,7 @@ impl HistoryImpl {
             })
         ) {
             self.new_items.pop();
+            self.revision.fetch_add(1, Ordering::Release);
         }
 
         self.first_unwritten_new_item_index =
@@ -925,6 +931,7 @@ impl HistoryImpl {
 
     fn new(name: WString, custom_directory: Option<WString>) -> Self {
         Self {
+            revision: Arc::new(AtomicU64::new(0)),
             name,
             custom_directory,
             new_items: vec![],
@@ -982,6 +989,7 @@ impl HistoryImpl {
 
     /// Remove a history item.
     fn remove(&mut self, str_to_remove: &wstr) {
+        self.revision.fetch_add(1, Ordering::Release);
         #[cfg(windows)]
         {
             self.load_old_if_needed();
@@ -1011,6 +1019,9 @@ impl HistoryImpl {
 
     /// Resolves any pending history items, so that they may be returned in history searches.
     fn resolve_pending(&mut self) {
+        if self.has_pending_item {
+            self.revision.fetch_add(1, Ordering::Release);
+        }
         self.has_pending_item = false;
     }
 
@@ -1037,6 +1048,7 @@ impl HistoryImpl {
             })?;
             self.history_file_id = Some(file_id);
         }
+        self.revision.fetch_add(1, Ordering::Release);
         self.new_items.clear();
         self.deleted_items.clear();
         self.first_unwritten_new_item_index = 0;
@@ -1069,6 +1081,9 @@ impl HistoryImpl {
 
         #[cfg(unix)]
         {
+            if !self.new_items.is_empty() {
+                self.revision.fetch_add(1, Ordering::Release);
+            }
             self.new_items.clear();
             self.first_unwritten_new_item_index = 0;
         }
@@ -1083,6 +1098,7 @@ impl HistoryImpl {
                     .get(item.str())
                     .is_some_and(|scope| scope.clears_local())
             });
+        let old_len = self.new_items.len();
         self.new_items.retain(|item| {
             !self
                 .deleted_items
@@ -1090,6 +1106,9 @@ impl HistoryImpl {
                 .is_some_and(|scope| scope.clears_local())
         });
         self.has_pending_item &= !pending_was_deleted;
+        if self.new_items.len() != old_len {
+            self.revision.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Import a bash command history file. Bash's history format is very simple: just lines with
@@ -1195,6 +1214,7 @@ impl HistoryImpl {
         self.file_contents = Some(snapshot.data);
         self.history_file_id = Some(file_id);
         self.native_snapshot_stale = false;
+        self.revision.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -1263,8 +1283,10 @@ impl HistoryImpl {
             if item.last_added_timestamp() == snapshot.last_added_timestamp()
                 && item.contents == snapshot.contents
             {
-                // found it
-                item.required_paths = valid_file_paths;
+                if item.required_paths != valid_file_paths {
+                    item.required_paths = valid_file_paths;
+                    self.revision.fetch_add(1, Ordering::Release);
+                }
                 break;
             }
         }
@@ -1448,11 +1470,56 @@ fn should_import_bash_history_line(line: &wstr) -> bool {
     errors.is_empty()
 }
 
-pub struct History(Mutex<HistoryImpl>);
+pub struct History(
+    Mutex<HistoryImpl>,
+    Arc<AtomicU64>,
+    #[cfg(windows)] Mutex<Option<(u64, Arc<History>)>>,
+);
 
 impl History {
     fn imp(&self) -> MutexGuard<'_, HistoryImpl> {
         self.0.lock().unwrap()
+    }
+
+    /// Changes only for history visibility/validation changes, not ordinary reads.
+    /// Lock-free even while a worker is decoding or synchronizing the history file.
+    pub fn revision(&self) -> u64 {
+        self.1.load(Ordering::Acquire)
+    }
+
+    /// Freeze one native visible history version, sharing the retained baseline bytes.
+    /// A revision's snapshot is reused across keystrokes and asynchronous consumers.
+    #[cfg(windows)]
+    pub fn reader_snapshot(&self) -> Arc<History> {
+        let mut cache = self.2.lock().unwrap();
+        if let Some((revision, snapshot)) = &*cache {
+            if *revision == self.revision() {
+                return Arc::clone(snapshot);
+            }
+        }
+        let mut source = self.imp();
+        source.load_old_if_needed();
+        let revision = self.revision();
+        let token = Arc::new(AtomicU64::new(revision));
+        let imp = HistoryImpl {
+            revision: Arc::clone(&token),
+            name: WString::new(),
+            custom_directory: None,
+            new_items: source.new_items.clone(),
+            first_unwritten_new_item_index: source.new_items.len(),
+            has_pending_item: source.has_pending_item,
+            disable_automatic_save_counter: 1,
+            deleted_items: HashMap::new(),
+            file_contents: source.file_contents.clone(),
+            history_file_id: source.history_file_id.clone(),
+            native_snapshot_stale: false,
+            native_committed: HashMap::new(),
+            countdown_to_vacuum: None,
+            thread_pool: Arc::clone(&source.thread_pool),
+        };
+        let snapshot = Arc::new(Self(Mutex::new(imp), token, Mutex::new(None)));
+        *cache = Some((revision, Arc::clone(&snapshot)));
+        snapshot
     }
 
     /// Privately add an item. If pending, the item will not be returned by history searches until a
@@ -1486,7 +1553,12 @@ impl History {
         let mut imp = imp;
         #[cfg(windows)]
         imp.load_old_if_needed();
-        Arc::new(Self(Mutex::new(imp)))
+        let revision = Arc::clone(&imp.revision);
+        #[cfg(unix)]
+        let history = Self(Mutex::new(imp), revision);
+        #[cfg(windows)]
+        let history = Self(Mutex::new(imp), revision, Mutex::new(None));
+        Arc::new(history)
     }
 
     /// Returns the history with the given name, creating it if necessary, using the default data directory.
@@ -1891,6 +1963,17 @@ impl HistorySearch {
 
     /// Finds the next search result. Returns `true` if one was found.
     pub fn go_to_next_match(&mut self, direction: SearchDirection) -> bool {
+        self.go_to_next_match_with_cancel(direction, &|| false)
+    }
+
+    /// Check between scanned entries, including entries which do not match.
+    /// Retained native snapshots make item lookup memory-only; this does not claim
+    /// to interrupt a Unix file mapping/read already inside item_at_index().
+    pub fn go_to_next_match_with_cancel(
+        &mut self,
+        direction: SearchDirection,
+        cancel: &impl Fn() -> bool,
+    ) -> bool {
         let invalid_index = match direction {
             SearchDirection::Backward => usize::MAX,
             SearchDirection::Forward => 0,
@@ -1902,6 +1985,9 @@ impl HistorySearch {
 
         let mut index = self.current_index;
         loop {
+            if cancel() {
+                return false;
+            }
             // Backwards means increasing our index.
             match direction {
                 SearchDirection::Backward => index += 1,
@@ -1921,6 +2007,9 @@ impl HistorySearch {
                 self.current_item = None;
                 return false;
             };
+            if cancel() {
+                return false;
+            }
 
             // Look for an item that matches and (if deduping) that we haven't seen before.
             if !item.matches_search(&self.canon_term, self.search_type, !self.ignores_case()) {
@@ -1941,7 +2030,12 @@ impl HistorySearch {
 
     /// Move current index so there is `value` matches in between new and old indexes
     pub fn search_forward(&mut self, value: usize) {
-        while self.go_to_next_match(SearchDirection::Forward) && self.deduper.len() <= value {}
+        self.search_forward_with_cancel(value, &|| false);
+    }
+
+    pub fn search_forward_with_cancel(&mut self, value: usize, cancel: &impl Fn() -> bool) {
+        while self.go_to_next_match_with_cancel(SearchDirection::Forward, cancel)
+            && self.deduper.len() <= value {}
         self.deduper.clear();
     }
 

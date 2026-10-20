@@ -25,6 +25,22 @@ use fish_common::{UnescapeFlags, UnescapeStringStyle, unescape_string};
 use fish_wcstringutil::join_strings;
 use std::ops::Range;
 
+// Native reserved Unicode uses byte markers internally, but public editor
+// coordinates count Unicode scalars, never canonical storage units.
+fn character_count(text: &wstr) -> usize {
+    #[cfg(windows)]
+    { crate::native_text::count_scalars(text) }
+    #[cfg(unix)]
+    { text.len() }
+}
+
+fn character_offset(text: &wstr, count: usize) -> usize {
+    #[cfg(windows)]
+    { crate::native_text::prefix_end(text, count) }
+    #[cfg(unix)]
+    { count.min(text.len()) }
+}
+
 /// Which part of the comandbuffer are we operating on.
 #[derive(PartialEq)]
 enum TextScope {
@@ -411,8 +427,8 @@ pub fn commandline(
             _ => panic!(),
         }
     }
-    // Editor operations require a live reader, not merely an initialized interactive parser.
-    // Explicit/transient buffers remain available to noninteractive completion providers.
+    // Reader actions require a live reader. Text/cursor operations can also
+    // initialize the pending command line during an interactive `fish -C`.
     let needs_reader = forward_jump
         || forward_jump_till
         || backward_jump
@@ -421,15 +437,18 @@ pub fn commandline(
         || selection_mode
         || selection_start_mode
         || selection_end_mode
-        || line_mode
-        || column_mode
+        || search_field_mode
         || search_mode
         || paging_mode
         || paging_full_mode
-        || search_field_mode
-        || showing_suggestion
+        || showing_suggestion;
+    let needs_interactive_buffer = line_mode
+        || column_mode
         || (override_buffer.is_none() && parser.libdata().transient_commandline.borrow().is_none());
-    if needs_reader && reader_current_data().is_none() {
+    if reader_current_data().is_none()
+        && (needs_reader
+            || (needs_interactive_buffer && !crate::proc::is_interactive_session()))
+    {
         err_str!("commandline requires an active interactive reader")
             .cmd(cmd)
             .full_trailer(parser)
@@ -637,14 +656,15 @@ pub fn commandline(
                     get_offset_from_line(&rstate.text, line_index).unwrap_or_default();
                 let next_line_offset =
                     get_offset_from_line(&rstate.text, line_index + 1).unwrap_or(rstate.text.len());
-                if line_offset + new_coord > next_line_offset {
+                let line = &rstate.text[line_offset..next_line_offset];
+                if new_coord > character_count(line) {
                     err_fmt!("column %s exceeds line length", arg)
                         .cmd(cmd)
                         .full_trailer(parser)
                         .finish(streams);
                     return Err(STATUS_INVALID_ARGS);
                 }
-                line_offset + new_coord
+                line_offset + character_offset(line, new_coord)
             };
             commandline_set_buffer(parser, None, Some(new_pos));
         } else {
@@ -653,12 +673,11 @@ pub fn commandline(
                 if line_mode {
                     lineno(&rstate.text, rstate.cursor_pos)
                 } else {
-                    rstate.cursor_pos + 1
-                        - get_offset_from_line(
-                            &rstate.text,
-                            i32::try_from(lineno(&rstate.text, rstate.cursor_pos) - 1).unwrap(),
-                        )
-                        .unwrap_or_default()
+                    let start = get_offset_from_line(
+                        &rstate.text,
+                        i32::try_from(lineno(&rstate.text, rstate.cursor_pos) - 1).unwrap(),
+                    ).unwrap_or_default();
+                    character_count(&rstate.text[start..rstate.cursor_pos]) + 1
                 }
             ));
         }
@@ -693,7 +712,7 @@ pub fn commandline(
         let Some(selection) = rstate.selection else {
             return Err(STATUS_CMD_ERROR);
         };
-        streams.out.append(&sprintf!("%u\n", selection.start));
+        streams.out.append(&sprintf!("%u\n", character_count(&rstate.text[..selection.start])));
         return Ok(SUCCESS);
     }
 
@@ -701,7 +720,7 @@ pub fn commandline(
         let Some(selection) = rstate.selection else {
             return Err(STATUS_CMD_ERROR);
         };
-        streams.out.append(&sprintf!("%u\n", selection.end));
+        streams.out.append(&sprintf!("%u\n", character_count(&rstate.text[..selection.end])));
         return Ok(SUCCESS);
     }
 
@@ -730,16 +749,12 @@ pub fn commandline(
                 .finish(streams);
             return Err(STATUS_CMD_ERROR);
         }
-        transient = parser
-            .libdata()
-            .transient_commandline
-            .borrow()
-            .as_ref()
-            .unwrap()
-            .clone();
+        let commandline = parser.libdata().transient_commandline.borrow();
+        let commandline = commandline.as_ref().unwrap();
+        transient = commandline.text.clone();
         current_buffer = &transient;
-        current_cursor_pos = transient.len();
-    } else if reader_current_data().is_some() {
+        current_cursor_pos = commandline.cursor_pos;
+    } else if reader_current_data().is_some() || crate::proc::is_interactive_session() {
         current_buffer = &rstate.text;
         current_cursor_pos = rstate.cursor_pos;
     } else {
@@ -804,17 +819,16 @@ pub fn commandline(
                 Ok(num) => num,
             };
 
-            let new_pos = std::cmp::min(
-                range
-                    .start
+            let new_pos = character_offset(
+                current_buffer,
+                character_count(&current_buffer[..range.start])
                     .saturating_add_signed(isize::try_from(new_pos).unwrap()),
-                current_buffer.len(),
             );
             commandline_set_buffer(parser, None, Some(new_pos));
         } else {
             streams
                 .out
-                .append(&sprintf!("%u\n", current_cursor_pos - range.start));
+                .append(&sprintf!("%u\n", character_count(&current_buffer[range.start..current_cursor_pos])));
         }
         return Ok(SUCCESS);
     }

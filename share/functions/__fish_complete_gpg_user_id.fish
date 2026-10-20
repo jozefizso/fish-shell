@@ -10,4 +10,5 @@ function __fish_complete_gpg_user_id -d "Complete using gpg user ids" -a __fish_
     # Regardless, it's probably nicer as a description.
     set -q list_arg[1]; or set list_arg --list-keys
     $__fish_complete_gpg_command $list_arg --with-colon | string split -a -f 10 : | string replace '\x3a' : | string replace -r '(.*) <(.*)>' '$1\t$2'
+    return $pipestatus[1]
 end

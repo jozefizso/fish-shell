@@ -27,6 +27,39 @@ unless shown. Operands, `--`, invalid options and missing values remain part of 
 N9 owns installed help/localization, including each actual `-h/--help` entry, not N1 or N11.
 N11 reconciles evidence; it does not take implementation ownership from N1–N10.
 
+## N11 closure reconciliation — implemented automation, no passing closure evidence
+
+The [N11 implementation/evidence boundary](GOAL_11.md#implemented-automation-and-unresolved-prerequisites)
+now names runnable `windows_n11` cases `n11_coverage`, `n11_faults`, `n11_quality`,
+the actual N10 ZIP consumer, real sustained/fault/editor journeys, raw benchmark fixtures,
+and required external records. These additions have **not been built or executed as part
+of this delivery** and do not change historical I/S/R/U/X evidence into passing results.
+
+`tests/windows_n11/reconcile.py` discovers the current 01–16 analyses, crate directories,
+native Windows modules, current executable/builtin ledger rows, all asset inputs and
+retained Unix language/interactive cases. It requires actual native harness discovery and
+execution, nonignored exact cases, artifact identity and positive/failure references before
+accepting any supported disposition. Its emitted unresolved inventory is not a green
+coverage count; no complete map was fabricated for unmigrated or unexecuted behavior.
+The actual N9 file-level dispositions and N10 matrix still need reconciliation with this
+exact release. Unix suites remain retained and separately identified.
+
+### Semantic-difference and support decisions retained at closure
+
+| Contract | Established owner / required boundary | N11 evidence consumer and remaining limit |
+|---|---|---|
+| POSIX fork, same-PID exec, foreground-pgroup fg/bg | X, N1/N5; no snapshot fork, image replacement, thread suspension or focus substitute | Coverage mappings may use permanent exclusion only for these three approved contracts, with executed rejection/alternate cases. This is not an exclusion for native background/jobs/wait/disown. |
+| Native background/disown/cancellation | N5 production job/control owner; never terminate the host's enclosing job | N11 reuses real survival/cancellation/disconnect cases and additionally terminates only a process pinned at its own private child barrier. Source presence is not a new passing run. |
+| Native state durability and sharing | N4 transactions/ACLs/notifications; acknowledged state must survive merge/restart | N11 adds synchronized concurrent consumers, durable history/universal assertions and resource traces; it reuses N4 ACL/interrupted-save/overflow/UNC cases rather than claiming source wiring is fault evidence. |
+| Network disconnect | Native child/network tool behavior versus remote filesystem server availability are different contracts | An owned loopback TCP server disconnects after an actual READY exchange; native child EOF/status/reconnect and shell recovery are asserted. Existing UNC tests and this loopback case do **not** establish live SMB-server outage recovery. That unprovisioned remote fault remains unverified. |
+| Performance support | Recorded N6 minimal/release ConPTY host/protection/workload/sink only; pipe timing is separate | Existing `baselines/N6.json` numeric budgets are unchanged. Recorded N1 baseline/budgets and pre-adopted resource-growth evidence are missing prerequisites; supplementary measurements cannot invent thresholds or claim passing quality. |
+| Accessibility and clean-machine daily use | N7 editor/renderer, N10 actual package/clean restricted-user fixture; terminal and assistive-tool/version-specific limits | Automated keyboard/model/native-screen/state assertions are implemented. No named keyboard-only/screen-reader human signoffs were fabricated; no universal accessibility assertion follows. Fresh HOME alone is not clean-machine evidence. |
+| Optional integrations and distribution | N8/N9 tested present/absent tools; N10 explicit unsigned x64 ZIP, ARM64/signing/distribution boundaries retained | Coverage requires actual executed present/absent cases. A host-only label cannot excuse a portable runtime dependency or a forgotten shipped asset. |
+
+All N11 matrix runs, complete portable/asset migration mappings, baseline decisions,
+actual clean-machine evidence and named human journeys remain required before the
+goal or a release support statement can be called complete.
+
 ## Current runtime and native module inventory
 
 Paths in this table are relative to `src/`; directory rows explicitly enumerate their Rust children.

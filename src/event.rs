@@ -330,6 +330,8 @@ impl Event {
     }
 
     pub fn caller_exit(internal_job_id: InternalJobId, job_id: MaybeJobId) -> Self {
+        #[cfg(windows)]
+        crate::native_adapters::release_caller(internal_job_id);
         Self::new(
             EventDescription::CallerExit {
                 caller_id: internal_job_id,

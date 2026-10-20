@@ -132,7 +132,7 @@ function __fish_umask_print_symbolic
 
     for i in 2 3 4
         set res $res,$letter[$i]=
-        set val (echo $umask|cut -c $i)
+        set val (string sub -s $i -l 1 -- $umask)
 
         if contains $val 0 1 2 3
             set res {$res}r

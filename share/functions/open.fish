@@ -3,7 +3,7 @@
 # This allows us to use 'open FILENAME' to open a given file in the default
 # application for the file.
 #
-if not command -sq open
+if builtin -q __fish_native_services; or not command -sq open
     function open --description "Open file in default application"
         set -l options h/help
         argparse -n open $options -- $argv
@@ -19,7 +19,10 @@ if not command -sq open
             return 1
         end
 
-        if type -q -f cygstart
+        if builtin -q __fish_native_services
+            builtin __fish_native_services open $argv
+            return $status
+        else if type -q -f cygstart
             for i in $argv
                 cygstart $i
             end

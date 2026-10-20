@@ -22,6 +22,10 @@ If there is no function called *NAME*, a new function will be created with the s
 **-e command** or **--editor command**
     Open the function body inside the text editor given by the command (for example, **-e vi**). The special command ``fish`` will use the built-in editor (same as specifying **-i**).
 
+    Editor settings are tokenized as an executable and separate arguments, not evaluated as shell commands. Quote an executable path containing spaces, and include the editor's own wait option if it normally starts a separate GUI process. The temporary filename is appended as one argument; ``funced`` does not assume Vim-style cursor flags work in other editors.
+
+    On native Windows the temporary workspace is private to the current user and SYSTEM. Its function file uses UTF-8; the editor must preserve that encoding. The workspace is removed after success or cancellation. Saved definitions use native atomic replacement, and a denied write is reported rather than silently discarding the error.
+
 **-i** or **--interactive**
     Force opening the function body in the built-in editor even if ``$VISUAL`` or ``$EDITOR`` is defined.
 

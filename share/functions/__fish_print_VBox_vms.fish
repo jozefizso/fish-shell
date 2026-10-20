@@ -14,7 +14,9 @@ function __fish_print_VBox_vms
     # `VBoxManage list vms` output example:
     # "Machine Name" {222537b0-1ea1-454a-abf0-ed0d6c3c6346}
     # "Another Machine" {332537b4-1ea1-454a-abf0-ed1d6c3c2347}
-    set -l lines (VBoxManage list vms | string match -r '"(.*)" {(.*)}')
+    set -l lines (VBoxManage list vms)
+    or return $status
+    set lines (string match -r '"(.*)" {(.*)}' -- $lines)
 
     while set -q lines[3]
         if test $print_names = true

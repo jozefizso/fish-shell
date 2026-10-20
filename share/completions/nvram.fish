@@ -1,6 +1,7 @@
 # completion for nvram (macOS)
 
 function __fish_nvram_variables
+    command -sq nvram; or return 127
     command nvram -p
 end
 

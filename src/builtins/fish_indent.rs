@@ -1094,10 +1094,16 @@ fn do_indent(
                 }
                 #[cfg(windows)]
                 {
-                    streams
-                        .err
-                        .appendln("fish_indent: help delivery requires N9");
-                    return Err(STATUS_INVALID_ARGS);
+                    match crate::print_help::help_text("fish_indent") {
+                        Ok(text) => {
+                            streams.out.append(&WString::from_str(&text));
+                            return Ok(SUCCESS);
+                        }
+                        Err(error) => {
+                            streams.err.appendln(&WString::from_str(&format!("fish_indent: {error}")));
+                            return Err(STATUS_CMD_ERROR);
+                        }
+                    }
                 }
             }
             'v' => {

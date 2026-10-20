@@ -55,6 +55,7 @@ function trap -d 'Perform an action when the shell receives a signal'
                         set sw --on-event fish_exit
                     end
                     echo "function __trap_handler_$sig $sw; $cmd; end" | source
+                    or return
                 else
                     return 1
                 end

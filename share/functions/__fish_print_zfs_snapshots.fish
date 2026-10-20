@@ -1,5 +1,6 @@
 # localization: skip(private)
 function __fish_print_zfs_snapshots -d "Lists ZFS snapshots"
+    command -sq zfs; or return 1
     set fast_results (zfs list -o name -H)
     printf "%s\n" $fast_results
 

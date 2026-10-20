@@ -23,6 +23,12 @@ const PROFILE: Guid = Guid {
     c: 0x4760,
     d: [0x9a, 0xfe, 0xea, 0x33, 0x17, 0xb6, 0x71, 0x73],
 };
+const PROGRAM_FILES: Guid = Guid {
+    a: 0x905e63b6,
+    b: 0xc1bf,
+    c: 0x494e,
+    d: [0xb2, 0x9c, 0x65, 0xb7, 0x32, 0xd3, 0xd2, 0x1a],
+};
 #[link(name = "shell32")]
 unsafe extern "system" {
     fn SHGetKnownFolderPath(
@@ -63,6 +69,10 @@ fn known_folder(id: &Guid) -> io::Result<PathBuf> {
         text
     };
     super::native_absolute_path(&fish_widestring::native_to_shell_text_owned(result?))
+}
+
+pub(super) fn native_program_files() -> io::Result<PathBuf> {
+    known_folder(&PROGRAM_FILES)
 }
 
 /// Read-only known-folder discovery, also used by isolated acceptance tests.

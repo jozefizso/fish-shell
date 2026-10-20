@@ -99,7 +99,7 @@ impl Fixture {
         fs::copy(probe, &probe_copy).expect("required native probe artifact");
         let state = root.join("user state");
         fs::create_dir(&state).unwrap();
-        for dir in ["home", "config", "data", "cache"] {
+        for dir in ["home", "config", "data", "cache", "temp"] {
             fs::create_dir(state.join(dir)).unwrap();
         }
         Self {
@@ -118,7 +118,9 @@ impl Fixture {
             // Formatting cases declare their locale instead of pinning the
             // workstation's current numeric defaults. N4 explicitly unsets this
             // precondition when testing restoration of actual OS defaults.
-            .env("LANG", "C");
+            .env("LANG", "C")
+            .env("TEMP", self.state.join("temp"))
+            .env("TMP", self.state.join("temp"));
         if let Some(value) = std::env::var_os("SystemRoot") {
             cmd.env("SystemRoot", value);
         }

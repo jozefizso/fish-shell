@@ -1,7 +1,13 @@
 # localization: skip(private)
 function __fish_print_xdg_mimetypes --description 'Print XDG mime types'
     set -l files (__fish_print_xdg_applications_directories)/mimeinfo.cache
-    # If we have no file, don't run `cat` without arguments!
+    # No configured application directories means no MIME inventory.
     set -q files[1] || return 1
-    command cat $files 2>/dev/null | string match -v '[MIME Cache]' | string replace = \t
+    set -l result 1
+    for file in $files
+        test -r $file; or continue
+        string replace -rf '^([^#=\r\n]+)=(.*)$' '$1\t$2' <$file
+        test $status -eq 0; and set result 0
+    end
+    return $result
 end

@@ -740,8 +740,12 @@ fn unescape_string_internal(input: &wstr, flags: UnescapeFlags) -> Option<WStrin
                     }
                 }
                 '$' if unescape_special => {
-                    to_append_or_none = Some(VARIABLE_EXPAND_SINGLE);
-                    vars_or_seps.push(input_position);
+                    let is_cmdsub = input_position + 1 < input.len()
+                        && input.char_at(input_position + 1) == '(';
+                    if !is_cmdsub {
+                        to_append_or_none = Some(VARIABLE_EXPAND_SINGLE);
+                        vars_or_seps.push(input_position);
+                    }
                 }
                 '[' if unescape_special => {
                     to_append_or_none = Some(SLICE_BEGIN);

@@ -9,6 +9,10 @@ function suspend --description 'Suspend the current shell.'
         __fish_print_help suspend
         return 0
     end
+    if builtin -q __fish_native_fs
+        printf '%s\n' 'suspend: POSIX stop/continue job control is unsupported on native Windows' >&2
+        return 1
+    end
 
     if not set -q _flag_force
         and status is-login

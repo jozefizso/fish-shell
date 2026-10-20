@@ -1,12 +1,12 @@
 # GOAL_07 — Interactive feature parity
 
 **Phase: N7**  
-**Status: planned / not started**  
+**Status: implementation integrated / verification in progress; not complete**  
 **Primary native target:** `x86_64-pc-windows-msvc`; ARM64 is a separate extension.
 
 This contract expands the approved roadmap at commit `2acbbad4b`. The acceptance
-IDs below describe required future tests, not existing names, runnable targets or
-passing results. Historical prototype evidence remains in [GOAL.md](GOAL.md).
+IDs below remain mandatory; registered tests are not evidence that they passed.
+Historical prototype evidence remains in [GOAL.md](GOAL.md).
 
 ## Objective
 
@@ -50,6 +50,177 @@ separate permissive resolver or an invented Unix environment.
 - Reuse the evaluator, completion/ranking algorithms, editor and pager models.
   Keep fish characters, native UTF-16 units and terminal display cells distinct;
   no blanket platform guard may silently hide portable interactive behavior.
+
+## Implementation workflow
+
+The advisor-reviewed execution order below replaces broad, unverified feature
+fanout. It changes the implementation process, not the nine deliveries, acceptance
+requirements, native ownership rules or permanently excluded POSIX contracts.
+
+### 1. Restore the ordinary console baseline
+
+One integration owner maintains `platform/windows/interactive-parity`. Preserve
+the logical topic worktrees, integrated correctness fixes and existing regressions;
+pause further dependent feature edits until ordinary input works.
+
+Review the producer, decoding, binding lookup and consuming reader dispatch for
+the first observed failure. Correct its cause rather than increasing timeouts.
+Use a bounded, owned-console journey: a benign F2 insertion, Unicode cursor/edit
+actions, builtin output, another usable prompt, explicit exit status and exact
+console-mode restoration. Stop at the first missing receipt.
+
+**Delivery:** that journey and the relevant inherited N6 reader cases pass against
+the changed executable. A library-only pass does not satisfy this delivery.
+
+### 2. Finish small functional slices
+
+Complete one end-to-end slice before starting the next dependent slice:
+
+- Completion: real discovery, evaluation, insertion, cursor/escaping, acceptance
+  and execution; then conditions, wrappers, autoload and invalidation.
+- Editing: history/suggestions, abbreviations, pager and default/vi/hybrid actions,
+  including required helpers, undo, selections, errors and mode transitions.
+- Rendering: Unicode/layout, resize/background repaint, capability policy and
+  fallback, separating model state from observed console cells/cursor.
+
+Every slice preserves bounded asynchronous work, exact publication checks,
+owning-thread callbacks, cancellation/drain and exclusive child input ownership.
+These are continuous invariants, not a later integration phase.
+
+**Delivery:** applicable owning-unit and real integration/console cases pass for
+the slice, with artifact identity and observed results retained.
+
+### 3. Use correctness tests at the owning layer
+
+Use ordinary unit tests for decoder boundaries, partial input, layout, ranking,
+editing state and generations. Use actual evaluator/filesystem/history integration
+and owned console fixtures for consumer-visible behavior. Keep minimum decoder
+robustness local and bounded; retain required real-console fallback coverage and
+existing regressions. Do not expand the work into new vulnerability-reproduction
+campaigns. Review ownership, bounds and consuming dispatch directly.
+
+Use deterministic barriers, isolated state, concurrent output draining and cleanup
+limited to test-owned work. Do not substitute sleeps, captured echo, source-text
+assertions, mock completions or repeated stress attempts for functional evidence.
+
+### 4. Verify and commit coherent slices
+
+Before a slice commit, review the consuming call sites and run its applicable
+native debug/release and retained Unix verification. Preserve incomplete work in
+its worktree; do not commit a known failing aggregate as completed N7.
+
+Before phase closure, run all three mandatory N7 gates and their declared families,
+required inherited gates, current/MSRV native artifacts and harnesses, retained
+Unix checks and the independent runtime smoke. Missing fixtures, ignored mandatory
+cases, zero discovery and unavailable required evidence block closure. Record the
+source revision or dirty patch identity, toolchains, artifact profiles, host/
+protocol conditions and exact executed/nonignored counts. Old logs do not prove
+newer code.
+
+### Provider-policy stop rule
+
+On a provider policy rejection, stop the affected request and record the error and
+blocked delivery once. Do not repeatedly retry it, rephrase it to obtain the same
+blocked output, switch providers to circumvent the rejection or change access/
+safety settings. Continue only independent, allowed ordinary engineering work.
+Resume affected work only after documented provider resolution or clarification;
+otherwise keep the requirement explicitly blocked, without deleting its required
+test or claiming completion. This workflow cannot guarantee that future requests
+will avoid moderation errors.
+
+### Current evidence and next action
+
+The latest four-cell native x64 MSVC sweep passed all 84 registered families in
+both debug and release, with zero ignored. It includes required-option values
+beginning with `-`, logical-token completion, quoted substitutions, callable
+aliases, resource publication, abbreviation rename, description matching,
+modified-F3 query ownership, function-discovery lock scope and missing wrapped-target metadata.
+
+| Toolchain / features | N7-COMPLETE | N7-EDIT | N7-RENDER | Command log under `target/n7-gate-results/` |
+| --- | ---: | ---: | ---: | --- |
+| 1.95 / minimal | 40/40 | 98/98 | 30/30 | `n7-current-minimal-wrapped-metadata-native-gettext-io.txt` |
+| 1.95 / default | 40/40 | 98/98 | 30/30 | `n7-current-default-wrapped-metadata-native-gettext-io.txt` |
+| 1.85 / minimal | 40/40 | 98/98 | 30/30 | `n7-msrv-minimal-wrapped-metadata-native-gettext-io.txt` |
+| 1.85 / default | 40/40 | 98/98 | 30/30 | `n7-msrv-default-wrapped-metadata-native-gettext-io.txt` |
+
+These are dirty-worktree snapshots based on `cdc211188`, not a final release/source
+identity. Later optional-producer repairs require their own verification; they
+are not retroactively included in these images.
+
+Native state synchronization queues external notifications for the existing
+owning-thread delayed-event dispatcher. An asynchronous variable handler can no
+longer interrupt initial binding autoload inside the first `fish_prompt` event
+and leave the reader with only partial presets. Actual input-function dispatch
+inside a binding helper does not refresh asynchronous work against temporary
+helper locals before consuming the displayed suggestion.
+
+Evaluator epochs do not span blocking input consumption. Job/universal callbacks
+have their own epochs; a typed-cancel reset is consumed once across nested
+evaluators. Backlog/framing yields preserve the current worker generation.
+Both greater-than-4096-key backlogs pass with suffix recovery. Silent background
+completion invalidates cached cells even when a child restores the cursor.
+
+Each of those four cells also executes all 22 workspace library targets:
+256 passed and four pre-existing exhaustive printf cases remained ignored.
+The root native library contributes 151 passing cases with zero ignored.
+These are development checks, not a waiver of unexecuted exhaustive coverage.
+The two default cells start from fresh Unicode target roots, generate actual
+gettext catalogs, and pass 19 locale/help consumers each. Both minimal cells pass 21;
+the current/minimal locale launch initially met an in-use owned N9 test executable
+at link time and passed after its owner exited, recorded separately in
+`n9-current-minimal-locale-after-owned-test-image-unlock.txt`. No process was killed
+or link failure suppressed.
+
+Retained Unix Rust1.92 library verification passed 206 cases; all 16 selected
+checks and actual pexpect journeys passed at unchanged deadlines and normal
+concurrency, zero skipped. The combined log is
+`unix-library-interactions-and-inherited-metadata-after.txt`; it also records an
+actual completion-selected GNU SHA256 consumer with the wrapped MD5 executable
+absent and an independently matched Unicode payload digest.
+
+Earlier retained-host runs exposed first-prompt, nested-reader and suggestion
+timeouts. Actual syscall and startup profiles traced whole-asset traversal while
+looking up one named theme. Named theme/prompt lookup now uses direct asset
+retrieval. Live-file Unix debug function discovery uses a metadata-only function
+index instead of traversing unrelated completions/themes/tools; it still discovers
+live source files. The function-definition mutex no longer spans filesystem
+enumeration. Script loading remains with the original full-data asset owner.
+
+| Single named-asset profile observation | Before (microseconds) | After (microseconds) |
+|---|---:|---:|
+| Interactive batch startup | 3250505 | 6511 |
+| Actual reader startup | 3309901 | 5982 |
+
+Profiles are retained as `before-exact-lookup-unix-startup-*.profile` and
+`unix-startup-*.profile`. These diagnose the functional deadline failure; they are
+not adopted N11 performance baselines, budgets or release acceptance.
+
+The inbox ConPTY host independently reports a one-cell nonspacing policy.
+Layout probes an inactive private buffer without painting or consuming input;
+the modern zero-cell host branch remains unexercised. Relative
+`CARGO_TARGET_DIR` default-feature builds share workspace-rooted help/gettext
+outputs across build scripts.
+
+Inherited current-toolchain/minimal N1–N6 gates passed in both development profiles.
+The baseline registry also passed with the admitted N8 batch/PowerShell providers
+and permanent unsupported boundaries. Full refreshed traces are
+`n1-inherited-scoped-function-index-and-exact-assets.txt` through
+`n6-inherited-scoped-function-index-and-exact-assets.txt`, plus
+`native-inherited-scoped-function-index-and-exact-assets.txt`.
+
+A separate actual native PTY journey exercised normal startup, abbreviation
+expansion, Unicode/spaced filename insertion, middle-token programmable completion
+and history recall. Separate input frames proved default Ctrl-C clears an
+unaccepted command without its file effect; its observed `clear-commandline`
+binding preserves status zero rather than inventing a native control receipt.
+The actual transcript, image SHA-256 and filesystem observations are retained in
+`target/n7-gate-results/n7-live-reader-normal-startup-logical-token.json`.
+Enter/Ctrl-J were remapped only for those separate clearing frames; F12 executed
+the observation command.
+
+This is not N7 closure. Final-source/release identity and the independent final
+installed-artifact journey remain blocked by the N10 management authorization
+rejection. The development-image journey is not a replacement for that acceptance.
 
 ## Implementation delivery
 

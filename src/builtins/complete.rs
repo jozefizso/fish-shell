@@ -506,12 +506,6 @@ pub fn complete(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]
             Some(param) => param,
         };
 
-        #[cfg(windows)]
-        if let Some(error) = crate::complete::native_completion_request_error(&do_complete_param) {
-            err_raw!(Cow::Borrowed(error)).cmd(cmd).finish(streams);
-            return Err(STATUS_CMD_ERROR);
-        }
-
         let (token, _) = get_token_extent(&do_complete_param, do_complete_param.len());
 
         // Create a scoped transient command line, so that builtin_commandline will see our
@@ -519,7 +513,10 @@ pub fn complete(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]
         let _remove_transient = parser
             .libdata()
             .transient_commandline
-            .scoped_replace(Some(do_complete_param.clone()));
+            .scoped_replace(Some(crate::parser::TransientCommandline {
+                text: do_complete_param.clone(),
+                cursor_pos: do_complete_param.len(),
+            }));
 
         // Prevent accidental recursion (see #6171).
         if !parser.libdata().builtin_complete_current_commandline {
@@ -530,6 +527,7 @@ pub fn complete(parser: &mut Parser, streams: &mut IoStreams, argv: &mut [&wstr]
             let complete_options = CompletionRequestOptions::default();
             let (mut comp, _needs_load) = crate::complete::complete(
                 &do_complete_param,
+                None,
                 complete_options,
                 &mut parser.context(),
             );

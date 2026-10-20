@@ -251,6 +251,10 @@ pub struct ScopedData {
     /// The internal job ID of the job being populated, or 0 if none.
     /// This supports the '--on-job-exit caller' feature.
     pub caller_id: InternalJobId,
+    /// Outermost active function's Job owns helper resources across nested
+    /// mktemp functions and command substitutions; zero means explicit cleanup.
+    #[cfg(windows)]
+    pub native_helper_owner: InternalJobId,
 }
 
 impl Default for ScopedData {
@@ -265,8 +269,16 @@ impl Default for ScopedData {
             read_limit: 0,
             is_cleaning_procs: false,
             caller_id: InternalJobId::default(),
+            #[cfg(windows)]
+            native_helper_owner: InternalJobId::default(),
         }
     }
+}
+
+/// The command line visible to completion scripts, including its insertion point.
+pub struct TransientCommandline {
+    pub text: WString,
+    pub cursor_pos: usize,
 }
 
 /// Miscellaneous data.
@@ -275,7 +287,7 @@ pub struct LibraryData {
     /// A fake value to be returned by builtin_commandline. This is used by the completion
     /// machinery when wrapping: e.g. if `tig` wraps `git` then git completions need to see git on
     /// the command line.
-    pub transient_commandline: ScopedRefCell<Option<WString>>,
+    pub transient_commandline: ScopedRefCell<Option<TransientCommandline>>,
 
     /// A file descriptor holding the current working directory.
     /// Note that the long-term design of fish will implement subshells using threads;
@@ -291,6 +303,10 @@ pub struct LibraryData {
     /// Process-only registered waits and detached monitors owned by this parser.
     #[cfg(windows)]
     pub native_jobs: crate::proc::NativeJobs,
+
+    /// Defaults for future isolated native child groups, never effective host limits.
+    #[cfg(windows)]
+    pub native_limits: crate::native_limits::NativeLimits,
 
     /// Variables supporting the "status" builtin.
     pub status_vars: StatusVars,
@@ -763,6 +779,8 @@ impl Parser {
             }
         };
         let (new_exec_count, new_status_count) = exec_counts(op_ctx);
+        #[cfg(windows)]
+        let native_cancel_signal = op_ctx.native_cancellation_signal();
 
         drop(restore_current_node);
         self.pop_block(scope_block);
@@ -771,6 +789,12 @@ impl Parser {
         event::fire_delayed(self);
 
         let sig = signal_check_cancel();
+        #[cfg(windows)]
+        let sig = if sig == 0 {
+            native_cancel_signal.map_or(0, |signal| signal.code())
+        } else {
+            sig
+        };
         if sig != 0 {
             EvalRes::cancelled(RawSignal::new(sig))
         } else if let Some(sig) = execution_ctx.cancel_signal() {

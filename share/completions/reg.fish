@@ -1,14 +1,19 @@
 function __reg_run_reg_safely
-    set -l output (reg $argv | tr -d '\r' | tail --lines +2 | string collect)
-    if not string match -q -r "reg: Invalid syntax*" -- $output
-        set output (string split \n -- $output)
-        echo $output | string replace -a " " \n
+    command -sq reg; or return 127
+    if test "$argv[1]" = query; and set -q argv[2]
+        set argv[2] (string trim -r -c '\\' -- "$argv[2]")
     end
+    set -l output (command reg $argv | string replace -a \r '')
+    set -l result $pipestatus[1]
+    test $result = 0; or return $result
+    # Registry paths may contain spaces. Preserve one key per record; headers,
+    # value rows and the trailing summary are not key candidates.
+    string match -r '^HKEY_.*$' -- $output
 end
 
 function __reg_add_complete_args -a previous_token
     if test "$previous_token" = add
-        set -l current_token (commandline -tc)
+        set -l current_token (commandline -tc | string unescape)
         __reg_run_reg_safely query $current_token
         return
     end
@@ -63,7 +68,7 @@ end
 
 function __reg_delete_complete_args -a previous_token
     if test "$previous_token" = delete
-        set -l current_token (commandline -tc)
+        set -l current_token (commandline -tc | string unescape)
         __reg_run_reg_safely query $current_token
         return
     end
@@ -80,7 +85,7 @@ end
 
 function __reg_export_complete_args -a previous_token
     if test "$previous_token" = export
-        set -l current_token (commandline -tc)
+        set -l current_token (commandline -tc | string unescape)
         __reg_run_reg_safely query $current_token
         return
     end
@@ -91,7 +96,7 @@ end
 
 function __reg_query_complete_args -a previous_token
     if test "$previous_token" = query
-        set -l current_token (commandline -tc)
+        set -l current_token (commandline -tc | string unescape)
         __reg_run_reg_safely query $current_token
         return
     end
@@ -127,7 +132,7 @@ end
 
 function __reg_save_complete_args -a previous_token
     if test "$previous_token" = save
-        set -l current_token (commandline -tc)
+        set -l current_token (commandline -tc | string unescape)
         __reg_run_reg_safely query $current_token
         return
     end

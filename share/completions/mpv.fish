@@ -1,6 +1,14 @@
-set -l options (mpv --list-options 2>/dev/null)
-complete -c mpv -l(string replace -fr '^\s*--([\w-]+).*' '$1' -- $options)
-complete -c mpv -lno-(string replace -fr '^\s*--([\w-]+).*Flag.*' '$1' -- $options)
+if command -sq mpv
+    set -l options (command mpv --list-options 2>/dev/null)
+    set -l names (string replace -fr '^\s*--([\w-]+).*' '$1' -- $options)
+    set -l flags (string replace -fr '^\s*--([\w-]+).*Flag.*' '$1' -- $options)
+    if set -q names[1]
+        complete -c mpv -l$names
+    end
+    if set -q flags[1]
+        complete -c mpv -lno-$flags
+    end
+end
 
 complete -c mpv -l start -x -d "Seek to given position (%, s, hh:mm:ss)"
 complete -c mpv -l no-audio -d "Disable audio"

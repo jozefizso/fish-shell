@@ -341,6 +341,7 @@ jobs:
         $env:FISH_NATIVE_N6_KEY_READER = (Resolve-Path 'target/x86_64-pc-windows-msvc/debug/fish_key_reader.exe').Path
         $env:FISH_NATIVE_N6_RELEASE_KEY_READER = (Resolve-Path 'target/x86_64-pc-windows-msvc/release/fish_key_reader.exe').Path
         $env:FISH_NATIVE_N6_EVIDENCE_ROOT = Join-Path (Get-Location) 'native-windows-results/n6-console'
+        $env:FISH_NATIVE_N7_EVIDENCE_ROOT = Join-Path (Get-Location) 'native-windows-results/n7-console'
         Invoke-NativeTests -Name native-acceptance -CargoArgs @('--test', 'windows_native', 'native_required_acceptance_cases') -Required @('native_required_acceptance_cases') -Exact
         $required = @('W2-RUNTIME', 'W3-BYTES', 'W3-ERRORS', 'W3-LIFETIME', 'W3-CONSOLE', 'W4-PATHS', 'W5-LANGUAGE', 'W5-NO-CONFIG', 'W5-REJECT', 'W6-CHILD', 'W6-STREAMS', 'W6-STATUS', 'W6-FAILURE', 'W6-BOUNDARY', 'W6-CLEAN-RUN')
         $passes = @(Get-Content native-windows-results/native-acceptance.txt | Where-Object { $_ -match '^PASS (debug|release) ' })
@@ -354,7 +355,8 @@ jobs:
           @{ Name = 'n3'; Tests = @('N3_LANGUAGE', 'N3_CAPTURE', 'N3_SCRIPTS'); Gates = @('N3-LANGUAGE', 'N3-CAPTURE', 'N3-SCRIPTS') },
           @{ Name = 'n4'; Tests = @('N4_STARTUP', 'N4_SHARING', 'N4_RECOVERY'); Gates = @('N4-STARTUP', 'N4-SHARING', 'N4-RECOVERY') },
           @{ Name = 'n5'; Tests = @('N5_JOBS', 'N5_CANCEL', 'N5_ACCOUNT'); Gates = @('N5-JOBS', 'N5-CANCEL', 'N5-ACCOUNT') },
-          @{ Name = 'n6'; Tests = @('n6_editor', 'n6_child', 'n6_tools'); Gates = @('N6-EDITOR', 'N6-CHILD', 'N6-TOOLS') }
+          @{ Name = 'n6'; Tests = @('n6_editor', 'n6_child', 'n6_tools'); Gates = @('N6-EDITOR', 'N6-CHILD', 'N6-TOOLS') },
+          @{ Name = 'n7'; Tests = @('n7_complete', 'n7_edit', 'n7_render'); Gates = @('N7-COMPLETE', 'N7-EDIT', 'N7-RENDER') }
         )) {
           foreach ($profile in @('debug', 'release')) {
             $profileArgs = @()
@@ -471,6 +473,24 @@ jobs:
               })
               if ($casePasses.Count -ne 40 -or @(Compare-Object ($expectedCases | Sort-Object) ($casePasses | Sort-Object)).Count -ne 0) {
                 throw "N6 must execute all 20 native console/tool families against both artifacts in the $profile harness"
+              }
+            }
+            if ($phase.Name -eq 'n7') {
+              $families = @{
+                'N7-COMPLETE' = 20
+                'N7-EDIT' = 49
+                'N7-RENDER' = 15
+              }
+              $log = Get-Content "native-windows-results/$name.txt"
+              foreach ($gate in $phase.Gates) {
+                $count = $families[$gate]
+                $total = 2 * $count
+                $discovery = @($log | Where-Object { $_ -eq "DISCOVER $gate families=$count profiles=2 ignored=0" })
+                $execution = @($log | Where-Object { $_ -eq "EXECUTED $gate discovered=$total executed=$total ignored=0 failed=0" })
+                $casePasses = @($log | Where-Object { $_ -match "^PASS-CASE (debug|release) $gate/" })
+                if ($discovery.Count -ne 1 -or $execution.Count -ne 1 -or $casePasses.Count -ne $total) {
+                  throw "$gate must discover and execute every required family against both artifacts"
+                }
               }
             }
           }

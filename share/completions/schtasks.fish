@@ -1,5 +1,10 @@
 function __schtasks_print_tasks -d 'Helper function to print tasks'
-    schtasks /query /fo csv /nh | awk -F ',' '{ print $1 }'
+    command -sq schtasks; or return 127
+    # Task names are the first CSV field. Quotes inside it are doubled.
+    command schtasks /query /fo csv /nh |
+        string match -rg '^"((?:""|[^"])*)",' |
+        string replace -a '""' '"'
+    return $pipestatus[1]
 end
 
 function __schtasks_change_complete_args -a previous_token

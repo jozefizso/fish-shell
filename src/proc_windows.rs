@@ -9,15 +9,10 @@ use crate::parser::{Block, Parser};
 use crate::prelude::*;
 use crate::threads::NativeRuntime;
 use std::io;
-use std::os::windows::io::{AsRawHandle, RawHandle};
+use std::os::windows::io::AsRawHandle;
 use std::rc::Rc;
 use std::sync::Arc;
 
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn WaitForMultipleObjects(count: u32, handles: *const RawHandle, all: i32, timeout: u32)
-    -> u32;
-}
 
 #[derive(Default)]
 pub struct NativeJobs {
@@ -122,6 +117,13 @@ fn observe_job(job: &Job) -> io::Result<bool> {
         let donation = job.native_terminal.borrow_mut().take();
         changed |= donation.is_some();
         drop(donation);
+        crate::native_adapters::release_caller(job.internal_job_id);
+    }
+    if changed && !job.is_foreground() {
+        // A silenced/successful job can overwrite cells and restore the cursor.
+        // Completion, not whether its summary printed, invalidates that cache.
+        crate::screen::invalidate_native_screen();
+        crate::reader::reader_schedule_prompt_repaint();
     }
     Ok(changed)
 }
@@ -168,7 +170,7 @@ pub fn native_wait_for_change(parser: &mut Parser) -> io::Result<()> {
             .map_or(std::ptr::null_mut(), |token| token.handle().as_raw_handle()),
     ];
     let count = if cancellation.is_some() { 2 } else { 1 };
-    match unsafe { WaitForMultipleObjects(count, handles.as_ptr(), 0, u32::MAX) } {
+    match crate::console_windows::wait_for_evaluator_handles(&handles[..count], u32::MAX)? {
         0 => {
             job_reap(parser, false, None);
             Ok(())
@@ -425,9 +427,34 @@ impl Job {
             .borrow()
             .as_ref()
             .is_some_and(|lease| lease.is_active());
+        // Acknowledging a receipt only rearms callbacks; it must not resume the
+        // interrupted evaluator tail when a provider later exits (even with 0).
+        // Retain counted receipt history independently of native exit DWORDs.
+        let received_before = crate::signal::console_control_epoch();
+        let pending_before = crate::signal::pending_console_controls();
+        let latch_console_receipt = || {
+            let received = crate::signal::console_control_epoch();
+            let signal = if pending_before.close != 0 || received.close != received_before.close {
+                Some(crate::signal::RawSignal::CTRL_CLOSE)
+            } else if pending_before.ctrl_break != 0 || received.ctrl_break != received_before.ctrl_break {
+                Some(crate::signal::RawSignal::CTRL_BREAK)
+            } else if pending_before.ctrl_c != 0 || received.ctrl_c != received_before.ctrl_c {
+                Some(crate::signal::RawSignal::CTRL_C)
+            } else {
+                None
+            };
+            if let Some(signal) = signal {
+                self.group().cancel_with_signal(signal);
+            }
+            signal.is_some()
+        };
         let mut cancelled = false;
         loop {
+            cancelled |= latch_console_receipt();
             job_reap(parser, false, block_io);
+            // A completion callback can reenter evaluation/rearm the owner.
+            // Compare monotonic counts again before accepting completion.
+            cancelled |= latch_console_receipt();
             // Exit requested by an unrelated job's callback must not wait for
             // this child or overwrite the callback's explicit shell status.
             if parser.libdata().exit_current_script {
@@ -438,6 +465,7 @@ impl Job {
             }
             if let Err(error) = native_wait_for_change(parser) {
                 if error.kind() == io::ErrorKind::Interrupted {
+                    cancelled |= latch_console_receipt();
                     interrupt_group(parser, self, !console_owned);
                     if console_owned {
                         cancelled = true;

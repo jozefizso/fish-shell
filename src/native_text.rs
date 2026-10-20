@@ -39,6 +39,75 @@ fn scalar_len(text: &wstr, start: usize) -> usize {
     }
 }
 
+/// Decode one display scalar without changing the canonical editor/parser buffer.
+/// Invalid escaped bytes become one replacement scalar each, never terminal controls.
+pub fn display_scalar(text: &wstr, start: usize) -> (char, usize) {
+    let len = scalar_len(text, start);
+    let first = text.char_at(start);
+    if decode_byte_from_char(first).is_none() {
+        return (first, 1);
+    }
+    if len == 1 {
+        return (char::REPLACEMENT_CHARACTER, 1);
+    }
+    let mut bytes = [0; 4];
+    for (offset, byte) in bytes.iter_mut().enumerate().take(len) {
+        *byte = decode_byte_from_char(text.char_at(start + offset)).unwrap();
+    }
+    (
+        std::str::from_utf8(&bytes[..len]).unwrap().chars().next().unwrap(),
+        len,
+    )
+}
+
+/// Display scalars paired with their original canonical offsets and lengths.
+pub fn display_scalars(text: &wstr) -> impl Iterator<Item = (usize, char, usize)> + '_ {
+    let mut pos = 0;
+    std::iter::from_fn(move || {
+        if pos == text.len() {
+            return None;
+        }
+        let start = pos;
+        let (character, len) = display_scalar(text, start);
+        pos += len;
+        Some((start, character, len))
+    })
+}
+
+/// Streaming display decoding for pager fragments, retaining canonical color indices.
+pub fn display_char_indices(
+    chars: impl IntoIterator<Item = char>,
+) -> impl Iterator<Item = (usize, char)> {
+    let mut chars = chars.into_iter();
+    let mut pending = ['\0'; 4];
+    let mut pending_len = 0;
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        if pending_len == 0 {
+            pending[0] = chars.next()?;
+            pending_len = 1;
+        }
+        let wanted = match decode_byte_from_char(pending[0]) {
+            Some(0xc2..=0xdf) => 2,
+            Some(0xe0..=0xef) => 3,
+            Some(0xf0..=0xf4) => 4,
+            _ => 1,
+        };
+        while pending_len < wanted {
+            let Some(next) = chars.next() else { break };
+            pending[pending_len] = next;
+            pending_len += 1;
+        }
+        let (character, len) =
+            display_scalar(wstr::from_char_slice(&pending[..pending_len]), 0);
+        pending.copy_within(len..pending_len, 0);
+        pending_len -= len;
+        let start = offset;
+        offset += len;
+        Some((start, character))
+    })
+}
+
 /// The boundary at or before `pos`. All positions use canonical `wstr` indices.
 /// Panics if `pos` exceeds the text length. Looks at at most three preceding characters.
 pub fn floor_boundary(text: &wstr, pos: usize) -> usize {
@@ -114,6 +183,32 @@ mod tests {
 
     fn bytes(bytes: &[u8]) -> WString {
         bytes.iter().copied().map(encode_byte_to_char).collect()
+    }
+
+    #[test]
+    fn display_decoding_preserves_canonical_offsets() {
+        let text = L!("Ae\u{301}界😀").to_owned() + &bytes(&[0xef, 0x98, 0x80])[..];
+        let expected = vec![
+            (0, 'A', 1), (1, 'e', 1), (2, '\u{301}', 1),
+            (3, '界', 1), (4, '😀', 1), (5, '\u{f600}', 3),
+        ];
+        assert_eq!(display_scalars(&text).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            display_char_indices(text.chars()).collect::<Vec<_>>(),
+            expected.iter().map(|&(i, c, _)| (i, c)).collect::<Vec<_>>(),
+        );
+        assert_eq!(text.len(), 8);
+    }
+
+    #[test]
+    fn display_malformed_prefix_retains_following_scalars() {
+        let text = bytes(&[0xe0, 0xc2, 0xa2, 0xff, 0xef, 0x98, 0x80, 0xf0]);
+        let expected = vec![(0, '�'), (1, '¢'), (3, '�'), (4, '\u{f600}'), (7, '�')];
+        assert_eq!(display_char_indices(text.chars()).collect::<Vec<_>>(), expected);
+        assert_eq!(
+            display_scalars(&text).map(|(i, c, _)| (i, c)).collect::<Vec<_>>(),
+            expected,
+        );
     }
 
     #[test]

@@ -6,4 +6,15 @@ complete -c yo -l no-color -d 'Disable colors'
 complete -c yo -l generators -d 'List available generators'
 complete -c yo -l local-only -n '__fish_seen_subcommand_from --generators' -d 'Disable lookup of globally-installed generators'
 
-complete -c yo -a '(yo --generators | sed -n "3,\$p" | sed "\$d" | string replace --regex "^\s+" "")'
+function __fish_yo_generators
+    command -sq yo
+    or return 127
+    set -l generators (command yo --generators)
+    set -l producer_status $status
+    if set -q generators[4]
+        printf '%s\n' $generators[3..-2] | string replace --regex '^\s+' ''
+    end
+    return $producer_status
+end
+
+complete -c yo -a '(__fish_yo_generators)'

@@ -1,7 +1,10 @@
 complete -c hostnamectl -f
 
-set -l __hostnamectl_version $(hostnamectl --version &| string match -rg 'systemd (\d+).*')
-if test "$__hostnamectl_version" -lt 249
+set -l __hostnamectl_version
+if command -sq hostnamectl
+    set __hostnamectl_version (command hostnamectl --version &| string match -rg 'systemd (\d+).*')
+end
+if set -q __hostnamectl_version[1]; and test "$__hostnamectl_version" -lt 249
     complete -c hostnamectl -n __fish_use_subcommand -xa "status\t'Show hostname and related info'
                                                             set-hostname\t'Set hostname'
                                                             set-icon-name\t'Set icon name'

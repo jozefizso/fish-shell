@@ -1,7 +1,7 @@
 # Don't go invoking valgrind unless it is installed
 
 set -l skin tool
-if valgrind --version 2>/dev/null | string match -qr -- '-2\.[012]\.'
+if command -sq valgrind; and command valgrind --version 2>/dev/null | string match -qr -- '-2\.[012]\.'
     # In older versions of Valgrind, the skin selection option was
     # '--skin'
     # But someone decided that it would be fun to change this to
@@ -70,6 +70,7 @@ complete -n "__fish_valgrind_skin cachegrind" -xc valgrind -l D1 -d "Type of L1 
 complete -n "__fish_valgrind_skin cachegrind" -xc valgrind -l L2 -d "Type of L2 cache"
 
 function __fish_print_function_prototypes -d "Prints the names of all function prototypes found in the headers in the current directory"
+    command -sq sed; or return 127
     set -l headers *.h *.hh *.hpp *.hxx
     if set -q headers[1]
         sed -n "s/^\(.*[^[a-zA-Z_0-9]\|\)\([a-zA-Z_][a-zA-Z_0-9]*\) *(.*);.*\$/\2/p" $headers

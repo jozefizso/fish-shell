@@ -39,13 +39,16 @@ complete -c cpupower -n "__fish_seen_subcommand_from frequency-info" -s a -l aff
 
 complete -c cpupower -n "__fish_seen_subcommand_from frequency-set" -s d -l min -x -d "new minimum CPU frequency the governor may select"
 complete -c cpupower -n "__fish_seen_subcommand_from frequency-set" -s u -l max -x -d "new maximum CPU frequency the governor may select"
-complete -c cpupower -n "__fish_seen_subcommand_from frequency-set" -s g -l governor -x -a "(string split ' ' < /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors)" -d "new cpufreq governor"
+complete -c cpupower -n "__fish_seen_subcommand_from frequency-set" -s g -l governor -x -a "(test -r /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors; and string split ' ' < /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors)" -d "new cpufreq governor"
 complete -c cpupower -n "__fish_seen_subcommand_from frequency-set" -s f -l freq -x -d "specific frequency to be set. Requires userspace governor to be available and loaded"
 complete -c cpupower -n "__fish_seen_subcommand_from frequency-set" -s r -l related -d "modify all hardware-related CPUs at the same time"
 
 complete -c cpupower -n "__fish_seen_subcommand_from idle-info" -s f -l silent -d "Only print a summary of all available C-states in the system"
 
-set -l idlestates (LC_ALL=C cpupower idle-info | string replace -f 'Available idle states: ' '')
+set -l idlestates
+if command -sq cpupower
+    set idlestates (LC_ALL=C command cpupower idle-info | string replace -f 'Available idle states: ' '')
+end
 complete -c cpupower -n "__fish_seen_subcommand_from idle-set" -s d -l disable -x -a "$idlestates" -d "Disable a specific processor sleep state"
 complete -c cpupower -n "__fish_seen_subcommand_from idle-set" -s e -l enable -x -a "$idlestates" -d "Enable a specific processor sleep state"
 complete -c cpupower -n "__fish_seen_subcommand_from idle-set" -s D -l disable-by-latency -x -d "Disable all idle states with a equal or higher latency than <LATENCY>"
@@ -54,7 +57,10 @@ complete -c cpupower -n "__fish_seen_subcommand_from idle-set" -s E -l enable-al
 complete -c cpupower -n "__fish_seen_subcommand_from set" -s b -l perf-bias -d "Set relative importance of performance vs energy savings"
 complete -c cpupower -n "__fish_seen_subcommand_from info" -s b -l perf-bias -d "Get relative importance of performance vs energy savings"
 
-set -l monitors (LC_ALL=C cpupower monitor -l 2>&1 | awk '$1 == "Monitor" {gsub(/"/, "", $2); print $2} $1 == "Available" {print $3}')
+set -l monitors
+if command -sq cpupower; and command -sq awk
+    set monitors (LC_ALL=C command cpupower monitor -l 2>&1 | awk '$1 == "Monitor" {gsub(/"/, "", $2); print $2} $1 == "Available" {print $3}')
+end
 complete -c cpupower -n "__fish_seen_subcommand_from monitor" -s m -x -a "$monitors" -d "Only display this monitor"
 complete -c cpupower -n "__fish_seen_subcommand_from monitor" -s v -d "Increase verbosity if the binary was compiled with the DEBUG option set"
 complete -c cpupower -n "__fish_seen_subcommand_from monitor" -s c -d "Schedule the process on every core before starting and ending measuring"

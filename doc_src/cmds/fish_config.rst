@@ -24,6 +24,12 @@ Without arguments or with the ``browse`` command it starts the web-based configu
 
 If the ``BROWSER`` environment variable is set, it will be used as the name of the web browser to open instead of the system default.
 
+The web interface requires Python 3.8 or newer. Python is not needed for shell startup or for the terminal-only ``prompt`` and ``theme`` commands.
+
+On native Windows, the browser uses the same fish executable as the calling shell, and function previews use its builtin formatter. ``BROWSER`` follows Windows command-line quoting, may include arguments and a ``%s`` URL placeholder, and must name a native executable rather than a ``.cmd`` or ``.bat`` shell script. ``BROWSER=true`` suppresses automatic browser launching so that you can open the displayed address yourself.
+
+The server listens only on loopback and requires the random session URL for requests. Its private redirect file is removed when you press Enter, close redirected input, cancel the session, or browser startup fails. A browser process explicitly started through ``BROWSER`` is reaped when the session ends; the system-default browser remains independent.
+
 With the ``prompt`` command ``fish_config`` can be used to view and choose a prompt from fish's sample prompts inside the terminal directly.
 
 Available subcommands for the ``prompt`` command:

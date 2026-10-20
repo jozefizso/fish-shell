@@ -21,10 +21,14 @@ set -l rustup_show \
     profile \
     help
 
-# rustup does not really expose a mechanism of retrieving a list of all valid components without the archs appended
-# Just print the list of installable x86_64-unknown-linux-gnu components for everyone
+# Component names carry target suffixes on every host, including native Windows.
 function __rustup_components
-    rustup component list | string match -r "\S+" | string replace -rf -- "-x86_64-unknown-linux-gnu.*" "" | sort -u
+    command -sq rustup; or return 127
+    set -l targets (string escape --style=regex -- (__rustup_targets))
+    command rustup component list $argv |
+        string match -r '^\S+' |
+        string replace -r -- "-($(string join '|' -- $targets))\$" '' |
+        path sort -u
 end
 
 function __rustup_installed_components
@@ -32,15 +36,19 @@ function __rustup_installed_components
     set -l toolchain (commandline -j | string replace -rf ".*\s--toolchain\s+(\S+)\s.*" '$1')
     set -l toolchain_filter
     if string match -qr . -- $toolchain
-        set toolchain_filter "--toolchain $toolchain"
+        set toolchain_filter --toolchain $toolchain
     end
 
-    rustup component list --installed $toolchain_filter | string replace -r -- (printf -- "-%s\n" (__rustup_targets) | string join "|") "" | sort -u
+    __rustup_components --installed $toolchain_filter
 
 end
 
 function __rustup_installable_components
-    comm -2 -3 (__rustup_components | psub -F) (__rustup_installed_components | psub -F)
+    set -l installed (__rustup_installed_components)
+    for component in (__rustup_components)
+        contains -- "$component" $installed
+        or printf '%s\n' "$component"
+    end
 end
 
 # All *valid* target triples, retrieved from source
@@ -210,26 +218,32 @@ end
 
 # All valid toolchains excluding installed
 function __rustup_installable_toolchains
-    comm -2 -3 (__rustup_all_toolchains | psub -F) (printf "%s\n" (__rustup_toolchains) | psub -F) \
-        # Ignore warnings about lists not being in sorted order, as we are aware of their contents
-        2>/dev/null
+    set -l installed (__rustup_toolchains)
+    for toolchain in (__rustup_all_toolchains)
+        contains -- "$toolchain" $installed
+        or printf '%s\n' "$toolchain"
+    end
 end
 
 function __rustup_targets
+    command -sq rustup; or return 127
     rustup target list | string replace -rf "^(\S+).*" '$1'
 end
 
 function __rustup_installed_targets
+    command -sq rustup; or return 127
     rustup target list | string replace -rf "^(\S+) \(installed\)" '$1'
 end
 
 # All valid targets excluding installed
 function __rustup_installable_targets
+    command -sq rustup; or return 127
     rustup target list | string match -rv '\(installed\)$'
 end
 
 # Trim trailing attributes, e.g. "rust-whatever (default)" -> "rust-whatever"
 function __rustup_toolchains
+    command -sq rustup; or return 127
     rustup toolchain list | string replace -r "\s+.*" ''
 end
 # By default, the long name of a toolchain is used (e.g. nightly-x86_64-unknown-linux-gnu),
@@ -288,28 +302,45 @@ complete -f -c rustup -n '__fish_seen_subcommand_from doc' -a '(__fish_rustup_do
 
 function __fish_rustup_docs_modules
     set -l doc_path (__rustup_doc_path)
-    command find "$doc_path"/{std,core,alloc} -name index.html \
-        | string replace --regex "$doc_path/(.+)/index\.html" '$1\tModule' \
-        | string replace --all / ::
+    or return
+    set -l files "$doc_path"/{std,core,alloc}/index.html "$doc_path"/{std,core,alloc}/**/index.html
+    set -q files[1]; or return 0
+    printf '%s\n' $files |
+        string replace -a '\\' / |
+        string replace -rf -- "^$(string escape --style=regex -- "$doc_path")"'/(.+)/index\.html$' '$1\tModule' |
+        string replace --all / ::
 end
 
 function __fish_rustup_docs_keywords
     set -l doc_path (__rustup_doc_path)
-    string replace --regex "$doc_path/std/keyword\.(.+)\.html" '$1\tKeyword' "$doc_path"/std/keyword.*.html
+    or return
+    set -l files "$doc_path"/std/keyword.*.html
+    set -q files[1]; or return 0
+    path basename -- $files | string replace -rf '^keyword\.(.+)\.html$' '$1\tKeyword'
 end
 
 function __fish_rustup_docs_primitives
     set -l doc_path (__rustup_doc_path)
-    string replace --regex "$doc_path/std/primitive\.(.+)\.html" '$1\tPrimitive' "$doc_path"/std/primitive.*.html
+    or return
+    set -l files "$doc_path"/std/primitive.*.html
+    set -q files[1]; or return 0
+    path basename -- $files | string replace -rf '^primitive\.(.+)\.html$' '$1\tPrimitive'
 end
 
 function __fish_rustup_docs_macros
     set -l doc_path (__rustup_doc_path)
-    string replace --regex "$doc_path/" '' "$doc_path"/{std,core,alloc}/macro.*.html \
-        | string replace --regex 'macro\.(.+)\.html' '$1\tMacro' \
-        | string replace --all / ::
+    or return
+    set -l files "$doc_path"/{std,core,alloc}/macro.*.html
+    set -q files[1]; or return 0
+    printf '%s\n' $files |
+        string replace -a '\\' / |
+        string replace --regex "^$(string escape --style=regex -- "$doc_path")/" '' |
+        string replace --regex 'macro\.(.+)\.html' '$1\tMacro' |
+        string replace --all / ::
 end
 
 function __rustup_doc_path
-    rustup doc --path | string replace --regex '/[^/]*$' ''
+    command -sq rustup; or return 127
+    command rustup doc --path | string replace -a '\\' / | string replace --regex '/[^/]*$' ''
+    return $pipestatus[1]
 end

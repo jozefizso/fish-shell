@@ -1,8 +1,8 @@
 # GOAL_11 — Compatibility and product-quality closure
 
-**Phase:** N11. **Status: planned / not started**.
+**Phase:** N11. **Status: automated infrastructure implemented; execution and closure blocked/pending**.
 Primary product target: `x86_64-pc-windows-msvc`; ARM64 requires its separate runtime track.
-The following gates are future acceptance specifications, not existing test targets or results.
+The gates below are acceptance requirements; implemented entrypoints are listed below, not passing results.
 This contract expands the approved roadmap at revision `2acbbad4b`.
 
 ## Objective
@@ -127,6 +127,131 @@ compiling subset complete by adding a disposition spreadsheet.
 | **N11-COVERAGE** | release audit | Reconcile discovered and actually executed unit/integration/e2e/CLI cases with every portable feature, option/alias, crate, asset and analysis destination. Inspect native direct-process and console equivalents alongside retained Unix cases. Require nonempty executed evidence, useful failure assertions, justified skips and the published semantic-difference ledger; no unassigned/disabled supported capability. The audit consumes passing real suites and blocks on gaps; it cannot replace behavior tests with source searches or a green inventory count. |
 | **N11-FAULTS** | integration/e2e | Run synchronized sustained concurrent jobs/edits/saves against real native fish/processes/files/ConPTY; inject process, pipe/I/O/state, overflow, disconnect, denied-resource and invalid-input failures. Assert output/status, durable merge integrity, responsive recovery, bounded memory/shutdown and stable handle/thread counts across repeated cycles. Verify all owned nondisowned children exit, promised disowned children survive and unrelated/host processes remain untouched; include injection and inherited-handle/state-ACL security fixtures. |
 | **N11-QUALITY** | measured/manual-assisted e2e | Execute automated benchmark fixtures for all listed workloads against pre-adopted numeric budgets on recorded hosts/sinks, plus automated clean-install keyboard/editor/completion/save/restart workflows with observable screen/state/results. Record raw samples, failures and artifact/profile identity. Separately perform named terminal/screen-reader journeys for prompt/edit/pager announcements, Unicode and color-independent use, recording human observations and limits. Audit-only or manual-only completion is insufficient; no universal host/accessibility assertion. |
+
+## Implemented automation and unresolved prerequisites
+
+`tests/windows_n11.rs` declares three nonignored, serial gates: `n11_coverage`,
+`n11_faults`, and `n11_quality`. The earlier installed-artifact CLI and daily
+component smokes below passed; no complete N11 gate or assisted signoff is claimed.
+
+Each gate installs `FISH_N10_ARCHIVE` through the actual N10 `Install` action using
+`FISH_N10_PWSH`, retains the validated `Inspect` manifest/build inputs, hashes the ZIP
+and every installed manifest member, and executes the installed `bin` entrypoints.
+The established direct-process fixture supplies isolated state and owned cleanup;
+its copied development fish is removed and never executed by N11. Test probes remain
+explicit test dependencies, not additional runtime programs on the package's PATH.
+Select the actual release-profile test probe with `FISH_NATIVE_TEST_RELEASE_PROBE`
+(otherwise the standard sibling `release/windows_native_probe.exe` is required).
+The probe must contain the two `n11-network-*` modes; it is hashed with the evidence.
+`FISH_N11_PYTHON` is an explicit native Python 3.11+ interpreter, and
+`FISH_N11_EVIDENCE_DIR` is the durable output parent. Every gate creates a unique
+evidence directory; package/state/test files are removed with their owned fixture.
+Native Python consumers retain their own nested kill-on-close Job Object and bounded,
+argument-array subprocesses, never the host's enclosing job.
+
+### Executed preliminary components
+
+| Installed consumer | Passed semantic records | Log under `target/n7-gate-results/` |
+|---|---:|---|
+| CLI/parser/formatter/key-reader/accounting contracts | 56 | `n11-installed-cli-semantic-contracts.txt` |
+| Actual ConPTY keyboard/editor/completion/history/save/restart journey | 7 | `n11-installed-daily-first.txt` |
+
+These used the earlier default unsigned ZIP with SHA-256
+`b8be017e64b35c2972c3515b98b9452b43f49490bbcf746dee53904eb8b3f0a6`.
+It predates later source corrections, so this is component evidence, not final
+artifact coverage, current-source quality acceptance or clean-machine proof.
+
+Current installed-artifact execution additionally requires resolution of the
+N10 PowerShell management authorization rejection recorded in GOAL_10. No
+alternate extraction/management execution was substituted to bypass that
+rejection. Missing N1/pre-adopted quality budgets and named human accessibility
+observations remain independent unresolved prerequisites; no favorable budgets
+or synthetic human records were created.
+
+Separate development-host verification now exercises the native workspace and
+previously unbuildable maintainer paths:
+
+| Development check | Observed result | Evidence boundary |
+|---|---|---|
+| Current/minimal workspace libraries | 256 passed, 4 existing ignored, 22 library targets | `n7-current-minimal-wrapped-metadata-native-gettext-io.txt`; root plus all 21 workspace crate directories |
+| Rust1.85.0/minimal workspace libraries | 256 passed, 4 existing ignored, 22 library targets | `n7-msrv-minimal-wrapped-metadata-native-gettext-io.txt` |
+| Current/default workspace libraries | 256 passed, 4 existing ignored, 22 library targets | `n7-current-default-wrapped-metadata-native-gettext-io.txt`; fresh Unicode target/catalog root |
+| Rust1.85.0/default workspace libraries | 256 passed, 4 existing ignored, 22 library targets | `n7-msrv-default-wrapped-metadata-native-gettext-io.txt`; fresh Unicode target/catalog root |
+| Native Fluent and gettext CLI, current and Rust1.85.0 | 2 Fluent and 1 gettext consumer passed per toolchain, 0 ignored | `native-gettext-host-observations.json`; real Unicode rewrite/render, denied replacement cleanup, read-only diff/update/check and GNU MO translation consumption |
+| Retained Unix Fluent and gettext CLI | 1 passed each, 0 ignored | `unix-maintainer-cli-real-gnu-after.txt`; actual privately provisioned GNU tools, no system install; denied Windows sharing is not a Unix case |
+| Native compiler/HTML host consumers | Real concurrent Fluent/gettext extraction, little/big-endian GNU MO consumption, exact host formatter and complete Sphinx HTML generation succeed | `native-fluent-concurrent-extraction-and-render-after.txt`, `native-gettext-host-observations.json`, `native-xtask-html-matching-host-formatter.txt`; not a crate-count or human-signoff substitute |
+
+The pre-existing ignored printf cases are `test_float_e_exhaustive`,
+`test_float_f_exhaustive`, `test_float_g_exhaustive` and `test_float_hex_prec`;
+they remain unexecuted, not waived. Library targets with zero tests likewise do
+not establish runtime coverage. This is an explicitly partial development
+snapshot, not completion of the required N11 crate/migration/matrix reconciliation.
+The workspace command is the unrestricted
+`cargo test --locked --workspace --target x86_64-pc-windows-msvc --lib -- --nocapture --test-threads=1`,
+adding `--no-default-features` for minimal cells and `+1.85.0` for MSRV.
+These are development debug-library checks, not installed-artifact, full native
+debug/release/OS-matrix or human acceptance.
+
+
+The required installed-artifact gates remain:
+
+| Gate | Implemented behavioral/audit consumer | Evidence boundary |
+|---|---|---|
+| `n11_coverage` | Reuses N3 real script/stdin/argv/parser/debug/profile cases against the installed image; adds config/init ordering, all three installed version/help entries with competing fish on PATH, formatter streams/files/flags and key-reader nonterminal failures. `windows_n11/reconcile.py` discovers and executes every exact declared native harness case before reconciling component/crate/native-module/CLI/asset/Unix-case dispositions. | No supplied disposition or source count is treated as an executed case. Missing/stale/unresolved mappings and ignored/empty/discovery-mismatched suites fail. Portable omissions cannot use a host-only label. Complete migration and matrix evidence remain required. |
+| `n11_faults` | Reuses N2 real stream/inheritance/launch rollback, N4 ACL/staging/interrupted-state/notification/UNC recovery, and N5 console cancellation/disconnect/disown boundaries. Four real writers perform 64 barrier-synchronized rounds of history saves/universal updates/background children while one owned ConPTY performs 80 job/completion/Unicode-edit/save cycles including warmup/quiescence. Fresh shells must recover all 256 history entries and final universal values. It also checks sharing denial/retry, literal native argument non-evaluation, a deliberately terminated retained owned child, and an owned loopback TCP disconnect/reconnect with real native status/EOF and shell recovery. | Records actual duration/load, native handle/thread/private-byte/working-set observations, and requires no post-quiescence handle/thread growth relative to the warmup envelope. Memory acceptance requires a recorded pre-adopted resource budget. Loopback tool disconnect is **not** evidence of live SMB-server outage recovery. |
+| `n11_quality` | Clean-state installed ConPTY keyboard journey observes Unicode/backspace, completion/model/native screen, directory navigation, history prefix search/pager selection, native child execution, barrier-controlled evaluator cancellation, save/restart/history/universal state and installed help. `benchmarks/windows_quality.py` runs the unchanged N6 reader workload plus batch startup, actual child launch, 1 MiB native pipeline, 2,048-file glob, 1,024-record/four-writer durable history merge and 512-choice completion workloads. | Raw samples/commands/streams, real artifact/tool hashes, host/sink metadata, screen/VT/state observations and budget decisions are separate evidence. A fresh state directory is not clean-machine proof; N10's externally provisioned restricted-user attestation is required. Automated capture never supplies a human accessibility signoff. |
+
+The benchmark driver is the real `benchmarks/windows_reader.rs` executable supplied as
+`FISH_N11_READER_BENCH`. For example, build it with native MSVC prerequisites using
+`rustc --edition=2024 --target x86_64-pc-windows-msvc -O benchmarks/windows_reader.rs -o target/native-quality-reader.exe`.
+The driver clones the **whole installed N10 package** and adds the explicit test probe,
+preserving executable-relative resources and the existing two-argument N6 workload.
+ConPTY and concurrently drained-pipe samples have different metric names and budgets.
+
+Required external records, never generated as favorable passing evidence:
+
+- `FISH_N11_HOST_CONTEXT`: JSON with `cpu`, `os`, `windows_build`, `toolchain`, `sdk`,
+  `profile`, `features`, `filesystem`, `antivirus`, `indexing`, `inputs`, `tools`, `sink`.
+  `n6_baseline_equivalence` records the actual N6 file's `baseline_sha256` and explicit
+  `same_host`, `same_protection`, `same_sink`, `same_workload` decisions. Only matching
+  minimal/release measurements can use N6's existing numeric median/p95 budgets.
+- The recorded `doc_internal/win_compat/baselines/N1.json` is **absent**. Supplemental
+  workloads retain raw measurements but cannot pass performance acceptance without
+  their recorded baseline metrics and pre-adopted numeric budgets. No N1 numbers or
+  favorable thresholds were invented. A different host/profile/sink also blocks comparison.
+- `FISH_N11_RESOURCE_BUDGET`: JSON with `adopted_at`, `adopted_before_revision`,
+  `source_baseline`, `source_baseline_sha256`, `host_context_sha256`,
+  `max_private_growth_bytes`, `max_working_growth_bytes`. Its real source baseline and
+  host record must hash correctly. No resource-growth allowance is chosen after a run.
+- `FISH_N11_SUITE_MANIFEST`: schema `1`, actual ZIP `artifact_sha256`, and `suites`
+  containing `id` (native Cargo test target, or separately named library/crate target),
+  `executable`, `target`, `profile`, `features`, exact ordered `expected_cases` from
+  `--list --format terse`, and fixture `env`. Include every native integration target
+  except N11 itself, plus a `kind: root-library` suite. N11 itself is not recursively
+  executed. Existing N1–N7 release legs select the installed package; their debug
+  legs remain separately identified development evidence, not disguised release results.
+  Supply explicit `FISH_NATIVE_TEST_BIN` debug image paths and profile-matched
+  `FISH_NATIVE_TEST_PROBE` fixture overrides where the established suite uses them;
+  never point both fish profile labels at the same release image.
+- `FISH_N11_COVERAGE_MAP`: actual ZIP `artifact_sha256` and `items` keyed by the emitted
+  `coverage-inventory.json`. Every row names `owner`, `behavior`, state and exact
+  executed `suite::case` references; supported rows also require `failure_cases`.
+  Optional dependencies require both `present_cases` and `absent_cases`. Semantic
+  differences require a real decision reference and preserved portable behavior;
+  permanent exclusions are restricted to the three approved POSIX contracts. No
+  fabricated complete mapping is supplied for still-unexecuted portable cases/assets.
+- `FISH_N11_ACCESSIBILITY_SIGNOFFS`: actual external human `journeys`, each with this
+  ZIP's `artifact_sha256`, `kind` (`keyboard-only` or `screen-reader`), `person`, `date`,
+  terminal name/version, `result`, and actual prompt/edit/pager/Unicode-navigation/
+  color-independent-feedback observations. Screen-reader entries also name reader
+  and version. Both journey kinds are mandatory. **No named human signoffs exist in
+  this delivery; this remains blocked, not waived or replaced by console capture.**
+
+Intended native discovery/execution commands (not exercised here):
+`cargo test --locked --test windows_n11 -- --list` and
+`cargo test --locked --test windows_n11 -- --nocapture --test-threads=1`.
+The exact expected Cargo test names are the three names above. Retained Unix suites
+remain separate; N11's inventory does not claim their wholesale migration or execution.
 
 ## Verification and evidence record
 

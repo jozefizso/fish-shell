@@ -20,7 +20,10 @@ where:
     end
     switch $pat
         case "*$div*"
-            for i in (string unescape -- $pat | sed "s/^\(.\+$div\)$iprefix.*\$/\1/")$iprefix(eval $cmd)
+            set -l div_regex (string escape --style=regex -- $div)
+            set -l iprefix_regex (string escape --style=regex -- $iprefix)
+            set -l head (string unescape -- $pat | string replace -r -- "^(.*$div_regex)$iprefix_regex.*\$" '$1')
+            for i in $head$iprefix(eval $cmd)
                 printf %s\n $i
             end
         case '*'

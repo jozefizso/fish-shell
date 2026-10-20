@@ -1,5 +1,5 @@
 # rmmod completion
-complete -c rmmod -x -a "(lsmod | string replace -r '\s.*' '')"
+complete -c rmmod -x -a "(command -sq lsmod; and command lsmod | string replace -r '\s.*' '')"
 
 complete -c rmmod -s h -l help -d "Prints the help text"
 complete -c rmmod -s s -l syslog -d "Send errors to syslog instead of standard error"

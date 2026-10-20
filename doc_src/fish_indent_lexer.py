@@ -19,6 +19,7 @@ from pygments.token import (
     Punctuation,
 )
 import re
+import os
 import subprocess
 
 # A fallback token type.
@@ -82,13 +83,13 @@ def tokenize_fish_command(code, offset):
     This function returns a list of (start, tok, value) tuples, as
     Pygments expects.
     """
-    proc = subprocess.Popen(
-        ["fish_indent", "--pygments"],
-        stdin=subprocess.PIPE,
+    proc = subprocess.run(
+        [os.environ.get("FISH_INDENT_FOR_BUILDING_DOCS", "fish_indent"), "--pygments"],
+        input=code.encode("utf-8"),
         stdout=subprocess.PIPE,
-        universal_newlines=False,
+        check=True,
     )
-    stdout, _ = proc.communicate(code.encode("utf-8"))
+    stdout = proc.stdout
     result = []
     for line in stdout.decode("utf-8").splitlines():
         start, end, role = line.split(",")

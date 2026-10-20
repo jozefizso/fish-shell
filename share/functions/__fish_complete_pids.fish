@@ -1,5 +1,9 @@
 # localization: skip(private)
 function __fish_complete_pids -d "Print a list of process identifiers along with brief descriptions"
+    if builtin -q __fish_native_services
+        builtin __fish_native_services processes | string match -r -v '^'$fish_pid'\t'
+        return $pipestatus[1]
+    end
     # This may be a bit slower, but it's nice - having the tty displayed is really handy
     # 'tail -n +2' deletes the first line, which contains the headers
     #  $fish_pid is removed from output by string match -r -v

@@ -5,7 +5,7 @@ function __fish_complete_gpg_key_id -d 'Complete using gpg key ids' -a __fish_co
     # Use user id as description
     set -l keyid
     set -q list_arg[1]; or set list_arg --list-keys
-    $__fish_complete_gpg_command $list_arg --with-colons | while read -l garbage
+    $__fish_complete_gpg_command $list_arg --with-colons --fixed-list-mode | while read -l garbage
         switch $garbage
             case "uid*"
                 # Extract user ids (note: gpg escapes colons as '\x3a')
@@ -14,9 +14,10 @@ function __fish_complete_gpg_key_id -d 'Complete using gpg key ids' -a __fish_co
                 printf "%s\t%s\n" $keyid $uid
                 # NOTE key is preceded by "sec" instead of "pub" when listing secret keys
             case "pub*" "sec*"
-                # Extract key fingerprints (no subkeys)
+                # Extract primary key IDs (not subkey IDs).
                 set -l __pub (string split ":" -- $garbage)
                 set keyid $__pub[5]
         end
     end
+    return $pipestatus[1]
 end

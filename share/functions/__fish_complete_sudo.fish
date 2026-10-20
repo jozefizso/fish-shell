@@ -1,4 +1,33 @@
 # localization: tier3
+function __fish_windows_sudo_print_remaining_args
+    set -l tokens (commandline -xpc) (commandline -ct)
+    set -e tokens[1]
+    set -l options E/preserve-env N/new-window disable-input inline D/chdir= h/help V/version
+    argparse -s --exclusive N,disable-input,inline $options -- $tokens 2>/dev/null
+    or return 1
+    if set -q argv[1]; and test "$argv[1]" = run
+        set -e argv[1]
+        argparse -s --exclusive N,disable-input,inline $options -- $argv 2>/dev/null
+        or return 1
+        set -f argv $argv
+    end
+    set -q argv[1]; or return 1
+    test -n "$argv[1]"; or return 1
+    string join0 -- (string escape -- $argv)
+end
+
+function __fish_windows_sudo_using_config
+    set -l args (__fish_windows_sudo_print_remaining_args | string split0)
+    test "$args[1]" = config
+end
+
+function __fish_complete_windows_sudo_subcommand
+    set -l args (__fish_windows_sudo_print_remaining_args | string split0)
+    set -q args[1]; or return 1
+    contains -- $args[1] config help; and return 1
+    __fish_complete_subcommand --commandline $args
+end
+
 function __fish_sudo_print_remaining_args
     set -l tokens (commandline -xpc | string escape) (commandline -ct)
     set -e tokens[1]
@@ -35,6 +64,19 @@ function __fish_complete_sudo_subcommand
 end
 
 function __fish_complete_sudo -a sudo
+    if __fish_is_windows_command $sudo
+        complete -c $sudo -f -n __fish_no_arguments -a 'run config help'
+        complete -c $sudo -n 'not __fish_windows_sudo_print_remaining_args >/dev/null' -s E -l preserve-env -d 'Pass the current environment'
+        complete -c $sudo -n 'not __fish_windows_sudo_print_remaining_args >/dev/null' -s N -l new-window -d 'Use a new window'
+        complete -c $sudo -n 'not __fish_windows_sudo_print_remaining_args >/dev/null' -l disable-input -d 'Close input to the elevated process'
+        complete -c $sudo -n 'not __fish_windows_sudo_print_remaining_args >/dev/null' -l inline -d 'Use the current terminal'
+        complete -c $sudo -n 'not __fish_windows_sudo_print_remaining_args >/dev/null' -s D -l chdir -xa '(__fish_complete_directories)' -d 'Working directory for the command'
+        complete -c $sudo -n 'not __fish_windows_sudo_print_remaining_args >/dev/null' -s h -l help -d 'Display help'
+        complete -c $sudo -n 'not __fish_windows_sudo_print_remaining_args >/dev/null' -s V -l version -d 'Display version'
+        complete -c $sudo -n __fish_windows_sudo_using_config -l enable -xa 'disable enable forceNewWindow disableInput normal default' -d 'Configuration mode'
+        complete -c $sudo -x -a '(__fish_complete_windows_sudo_subcommand)'
+        return
+    end
     # All these options should be valid for GNU and OSX sudo
     complete -c $sudo -n __fish_no_arguments -s h -d "Display help and exit"
     complete -c $sudo -n __fish_no_arguments -s V -d "Display version information and exit"

@@ -26,6 +26,7 @@ import re
 import string
 import subprocess
 import sys
+import tempfile
 import traceback
 from subprocess import DEVNULL
 
@@ -1240,7 +1241,7 @@ def fish_escape_single_quote(str):
 
 
 def output_complete_command(cmdname, args, description, output_list):
-    comps = ["complete -c", cmdname]
+    comps = ["complete -c", fish_escape_single_quote(cmdname)]
     comps.extend(args)
     if description:
         comps.append("-d")
@@ -1918,25 +1919,24 @@ def parse_manpage_at_path(manpage_path, output_directory):
     diagnostic_indent += 1
 
     if manpage_path.endswith(".gz"):
-        fd = gzip.open(manpage_path, "r")
-        manpage = fd.read()
-        manpage = manpage.decode("latin-1")
+        opener = gzip.open
     elif manpage_path.endswith(".bz2"):
-        fd = bz2.BZ2File(manpage_path, "r")
-        manpage = fd.read()
-        manpage = manpage.decode("latin-1")
-    elif manpage_path.endswith(".xz") or manpage_path.endswith(".lzma"):
+        opener = bz2.open
+    elif manpage_path.endswith((".xz", ".lzma")):
         if not lzma_available:
-            return
-        fd = lzma.LZMAFile(str(manpage_path), "r")
-        manpage = fd.read()
-        manpage = manpage.decode("latin-1")
+            add_diagnostic("Python lzma support is required for " + manpage_path, BRIEF_VERBOSE)
+            return False
+        opener = lzma.open
     elif manpage_path.endswith((".1", ".2", ".3", ".4", ".5", ".6", ".7", ".8", ".9")):
-        fd = open(manpage_path, "r", encoding="latin-1")
-        manpage = fd.read()
+        opener = open
     else:
-        return
-    fd.close()
+        return False
+    with opener(manpage_path, "rb") as page:
+        raw_page = page.read()
+    try:
+        manpage = raw_page.decode("utf-8")
+    except UnicodeDecodeError:
+        manpage = raw_page.decode("latin-1")
 
     manpage = str(manpage)
 
@@ -1982,7 +1982,11 @@ def parse_manpage_at_path(manpage_path, output_directory):
         else:
             fullpath = os.path.join(output_directory, CMDNAME + ".fish")
             try:
-                output_file = open(fullpath, "w", encoding="utf-8")
+                output_file = tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", newline="\n",
+                    prefix="." + CMDNAME + "-", suffix=".tmp",
+                    dir=output_directory, delete=False,
+                )
             except IOError as err:
                 add_diagnostic(
                     "Unable to open file '%s': error(%d): %s"
@@ -1996,13 +2000,21 @@ def parse_manpage_at_path(manpage_path, output_directory):
         )
         # built_command_output.insert(2, "# using " + parser.__class__.__name__) # XXX MISATTRIBUTES THE CULPABLE PARSER! Was really using Type2 but reporting TypeDeroffManParser
 
-        for line in built_command_output:
-            output_file.write(line)
+        temporary_path = output_file.name if output_file is not sys.stdout else None
+        try:
+            for line in built_command_output:
+                output_file.write(line)
+                output_file.write("\n")
             output_file.write("\n")
-        output_file.write("\n")
-        add_diagnostic(manpage_path + " parsed successfully")
-        if output_file != sys.stdout:
-            output_file.close()
+            if temporary_path is not None:
+                output_file.close()
+                os.replace(temporary_path, fullpath)
+            add_diagnostic(manpage_path + " parsed successfully")
+        finally:
+            if temporary_path is not None:
+                output_file.close()
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
     else:
         parser_names = ", ".join(p.__class__.__name__ for p in parsersToTry)
         # add_diagnostic('%s contains no options or is unparsable' % manpage_path, BRIEF_VERBOSE)
@@ -2020,6 +2032,7 @@ def parse_and_output_man_pages(paths, output_directory, show_progress):
     paths.sort()
     total_count = len(paths)
     successful_count, index = 0, 0
+    failed_count = 0
     padding_len = len(str(total_count))
     last_progress_string_length = 0
     if show_progress and not WRITE_TO_STDOUT:
@@ -2030,6 +2043,7 @@ def parse_and_output_man_pages(paths, output_directory, show_progress):
     man_page_suffixes = set([os.path.splitext(m)[1][1:] for m in paths])
     lzma_xz_occurs = "xz" in man_page_suffixes or "lzma" in man_page_suffixes
     if lzma_xz_occurs and not lzma_available:
+        failed_count += 1
         add_diagnostic(
             'At least one man page is compressed with lzma or xz, but the "lzma" module is not available.'
             " Any man page compressed with either will be skipped.",
@@ -2064,12 +2078,14 @@ def parse_and_output_man_pages(paths, output_directory, show_progress):
         try:
             if parse_manpage_at_path(manpage_path, output_directory):
                 successful_count += 1
-        except IOError:
+        except (OSError, EOFError, lzma.LZMAError if lzma_available else EOFError) as error:
+            failed_count += 1
             diagnostic_indent = 0
-            add_diagnostic("Cannot open " + manpage_path)
+            add_diagnostic("Cannot read %s: %s" % (manpage_path, error), NOT_VERBOSE)
         except (KeyboardInterrupt, SystemExit):
             raise
         except:
+            failed_count += 1
             add_diagnostic(
                 "Error parsing %s: %s" % (manpage_path, sys.exc_info()[0]),
                 BRIEF_VERBOSE,
@@ -2083,6 +2099,7 @@ def parse_and_output_man_pages(paths, output_directory, show_progress):
         BRIEF_VERBOSE,
     )
     flush_diagnostics(sys.stderr)
+    return failed_count
 
 
 def get_paths_from_man_locations():
@@ -2093,7 +2110,7 @@ def get_paths_from_man_locations():
     # Most (GNU, macOS, Haiku) modern implementations of man support being called with `--path`.
     # Traditional implementations require a second `manpath` program: examples include FreeBSD and Solaris.
     # Prefer an external program first because these programs return a superset of the $MANPATH variable.
-    for prog in [["man", "--path"], ["manpath"]]:
+    for prog in ([] if os.name == "nt" else [["man", "--path"], ["manpath"]]):
         try:
             output = subprocess.check_output(prog, stderr=DEVNULL)
             output = output.decode("latin-1")
@@ -2103,9 +2120,9 @@ def get_paths_from_man_locations():
             continue
     # If we can't have the OS interpret $MANPATH, just use it as-is (gulp).
     if not parent_paths and os.getenv("MANPATH"):
-        parent_paths = os.getenv("MANPATH").strip().split(":")
+        parent_paths = os.getenv("MANPATH").strip().split(os.pathsep)
     # Fallback: With mandoc (OpenBSD, embedded Linux) and NetBSD man, the only way to get the default manpath is by reading /etc.
-    if not parent_paths:
+    if not parent_paths and os.name != "nt":
         try:
             with open("/etc/man.conf", "r") as file:
                 data = file.read()
@@ -2116,13 +2133,15 @@ def get_paths_from_man_locations():
         except FileNotFoundError:
             pass
     # Fallback: hard-code some common paths. These should be likely for FHS Linux distros, BSDs, and macOS.
-    if not parent_paths:
+    if not parent_paths and os.name != "nt":
         parent_paths = ["/usr/share/man", "/usr/local/man", "/usr/local/share/man"]
         print(
             "Unable to get the manpath, falling back to %s." % ":".join(parent_paths),
             "Explicitly set $MANPATH to fix this error.",
             file=sys.stderr,
         )
+    if not parent_paths and os.name == "nt":
+        print("No native manual inventory configured. Supply manpage paths or a semicolon-separated MANPATH.", file=sys.stderr)
 
     result = []
     for parent_path in parent_paths:
@@ -2138,7 +2157,91 @@ def get_paths_from_man_locations():
     return result
 
 
+def print_manual_summaries(pattern):
+    """Read NAME sections from the explicitly configured native manual inventory."""
+    # This is a machine-readable completion protocol, not console presentation.
+    sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+    compression_errors = (lzma.LZMAError,) if lzma_available else ()
+    try:
+        query = re.compile(pattern)
+    except re.error as error:
+        print("manual summary: invalid expression: " + str(error), file=sys.stderr)
+        return 2
+    roots = [path for path in os.environ.get("MANPATH", "").split(os.pathsep) if path]
+    if not roots:
+        print("manual summary: configure MANPATH with native manual page directories", file=sys.stderr)
+        return 1
+    found = False
+    failed = False
+    emitted = set()
+    for root in roots:
+        try:
+            with os.scandir(root) as entries:
+                directories = sorted(entry.path for entry in entries if re.fullmatch(r"man[1-9]\w*", entry.name) and entry.is_dir())
+        except OSError as error:
+            print("manual summary: " + str(error), file=sys.stderr)
+            failed = True
+            continue
+        for directory in directories:
+            try:
+                with os.scandir(directory) as entries:
+                    paths = sorted(entry.path for entry in entries if entry.is_file())
+            except OSError as error:
+                print("manual summary: " + str(error), file=sys.stderr)
+                failed = True
+                continue
+            for path in paths:
+                filename = re.sub(r"\.(gz|bz2|xz|lzma)$", "", os.path.basename(path))
+                identity = re.fullmatch(r"(.+)\.([1-9]\w*)", filename)
+                if not identity:
+                    continue
+                try:
+                    opener = gzip.open if path.endswith(".gz") else bz2.open if path.endswith(".bz2") else open
+                    if path.endswith((".xz", ".lzma")):
+                        if not lzma_available:
+                            raise OSError("Python lzma support is required for " + path)
+                        opener = lzma.open
+                    with opener(path, "rb") as page:
+                        raw = page.read(8 * 1024 * 1024 + 1)
+                    if len(raw) > 8 * 1024 * 1024:
+                        raise OSError("manual page exceeds the 8 MiB summary limit: " + path)
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        text = raw.decode("latin-1")
+                    name_section = re.search(r'^\.(?:SH|Sh)\s+"?NAME"?\s*\n(.*?)(?=^\.(?:SH|Sh)\s|\Z)', text, re.M | re.S)
+                    if not name_section:
+                        continue
+                    body = name_section[1]
+                    if re.search(r"^\.Nm\s", body, re.M):
+                        names = re.findall(r"^\.Nm\s+([^\s,]+)", body, re.M)
+                        description = re.search(r"^\.Nd\s+(.*)", body, re.M)
+                        if not description:
+                            continue
+                        body = ", ".join(names) + " - " + description[1]
+                    deroffer = Deroffer()
+                    deroffer.deroff(body)
+                    summary = " ".join(deroffer.get_output().split())
+                    fields = re.split(r"\s+-\s+", summary, maxsplit=1)
+                    if len(fields) != 2:
+                        continue
+                    for name in (name.strip() for name in fields[0].split(",")):
+                        if not query.search(name):
+                            continue
+                        result = (name, identity[2], fields[1])
+                        if result not in emitted:
+                            print("{} ({}) - {}".format(*result))
+                            emitted.add(result)
+                            found = True
+                except (OSError, EOFError) + compression_errors as error:
+                    print("manual summary: {}: {}".format(path, error), file=sys.stderr)
+                    failed = True
+    return 0 if found and not failed else 1
+
+
 if __name__ == "__main__":
+    if not (3, 8) <= sys.version_info < (4, 0):
+        sys.exit("create_manpage_completions requires Python 3.8 or newer")
     script_name = sys.argv[0]
     parser = argparse.ArgumentParser(
         description="create_manpage_completions: Generate fish-shell completions from manpages"
@@ -2193,9 +2296,12 @@ if __name__ == "__main__":
         help="Whether to just deroff",
         action="store_true",
     )
+    parser.add_argument("--summary", help="Print matching NAME summaries from native MANPATH without generating completions")
     parser.add_argument("file_paths", type=str, nargs="*")
 
     args = parser.parse_args()
+    if args.summary is not None:
+        sys.exit(print_manual_summaries(args.summary))
 
     if args.verbose:
         VERBOSITY = args.verbose
@@ -2227,10 +2333,18 @@ if __name__ == "__main__":
     if not args.stdout and not args.directory:
         # Default to ~/.cache/fish/generated_completions
         # Create it if it doesn't exist
-        xdg_cache_home = os.getenv("XDG_CACHE_HOME", "~/.cache")
-        args.directory = os.path.expanduser(
-            xdg_cache_home + "/fish/generated_completions/"
-        )
+        cache_root = os.getenv("XDG_CACHE_HOME")
+        if not cache_root:
+            if os.name == "nt":
+                local = os.getenv("LOCALAPPDATA")
+                if not local:
+                    sys.exit("LOCALAPPDATA or XDG_CACHE_HOME is required for native completion output")
+                cache_root = os.path.join(local, "fish", "cache")
+                args.directory = os.path.join(cache_root, "generated_completions")
+            else:
+                cache_root = os.path.expanduser("~/.cache")
+        if not args.directory:
+            args.directory = os.path.join(os.path.expanduser(cache_root), "fish", "generated_completions")
     if not args.stdout:
         try:
             os.makedirs(args.directory)
@@ -2242,4 +2356,4 @@ if __name__ == "__main__":
         # Remove old generated files
         cleanup_autogenerated_completions_in_directory(args.directory)
 
-    parse_and_output_man_pages(args.file_paths, args.directory, args.progress)
+    sys.exit(1 if parse_and_output_man_pages(args.file_paths, args.directory, args.progress) else 0)

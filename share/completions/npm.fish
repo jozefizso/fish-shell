@@ -37,32 +37,9 @@ function __fish_npm_needs_option
     return 1
 end
 
-# list available npm scripts and their partial content
-function __fish_parse_npm_run_completions
-    while read -l name
-        set -l trim 20
-        read -l value
-        set value (string sub -l $trim -- $value)
-        printf "%s\t%s\n" $name $value
-    end
-end
-
 function __fish_npm_run
-    # Complete `npm run` scripts
-    # These are stored in package.json, which we need a tool to read.
-    # python is very probably installed (we use it for other things!),
-    # jq is slower but also a common tool,
-    # npm is dog-slow and might check for updates online!
-    if test -e package.json; and set -l python (__fish_anypython)
-        # Warning: That weird indentation is necessary, because python.
-        $python -S -c 'import json, sys; data = json.load(sys.stdin);
-for k,v in data["scripts"].items(): print(k + "\t" + v[:18])' <package.json 2>/dev/null
-    else if command -sq jq; and test -e package.json
-        jq -r '.scripts | to_entries | map("\(.key)\t\(.value | tostring | .[0:20])") | .[]' package.json
-    else if command -sq npm
-        # Like above, only try to call npm if there's a command by that name to facilitate aliases that call nvm.
-        command npm run | string match -r -v '^[^ ]|^$' | string trim | __fish_parse_npm_run_completions
-    end
+    # Read the manifest directly instead of invoking npm or a script shell.
+    __npm_package_scripts
 end
 
 # run
@@ -729,4 +706,4 @@ complete -f -c npm -n '__fish_npm_using_command whoami' -a registry -d 'Check re
 complete -f -c npm -n '__fish_npm_using_command whoami' -s h -l help -d 'Display help'
 
 # misc
-complete -f -c npm -n '__fish_seen_subcommand_from add i in ins inst insta instal isnt isnta isntal isntall; and not __fish_is_switch' -a "(__npm_filtered_list_packages \"$npm_install\")"
+complete -f -c npm -n '__fish_seen_subcommand_from add install i in ins inst insta instal isnt isnta isntal isntall; and not __fish_is_switch' -a "(__npm_filtered_list_packages \"$npm_install\")"

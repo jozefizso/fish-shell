@@ -11,7 +11,7 @@ use crate::io::{
     OutputStream, native_input_pipe, native_output_pipe, native_synchronous_pipe,
 };
 use crate::parser::{Block, BlockType, Parser, ParserEnvSetMode};
-use crate::path::{native_absolute_path, native_resolve_executable};
+use crate::path::{native_absolute_path, native_classify_command, native_plan_command};
 use crate::prelude::*;
 use crate::proc::{Job, JobGroupRef, Pid, ProcStatus, Process, ProcessType};
 use fish_common::ScopeGuard;
@@ -29,8 +29,9 @@ use shared::{
 mod native_launch;
 pub use native_launch::{
     NativeBreakAttempt, NativeBreakOutcome, NativeChild, NativeLaunchGroup, NativeLaunchPlan,
-    initialize_native_image_identity,
+    initialize_native_image_identity, native_loaded_fish_path,
 };
+pub(crate) use native_launch::is_current_native_image;
 
 fn diagnostic(message: impl std::fmt::Display) {
     let mut err = OutputStream::stderr();
@@ -131,6 +132,11 @@ fn run_internal(
                     .as_ref()
                     .expect("function properties resolved before execution");
                 crate::trace::trace_if_enabled_with_args(parser, L!(""), process.argv());
+                let _native_helper_scope = parser.push_scope(|scope| {
+                    if scope.native_helper_owner == crate::proc::InternalJobId::default() {
+                        scope.native_helper_owner = job.internal_job_id;
+                    }
+                });
                 let block = function_prepare_environment(parser, process.argv().clone(), props);
                 let parser = &mut **ScopeGuard::new(&mut *parser, |parser| {
                     function_restore_environment(parser, block);
@@ -343,6 +349,10 @@ fn execute_pipeline(
         .as_ref()
         .map(|runtime| NativeLaunchGroup::new(Arc::clone(runtime)))
         .transpose()?;
+    if let Some(group) = group.as_mut() {
+        group.apply_limits(&parser.libdata().native_limits)?;
+        group.attach_substitutions(job.internal_job_id);
+    }
     for (index, (stage, process)) in stages.iter_mut().zip(processes).enumerate() {
         if !matches!(process.typ, ProcessType::External) {
             continue;
@@ -350,7 +360,7 @@ fn execute_pipeline(
         let io = stage.io.take().unwrap();
         stage.plan = Some(
             with_process_assignments(parser, process, |parser| {
-                let executable = native_resolve_executable(&process.actual_cmd)?;
+                let command = native_classify_command(&process.actual_cmd)?;
                 let cwd = native_absolute_path(&parser.vars().get_working_directory()?)?;
                 let environment = parser.vars().export_native_env()?;
                 let argv = process
@@ -362,10 +372,11 @@ fn execute_pipeline(
                         })
                     })
                     .collect::<io::Result<Vec<_>>>()?;
-                group
-                    .as_ref()
-                    .unwrap()
-                    .prepare(&executable, &argv, &cwd, &environment, &io, true)
+                let group = group.as_mut().unwrap();
+                group.attach_substitution_inputs(&argv, &environment);
+                group.attach_substitution_io(&io, &cwd)?;
+                let invocation = native_plan_command(command, argv, cwd, environment)?;
+                group.prepare_provider(invocation, &io)
             })
             .map_err(|error| NativeExecutionFailure::Launch { index, error })?,
         );

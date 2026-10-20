@@ -1,10 +1,11 @@
 set -l commands status get-volume inspect set-default set-volume set-mute set-profile clear-default
 
-if wpctl settings &>/dev/null
+if command -sq wpctl; and command wpctl settings &>/dev/null
     set --append commands settings
 end
 
 function __wpctl_get_nodes -a section -a type
+    command -sq wpctl; or return 127
     set -l havesection
     set -l havetype
     wpctl status | while read -l line
@@ -43,6 +44,7 @@ function __wpctl_command_shape
 end
 
 function __wpctl_get_settings
+    command -sq wpctl; or return 127
     set -l wpctl_settings (wpctl settings 2>/dev/null| string collect)
     or return
 

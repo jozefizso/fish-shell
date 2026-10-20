@@ -4,7 +4,9 @@ function __cmdkey_complete_args -d 'Function to generate args'
 
     switch $current_token
         case '/user:*'
-            __fish_print_windows_users | awk "{ printf \"%s%s\n\", \"$current_token\", \$0 }"
+            for account in (__fish_print_windows_users)
+                printf '%s%s\n' $current_token $account
+            end
         case '*'
             if test "$previous_token" = /delete
                 echo -e '/ras\tDelete remote access entry'

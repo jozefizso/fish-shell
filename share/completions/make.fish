@@ -1,5 +1,6 @@
 # Completions for make
 function __fish_print_make_targets --argument-names directory file
+    command -sq make; or return 127
     # Since we filter based on localized text, we need to ensure the
     # text will be using the correct locale.
     set -lx LC_ALL C

@@ -15,8 +15,14 @@ function fish_prompt --description 'Informative prompt'
         set -l status_color (set_color $fish_color_status)
         set -l statusb_color (set_color --bold $fish_color_status)
         set -l pipestatus_string (__fish_print_pipestatus "[" "]" "|" "$status_color" "$statusb_color" $last_pipestatus)
+        set -l clock
+        if builtin -q __fish_native_services
+            set clock (__fish_native_services timestamp now '%H:%M:%S')
+        else
+            set clock (date '+%H:%M:%S')
+        end
 
-        printf '[%s] %s%s@%s %s%s %s%s%s \n> ' (date "+%H:%M:%S") (set_color brblue) \
+        printf '[%s] %s%s@%s %s%s %s%s%s \n> ' $clock (set_color brblue) \
             $USER (prompt_hostname) (set_color $fish_color_cwd) (prompt_pwd) $pipestatus_string \
             (set_color --reset)
     end

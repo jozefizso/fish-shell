@@ -1,0 +1,113 @@
+name: Native Windows unsigned ZIP gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Revision or release tag to build (unsigned artifacts only)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native-x64:
+    # Dedicated restricted-user native machines supply the required UNC, console,
+    # denied-ACL and prior-package fixtures. No Linux guest is native evidence.
+    runs-on: [self-hosted, Windows, X64, fish-native-n10, windows-26300]
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ['1.85.0', stable]
+        features: [default, minimal]
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/n10-${{ matrix.rust }}-${{ matrix.features }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Select native Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install '${{ matrix.rust }}' --profile minimal
+          if ($LASTEXITCODE) { throw 'Rust installation failed' }
+          "RUSTUP_TOOLCHAIN=${{ matrix.rust }}" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Require explicit native fixture provisioning
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in 'FISH_N10_PRIOR_ARCHIVE', 'FISH_N10_DENIED_PARENT', 'FISH_NATIVE_N1_UNC_ROOT') {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if (-not $value -or -not (Test-Path -LiteralPath $value)) { throw "Missing required fixture: $name" }
+          }
+          if ($env:FISH_N10_CLEAN_MACHINE -ne '1') { throw 'Runner must be provisioned as a clean restricted-user native fixture' }
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'N10 clean install must run without an administrator token' }
+          if ([Environment]::OSVersion.Version.Build -ne 26300) { throw 'This runner cell requires the declared Windows build 26300 fixture' }
+          if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)).DriveFormat -ne 'NTFS') { throw 'Native release workspace must be on the declared local NTFS fixture' }
+          if (-not $env:WindowsSDKVersion -or $env:WindowsSDKVersion.TrimEnd('\') -ne '10.0.26100.0') { throw 'Initialize x64 SDK 10.0.26100.0 developer environment before starting runner' }
+          Get-Command cl.exe, link.exe, rc.exe, dumpbin.exe, sphinx-build, msgfmt -ErrorAction Stop | Out-Null
+          "FISH_N10_PWSH=$((Get-Process -Id $PID).Path)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          rustc -Vv
+          cargo -V
+          Get-ComputerInfo -Property OsName, OsVersion, WindowsVersion
+      - name: Build both real native profiles
+        shell: pwsh
+        run: |
+          foreach ($configuration in 'debug', 'release') {
+            & ./build_tools/native.ps1 -Action Build -Configuration $configuration -Features '${{ matrix.features }}'
+          }
+      - name: Package and run all native gates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:FISH_NATIVE_TEST_BIN = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/debug/fish.exe'
+          $env:FISH_NATIVE_TEST_RELEASE_BIN = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/fish.exe'
+          $out = Join-Path $env:GITHUB_WORKSPACE 'native-artifacts/release'
+          & ./build_tools/native.ps1 -Action Package -Configuration release -Features '${{ matrix.features }}' -OutputDirectory $out
+          $archives = @(Get-ChildItem -LiteralPath $out -Filter '*.zip')
+          if ($archives.Count -ne 1) { throw 'Expected one actual release ZIP artifact' }
+          $env:FISH_N10_ARCHIVE = $archives[0].FullName
+          $rebuilt = Join-Path $env:GITHUB_WORKSPACE 'native-artifacts/rebuilt-release'
+          & ./build_tools/native.ps1 -Action Package -Configuration release -Features '${{ matrix.features }}' -OutputDirectory $rebuilt
+          $rebuildArchives = @(Get-ChildItem -LiteralPath $rebuilt -Filter '*.zip')
+          if ($rebuildArchives.Count -ne 1) { throw 'Expected one independent same-input release ZIP' }
+          $env:FISH_N10_REBUILT_ARCHIVE = $rebuildArchives[0].FullName
+          foreach ($configuration in 'debug', 'release') {
+            & ./build_tools/native.ps1 -Action Check -Configuration $configuration -Features '${{ matrix.features }}'
+          }
+      - name: Retain unsigned packages and hash sidecars
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-x64-unsigned-${{ matrix.rust }}-${{ matrix.features }}
+          path: |
+            native-artifacts/
+            target/n10-${{ matrix.rust }}-${{ matrix.features }}/n10-check-results/
+            target/n*-gate-results/
+          if-no-files-found: error
+
+  supported-unix-host-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install declared maintenance-host dependencies
+        run: sudo apt-get update && sudo apt-get install -y gettext libpcre2-dev shellcheck fish python3-pip
+      - uses: ./.github/actions/install-sphinx
+      - name: Run workspace host-tool tests and inspect generated docs
+        run: |
+          set -e
+          cargo test --locked --workspace
+          cargo xtask man-pages
+          cargo xtask html-docs
+          test -s target/fish-docs/man/man1/fish.1
+          test -s target/fish-docs/html/index.html
+          cargo xtask fluent check --from-source
+          cargo xtask gettext check
+          cargo xtask shellcheck

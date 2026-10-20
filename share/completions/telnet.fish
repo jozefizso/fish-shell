@@ -16,12 +16,12 @@ complete -c telnet -s L -d "Specifies an 8-bit data path"
 complete -c telnet -s n -x -d "Log to tracefile"
 complete -c telnet -s r -d "User interface similar to rlogin"
 
-switch (uname -s)
+switch (__fish_uname)
     case FreeBSD NetBSD Linux
         complete -c telnet -s d -d "Sets debug mode"
 end
 
-switch (uname -s)
+switch (__fish_uname)
     case FreeBSD NetBSD
         complete -c telnet -s F -s f -d "Forward local credentials if using Kerberos V5 authentication"
         complete -c telnet -s S -x -d "Sets IP TOS"
@@ -31,7 +31,7 @@ switch (uname -s)
         complete -c telnet -s X -x -d "Disables specified type of authentication"
 end
 
-switch (uname -s)
+switch (__fish_uname)
     case FreeBSD
         complete -c telnet -s y -d "Turn off encryption"
         complete -c telnet -s B -x -d "Set baudrate"

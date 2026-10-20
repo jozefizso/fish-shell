@@ -1,31 +1,28 @@
 function __attrib_complete_args -d 'Function to generate args'
     set -l current_token (commandline -tc)
 
+    set -l action
     switch $current_token
-        case '+*'
-            echo -e 'r\tSet the Read-only file attribute
-a\tSet the Archive file attribute
-s\tSet the System file attribute
-h\tSet the Hidden file attribute
-i\tSet the Not Content Indexed file attribute' | awk -F '\t' "{ printf \"$current_token%s\t%s\n\", \$1, \$2 }"
-        case '-*'
-            echo -e 'r\tClear the Read-only file attribute
-a\tClear the Archive file attribute
-s\tClear the System file attribute
-h\tClear the Hidden file attribute
-i\tClear the Not Content Indexed file attribute' | awk -F '\t' "{ printf \"$current_token%s\t%s\n\", \$1, \$2 }"
+        case +
+            set action Set
+        case -
+            set action Clear
+        case '*'
+            return
+    end
+    for attribute in 'r:Read-only' 'a:Archive' 's:System' 'h:Hidden' 'o:Offline' 'i:Not Content Indexed' 'x:Scrub' 'p:Pinned' 'u:Unpinned' 'b:SMR Blob'
+        set -l fields (string split -m 1 : -- $attribute)
+        printf '%s%s\t%s the %s file attribute\n' $current_token $fields[1] $action $fields[2]
     end
 end
 
-complete -c attrib -f -a '(__attrib_complete_args)'
+complete -c attrib -a '(__attrib_complete_args)'
 
-complete -c attrib -f -n '__fish_seen_argument -w s' -a d \
-    -d 'Apply attrib and any command-line options to directories'
-complete -c attrib -f -n '__fish_seen_argument -w s' -a l \
-    -d 'Apply attrib and any command-line options to the Symbolic Link'
+complete -c attrib -a /d -d 'Apply to directories'
+complete -c attrib -a /l -d 'Apply to the symbolic link rather than its target'
 
-complete -c attrib -f -a + -d 'Set the file attribute'
-complete -c attrib -f -a - -d 'Clear the file attribute'
-complete -c attrib -f -a /s \
+complete -c attrib -a + -d 'Set the file attribute'
+complete -c attrib -a - -d 'Clear the file attribute'
+complete -c attrib -a /s \
     -d 'Apply to matching files in the current directory and all of its subdirectories'
-complete -c attrib -f -a '/?' -d 'Show help'
+complete -c attrib -a '/?' -d 'Show help'

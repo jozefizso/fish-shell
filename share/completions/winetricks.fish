@@ -1,4 +1,5 @@
 function __fish_winetricks__complete_verbs
+    command -sq winetricks; or return 127
     __fish_cached -t 3600 -- 'winetricks list-all 2>/dev/null' |
         string match --invert --regex '^==' |
         string match --invert --regex '^(apps|dlls|fonts|games|settings)$' |

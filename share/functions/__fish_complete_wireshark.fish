@@ -12,21 +12,29 @@ function __fish_wireshark_interface
 end
 
 function __fish_wireshark_protocol
-    command tshark -G protocols 2>/dev/null | awk -F\t '{print $3"\t"$1}'
+    command tshark -G protocols 2>/dev/null | string replace -rf '^([^\t\r]+)\t[^\t\r]*\t([^\t\r]+).*$' '$2\t$1'
+    return $pipestatus[1]
 end
 
 function __fish_wireshark_heuristic
-    command tshark -G heuristic-decodes 2>/dev/null | awk -F\t '{print $2"\t"$1}'
+    # The decoder protocol (field 2) is not the CLI toggle identity (field 5).
+    command tshark -G heuristic-decodes 2>/dev/null | string replace -rf '^[^\t]*\t[^\t]*\t[^\t]*\t[^\t]*\t([^\t\r]+)\t([^\r]+)\r?$' '$1\t$2'
+    set -l results $pipestatus
+    test $results[1] -eq 0; or return $results[1]
+    return $results[2]
 end
 
 function __fish_tshark_name_resolving_flags
-    printf -- (commandline -ct | string replace -r -- '^-N' '')%s\n \
+    set -l prefix (commandline -ct | string replace -r -- '^-N' '')
+    for choice in \
         d\t"enable resolution from captured DNS packets" \
         m\t"enable MAC address resolution" \
         n\t"enable network address resolution" \
         N\t"enable using external resolvers (such as DNS) for network address resolution" \
         t\t"enable transport-layer port number resolution" \
         v\t"enable VLAN IDs to names resolution"
+        printf '%s%s\n' "$prefix" "$choice"
+    end
 end
 
 function __fish_tshark_decode_as
@@ -36,9 +44,9 @@ function __fish_tshark_decode_as
     else if string match -rq -- '(==|,)' $tok
         set -l tok_no_comma (string replace -r -- ',.*$' '' $tok)
         command tshark -d (string replace -r -- '^-d' '' $tok) 2>|
-            string replace -rf -- "^\t(\S+) \(?([^\)]*)\)?\$" "$tok_no_comma,\$1\t\$2"
+            string replace -rf -- "^\t(\S+) \(?([^\)\r]*)\)?\r?\$" "$tok_no_comma,\$1\t\$2"
     else
-        command tshark -d . 2>| string replace -rf -- "^\t(\S+) \(?([^\)]*)\)?\$" '$1==\t$2'
+        command tshark -d . 2>| string replace -rf -- "^\t(\S+) \(?([^\)\r]*)\)?\r?\$" '$1==\t$2'
     end
 end
 
@@ -82,8 +90,8 @@ packets:\t"Switch to the next file after it contains N packets"'
     switch $shark
         case wireshark tshark
             complete -c $shark -s C -d 'Run with the given configuration profile' -xa '(
-set -l folders (tshark -G folders 2>/dev/null | awk \'/Personal configuration/{ print $NF}\')/profiles/*
-string match -r "[^/]*\\$" -- $folders)'
+set -l folders (tshark -G folders 2>/dev/null | string replace -rf \'^Personal configuration:[\t ]*(.+?)\r?$\' \'$1\')/profiles/*
+path basename -- $folders)'
             complete -c $shark -s d -d 'Specify how a layer type should be dissected' -xa '(__fish_tshark_decode_as)'
             complete -c $shark -l enable-protocol -d 'Enable dissection of the given protocol' -xa '(__fish_wireshark_protocol)'
             complete -c $shark -l disable-protocol -d 'Disable dissection of the given protocol' -xa '(__fish_wireshark_protocol)'

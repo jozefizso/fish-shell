@@ -155,7 +155,7 @@ complete -c fossil -n '__fish_fossil_command clone' -l ssl-identity -r -d 'Use S
 
 # commit
 complete -c fossil -n __fish_fossil_needs_command -a 'ci commit' -d 'Create new revision'
-complete -c fossil -n '__fish_fossil_command ci commit' -a '(__fish_fossil changes --rel-paths | cut -c12-)' -x -d File
+complete -c fossil -n '__fish_fossil_command ci commit' -a '(__fish_fossil changes --rel-paths | string sub -s 12)' -x -d File
 complete -c fossil -n '__fish_fossil_command ci commit' -l allow-conflict -d 'Allow unresolved merge conflicts'
 complete -c fossil -n '__fish_fossil_command ci commit' -l allow-empty -d 'Allow empty check-ins'
 complete -c fossil -n '__fish_fossil_command ci commit' -l allow-fork -d 'Allow forking'
@@ -389,9 +389,9 @@ complete -c fossil -n __fish_fossil_needs_command -a tag -d 'Manage tags'
 complete -c fossil -n '__fish_fossil_subcommand tag' -x -a add -d 'Add tag to check-in'
 complete -c fossil -n '__fish_fossil_subsubcommand tag add' -l raw -d 'Add raw tag'
 complete -c fossil -n '__fish_fossil_subsubcommand tag add' -l propagate -d 'Propagate tag'
-complete -c fossil -n '__fish_fossil_subcommand tag' -x -a remove -d 'Remove tag from check-in'
-complete -c fossil -n '__fish_fossil_subsubcommand tag remove' -a '(__fish_fossil tag list)' -d Tag
-complete -c fossil -n '__fish_fossil_subsubcommand tag remove' -l raw -d 'Remove raw tag'
+complete -c fossil -n '__fish_fossil_subcommand tag' -x -a cancel -d 'Remove tag from check-in'
+complete -c fossil -n '__fish_fossil_subsubcommand tag cancel' -a '(__fish_fossil tag list)' -d Tag
+complete -c fossil -n '__fish_fossil_subsubcommand tag cancel' -l raw -d 'Remove raw tag'
 complete -c fossil -n '__fish_fossil_subcommand tag' -x -a find -d 'Find tag'
 complete -c fossil -n '__fish_fossil_subsubcommand tag find' -l raw -d 'Find raw tag'
 complete -c fossil -n '__fish_fossil_subsubcommand tag find' -s t -l type -x -a 'ci e' -d 'Find tag type'

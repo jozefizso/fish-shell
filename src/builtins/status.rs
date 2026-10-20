@@ -4,7 +4,7 @@ use crate::common::get_program_name;
 #[cfg(unix)]
 use crate::env::config_paths::get_fish_path;
 use crate::err_fmt;
-#[cfg(all(unix, not(feature = "localize-messages")))]
+#[cfg(not(feature = "localize-messages"))]
 use crate::err_raw;
 #[cfg(unix)]
 use crate::proc::get_login;
@@ -15,7 +15,6 @@ use crate::tty_handoff::{TERMINAL_OS_NAME, get_scroll_content_up_capability, xtv
 use crate::wutil::{self, wbasename, wdirname};
 #[cfg(unix)]
 use crate::wutil::{waccess, wrealpath};
-#[cfg(unix)]
 use cfg_if::cfg_if;
 use fish_feature_flags::{self as features, feature_test};
 #[cfg(unix)]
@@ -91,6 +90,7 @@ str_enum!(
     (ListFiles, "list-files"),
     (Language, "language"),
     (JobControl, "job-control"),
+    (NativeHelp, "native-help"),
     (StackTrace, "stack-trace", "print-stack-trace"),
     (Terminal, "terminal"),
     (TerminalOs, "terminal-os"),
@@ -376,6 +376,27 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             }
         }
     }
+    if matches!(opts.status_cmd, Some(NativeHelp)) {
+        let arguments = &args[optind..];
+        if arguments.len() != 1 {
+            err_fmt!(builtins::Error::UNEXP_ARG_COUNT, 1, arguments.len())
+                .cmd(cmd).finish(streams);
+            return Err(STATUS_INVALID_ARGS);
+        }
+        #[cfg(windows)]
+        return match crate::print_help::help_text(&arguments[0].to_string()) {
+            Ok(text) => {
+                streams.out.append(&str2wcstring(text));
+                Ok(SUCCESS)
+            }
+            Err(error) => {
+                streams.err.appendln(&str2wcstring(format!("{cmd}: {error}")));
+                Err(STATUS_CMD_ERROR)
+            }
+        };
+        #[cfg(unix)]
+        return Err(STATUS_CMD_ERROR);
+    }
     // Every argument that we haven't consumed already is an argument for a subcommand.
     let args = &args[optind..];
 
@@ -450,15 +471,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             } else {
                 Ok(SUCCESS)
             };
-        }
-        #[cfg(windows)]
-        Language => {
-            err_fmt!(
-                "fish was built without native message catalogs; status language is unavailable"
-            )
-            .cmd(cmd)
-            .finish(streams);
-            return Err(STATUS_CMD_ERROR);
         }
         c @ JobControl => {
             let job_control_mode = match opts.new_job_control_mode {
@@ -536,7 +548,6 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
             streams.out.append(&src);
             return Ok(SUCCESS);
         }
-        #[cfg(unix)]
         Language => {
             cfg_if! {
                 if #[cfg(not(feature = "localize-messages"))] {
@@ -837,7 +848,7 @@ pub fn status(parser: &mut Parser, streams: &mut IoStreams, args: &mut [&wstr]) 
                 }
                 #[cfg(windows)]
                 IsLogin => unreachable!(),
-                JobControl | Features | TestFeature | GetFile | ListFiles | Language
+                JobControl | Features | TestFeature | GetFile | ListFiles | Language | NativeHelp
                 | TestTerminalFeature => {
                     unreachable!("")
                 }

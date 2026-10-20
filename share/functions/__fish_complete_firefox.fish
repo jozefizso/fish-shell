@@ -1,15 +1,26 @@
 # localization: tier3
+function __fish_firefox_profiles
+    set -l profiles ~/.mozilla/firefox/profiles.ini
+    if builtin -q __fish_native_fs
+        set -q APPDATA; or return 1
+        set profiles "$APPDATA/Mozilla/Firefox/profiles.ini"
+    end
+    test -r "$profiles"; or return 1
+    string replace -rf '^Name=([^\r]*)\r?$' '$1' <"$profiles"
+end
+
 function __fish_complete_firefox -a firefox
-    # X11 options
-    complete $firefox -l display -r -d "X display to use"
-    complete $firefox -l sync -d "Make X calls synchronous"
-    complete $firefox -l g-fatal-warnings -d "Make all warnings fatal"
+    if not builtin -q __fish_native_fs
+        complete $firefox -l display -r -d "X display to use"
+        complete $firefox -l sync -d "Make X calls synchronous"
+        complete $firefox -l g-fatal-warnings -d "Make all warnings fatal"
+    end
 
     # Firefox options
     complete $firefox -s h -l help -d "Print this message"
     complete $firefox -s v -l version -d "Print Firefox version"
     complete $firefox -l full-version -d "Print Firefox version, build and platform build ids"
-    complete $firefox -s P -r -d "Start this profile" -fa '(string replace -rf "^Name=(.*)" \'$1\' < ~/.mozilla/firefox/profiles.ini)'
+    complete $firefox -s P -r -d "Start this profile" -fa '(__fish_firefox_profiles)'
     complete $firefox -l profile -r -d "Start with profile at <path>"
     complete $firefox -l migration -d "Start with migration wizard"
     complete $firefox -l ProfileManager -d "Start with ProfileManager"

@@ -103,6 +103,7 @@ impl ReaderHistorySearch {
         if self.matches.is_empty() {
             return;
         }
+        while self.move_backwards() {}
         self.match_index = self.matches.len() - 1;
     }
 

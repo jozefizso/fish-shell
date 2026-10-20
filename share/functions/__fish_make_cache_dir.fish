@@ -1,5 +1,14 @@
 # localization: skip(private)
 function __fish_make_cache_dir --description "Create and return XDG_CACHE_HOME"
+    if builtin -q __fish_native_fs
+        set -l directory $__fish_cache_dir
+        if set -q argv[1]
+            set directory $directory/$argv[1]
+        end
+        __fish_native_fs mkdir $directory
+        and printf '%s\n' $directory
+        return $status
+    end
     set -l xdg_cache_home $XDG_CACHE_HOME
     if test -z "$xdg_cache_home"; or string match -qv '/*' -- $xdg_cache_home; or set -q xdg_cache_home[2]
         set xdg_cache_home $HOME/.cache

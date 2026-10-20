@@ -11,7 +11,7 @@ and set is_gnu --is-gnu
 # This grep tries to match nonempty lines that do not start with hash
 __fish_gnu_complete -c chsh -s s -l shell -x -a "(string match -r '^[^#].*' < /etc/shells)" -d "Specify your login shell" $is_gnu
 
-switch (uname -s)
+switch (__fish_uname)
     case Darwin
         complete -c chsh -s u -x -d "Specify the auth name"
     case '*'

@@ -22,6 +22,36 @@ function __fish_cached --description "Cache the command output for a given amoun
     or return
     set -l cache_file (path normalize $cache_dir/$cache_key)
     set -l cache_age (path mtime --relative $cache_file)
+    if builtin -q __fish_native_fs
+        # The public helper accepts fish command text. Run it in the matching
+        # fish, never reinterpret it as POSIX sh or interpolate the cache path.
+        set -l populate '
+            function __fish_native_cache_populate
+            set -l temporary (__fish_native_fs make-temp-file)
+            or return
+            eval "$argv[1]" >$temporary
+            set -l result $status
+            if test $result = 0
+                __fish_native_fs atomic-write $argv[2] <$temporary
+                set result $status
+            end
+            __fish_native_fs remove $temporary
+            return $result
+            end
+            __fish_native_cache_populate $argv
+        '
+        if not test -f $cache_file
+            $(status fish-path) -N -c $populate -- "$argv[1]" $cache_file
+            or return
+            __fish_native_fs read $cache_file
+        else
+            __fish_native_fs read $cache_file
+            if test $max_age -lt 0; or test $cache_age -gt $max_age
+                $(status fish-path) -N -c $populate -- "$argv[1]" $cache_file >/dev/null 2>&1 &
+            end
+        end
+        return $status
+    end
 
     set -l populate_cache (__fish_posix_shell) -c "
         {

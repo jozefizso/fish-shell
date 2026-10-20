@@ -9,24 +9,19 @@ function __fish_print_gpg_algo -d "Complete using all algorithms of the type spe
     # will take effect again.
     set -lx LC_ALL C
 
-    # sed script explained:
-    # in the line that matches "$argv:"
-    # 	define label 'loop'
-    # 	if the line ends with a ','
-    # 		add next line to buffer
-    #		transliterate '\n' with ' '
-    #		goto loop
-    # 	remove everything until the first ':' of the line
-    # 	remove all blanks
-    # 	transliterate ',' with '\n' (OSX apparently doesn't like '\n' on RHS of the s-command)
-    # 	print result
-    $__fish_complete_gpg_command --version | sed -ne "/$argv[2]:/"'{:loop
-    /,$/{N; y!\n! !
-    b loop
-    }
-    s!^[^:]*:!!
-    s![ ]*!!g
-    y!,!\n!
-    p
-    }'
+    set -l lines ($__fish_complete_gpg_command --version)
+    or return $status
+    set -l collecting false
+    set -l algorithms
+    for line in $lines
+        if not $collecting
+            string match -qr -- "^$argv[2]:" $line; or continue
+            set collecting true
+            set line (string replace -r '^[^:]*:' '' -- $line)
+        end
+        set -a algorithms (string split -n , -- $line | string replace -ar '\s+' '')
+        string match -q '*,' -- (string trim -- $line); or break
+    end
+    set -q algorithms[1]; or return 1
+    printf '%s\n' $algorithms
 end

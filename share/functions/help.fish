@@ -18,6 +18,13 @@ function help --description 'Show help for the fish shell'
             return 1
         end
     end
+    if builtin -q __fish_native_fs
+        if not set -q fish_help_item[1]; or test -z "$fish_help_item"
+            set fish_help_item introduction
+        end
+        status native-help "$fish_help_item"
+        return $status
+    end
 
     # Find a suitable browser for viewing the help pages.
     # The first thing we try is $fish_help_browser.

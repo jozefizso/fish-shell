@@ -37,7 +37,6 @@ function fish_vi_start_operator
     set -g __fish_vi_operator $argv[1]
     set -g __fish_vi_start_count (__fish_vi_consume_count __fish_vi_count)
     set fish_bind_mode operator
-    commandline -f repaint-mode
 end
 
 function fish_vi_operator_cancel
@@ -45,7 +44,6 @@ function fish_vi_operator_cancel
     set -g __fish_vi_start_count
     set -g __fish_vi_count
     set fish_bind_mode default
-    commandline -f repaint-mode
 end
 
 function __fish_vi_consume_count -a varname
@@ -101,24 +99,51 @@ function fish_vi_exec_motion
 
     set -l seq_total (__fish_vi_sequence $total)
     if set -ql _flag_linewise
+        commandline -f begin-undo-group
         switch $__fish_vi_operator
             case delete
                 for i in $seq_total
                     commandline -f kill-whole-line
                 end
             case change
+                # cc keeps one empty logical line, even for a counted change.
+                # Select through the final line's content, not its newline.
+                set -l selection_mode $fish_cursor_selection_mode
+                set -g fish_cursor_selection_mode exclusive
+                set -g fish_cursor_end_mode exclusive
+                commandline -f beginning-of-line begin-selection
                 for i in $seq_total
-                    commandline -f kill-inner-line
+                    commandline -f end-of-line
+                    if test $i -lt $total
+                        commandline -f forward-single-char
+                    end
                 end
+                commandline -f kill-selection end-selection
+                set -g fish_cursor_selection_mode $selection_mode
                 set fish_bind_mode insert
             case yank
+                set -l original_cursor (commandline --cursor)
+                set -l original_buffer (commandline | string collect)
                 for i in $seq_total
-                    commandline -f kill-whole-line yank
+                    commandline -f kill-whole-line
+                end
+                if test "$original_buffer" != "$(commandline)"
+                    commandline -f yank
+                    commandline --cursor $original_cursor
                 end
             case swap-case
-                # Not implemented yet
-                return
+                # Select complete logical lines, including the final line
+                # without a newline. Keep the whole operator one undo step.
+                commandline -f beginning-of-line begin-selection
+                for i in $seq_total
+                    commandline -f end-of-line
+                    if test $i -lt $total
+                        commandline -f forward-single-char
+                    end
+                end
+                commandline -f togglecase-selection end-selection
         end
+        commandline -f end-undo-group
     else
         set -l use_selection true
         set -l swap_case_hack
@@ -253,8 +278,8 @@ function fish_vi_inc_dec --description 'increment or decrement the number below 
         end
     else
         # We didn't find a match below the cursor. Mirror Vim behavior by
-        # checking ahead as well.
-        for i in (__fish_vi_sequence (math -- $cursor + 1) (math -- (string length -- $line) - 1))
+        # checking ahead as well, including a number at the final character.
+        for i in (__fish_vi_sequence (math -- $cursor + 1) (string length -- $line))
             set candidate (string sub --start $i -- $line | string collect)
 
             if set just_found (string match --regex '^-?[0-9]+' -- $candidate)
@@ -445,13 +470,15 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
     bind --preset -M default ctrl-h backward-char
 
     # Operators & Operator Mode
-    bind --preset -M default d 'fish_vi_start_operator delete'
-    bind --preset -M default c 'fish_vi_start_operator change'
-    bind --preset -M default y 'fish_vi_start_operator yank'
-    bind --preset -M default g,\~ 'fish_vi_start_operator swap-case'
+    # Repaint as a binding event, before the next key. Requesting it inside
+    # the script defers subsequent commandline actions past their state reads.
+    bind --preset -M default d 'fish_vi_start_operator delete' repaint-mode
+    bind --preset -M default c 'fish_vi_start_operator change' repaint-mode
+    bind --preset -M default y 'fish_vi_start_operator yank' repaint-mode
+    bind --preset -M default g,\~ 'fish_vi_start_operator swap-case' repaint-mode
 
-    bind --preset -M operator escape fish_vi_operator_cancel
-    bind --preset -M operator ctrl-\[ fish_vi_operator_cancel
+    bind --preset -M operator escape fish_vi_operator_cancel repaint-mode
+    bind --preset -M operator ctrl-\[ fish_vi_operator_cancel repaint-mode
 
     for i in 1 2 3 4 5 6 7 8 9
         bind --preset -M operator $i "fish_vi_arg_digit $i"

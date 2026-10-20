@@ -29,12 +29,12 @@ function __fish_complete_cd -d "Completions for the cd command"
     # is not guaranteed.
     for cdpath in $cdpath
         # Replace $HOME with "~".
-        set -l desc (string replace -r -- "^$HOME" "~" "$cdpath")
+        set -l desc (string replace -r -- "^"(string escape --style=regex -- "$HOME") "~" "$cdpath")
         # This assumes the CDPATH component itself is cd-able.
         for d in $cdpath/$token*/
             # Remove the cdpath component again.
             test -x $d
-            and printf "%s\tCDPATH %s\n" (string replace -r "^$cdpath/" "" -- $d) $desc
+            and printf "%s\tCDPATH %s\n" (string replace -r -- "^"(string escape --style=regex -- "$cdpath")"/" "" "$d") $desc
         end
     end
 end

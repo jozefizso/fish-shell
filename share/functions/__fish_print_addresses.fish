@@ -5,6 +5,11 @@ function __fish_print_addresses --description "List own network addresses with i
         echo -e "0.0.0.0\tall"
         echo -e "::\tall"
     end
+    if builtin -q __fish_native_services
+        builtin __fish_native_services addresses |
+            string replace -r '^([^\t]+\t[^\t]+)\t.*' '$1'
+        return $pipestatus[1]
+    end
     if command -sq ip
         command ip --oneline address | string replace -r '^\d+:\s+(\S+)\s+inet6?\s+([^\s/]+).*' '$2\t$1'
     else if command -sq ifconfig

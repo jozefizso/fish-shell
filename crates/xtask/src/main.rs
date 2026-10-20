@@ -88,36 +88,32 @@ fn build_html_docs(fish_indent: Option<PathBuf>) -> Result<()> {
     let fish_indent_path = match fish_indent {
         Some(path) => path,
         None => {
-            // Build fish_indent if no existing one is specified.
-            cargo([
+            let target = env!("FISH_XTASK_TARGET");
+            let build_dir = fish_build_helper::fish_build_dir();
+            let manifest = fish_build_helper::workspace_root().join("Cargo.toml");
+            cargo(as_os_strs![
                 "build",
+                "--manifest-path",
+                &manifest,
+                "--target-dir",
+                build_dir.as_os_str(),
+                "--target",
+                target,
                 "--bin",
                 "fish_indent",
                 "--profile",
                 "dev",
                 "--no-default-features",
             ])?;
-            fish_build_helper::fish_build_dir()
+            build_dir
+                .join(target)
                 .join("debug")
-                .join("fish_indent")
+                .join(if cfg!(windows) { "fish_indent.exe" } else { "fish_indent" })
         }
     };
-    // Set path so `sphinx-build` can find `fish_indent`.
-    // Create tempdir to store symlink to fish_indent.
-    // This is done to avoid adding other binaries to the PATH.
-    let tempdir = fish_tempfile::new_dir().context("Failed to create tempdir")?;
-    std::os::unix::fs::symlink(
-        std::fs::canonicalize(&fish_indent_path).with_context(|| {
-            format!("Failed to canonicalize path to `fish_indent`: {fish_indent_path:?}")
-        })?,
-        tempdir.path().join("fish_indent"),
-    )
-    .context("Failed to create symlink for fish_indent")?;
-    let mut new_path = tempdir.path().as_os_str().to_owned();
-    if let Some(current_path) = std::env::var_os("PATH") {
-        new_path.push(":");
-        new_path.push(current_path);
-    }
+    let fish_indent_path = std::fs::canonicalize(&fish_indent_path).with_context(|| {
+        format!("Failed to canonicalize host formatter: {fish_indent_path:?}")
+    })?;
     let doc_src_dir = fish_build_helper::workspace_root().join("doc_src");
     let doctrees_dir = fish_build_helper::fish_doc_dir().join(".doctrees-html");
     let html_dir = fish_build_helper::fish_doc_dir().join("html");
@@ -134,8 +130,10 @@ fn build_html_docs(fish_indent: Option<PathBuf>) -> Result<()> {
         &doc_src_dir,
         &html_dir,
     ];
-    Command::new(option_env!("FISH_SPHINX").unwrap_or("sphinx-build"))
-        .env("PATH", new_path)
+    let sphinx = std::env::var_os("FISH_SPHINX")
+        .unwrap_or_else(|| option_env!("FISH_SPHINX").unwrap_or("sphinx-build").into());
+    Command::new(sphinx)
+        .env("FISH_INDENT_FOR_BUILDING_DOCS", fish_indent_path)
         .args(args)
         .run()
 }

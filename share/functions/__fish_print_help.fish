@@ -1,5 +1,9 @@
 # localization: skip(private)
 function __fish_print_help --description "Print help for the specified fish function or builtin"
+    if builtin -q __fish_native_fs
+        status native-help $argv
+        return $status
+    end
     if not type -q man
         fish_command_not_found man
         return 1

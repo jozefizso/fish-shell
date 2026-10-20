@@ -126,9 +126,9 @@ complete -c set -n '__fish_is_nth_token 1; and not __fish_seen_argument -s e -l 
 complete -c set -n '__fish_is_nth_token 1; and not __fish_seen_argument -s e -l erase' -x -a "(__fish_complete_special_vars)"
 
 # Complete using preexisting variable names for `set --erase`
-complete -c set -n '__fish_seen_argument -s e -l erase; and not __fish_seen_argument -s l -s U -s g -l local -l global -l Universal' -f -a "(set -U | string replace ' ' \tUniversal\ Variable:\ )"
-complete -c set -n '__fish_seen_argument -s e -l erase; and not __fish_seen_argument -s l -s U -s g -l local -l global -l Universal' -f -a "(set -g | string replace ' ' \tGlobal\ Variable:\ )"
-complete -c set -n '__fish_seen_argument -s e -l erase; and not __fish_seen_argument -s l -s U -s g -l local -l global -l Universal' -f -a "(set -l | string replace ' ' \tLocal\ Variable:\ )"
+complete -c set -n '__fish_seen_argument -s e -l erase; and not __fish_seen_argument -s l -s U -s g -l local -l global -l universal' -f -a "(set -U | string replace ' ' \tUniversal\ Variable:\ )"
+complete -c set -n '__fish_seen_argument -s e -l erase; and not __fish_seen_argument -s l -s U -s g -l local -l global -l universal' -f -a "(set -g | string replace ' ' \tGlobal\ Variable:\ )"
+complete -c set -n '__fish_seen_argument -s e -l erase; and not __fish_seen_argument -s l -s U -s g -l local -l global -l universal' -f -a "(set -l | string replace ' ' \tLocal\ Variable:\ )"
 # Complete scope-specific variables for `set --erase`
 complete -c set -n '__fish_seen_argument -s e -l erase; and __fish_seen_argument -s U -l universal' -f -a "(set -U | string replace ' ' \t'Universal Variable: ')"
 complete -c set -n '__fish_seen_argument -s e -l erase; and __fish_seen_argument -s g -l global' -f -a "(set -g | string replace ' ' \t'Global Variable: ')"
@@ -147,4 +147,8 @@ complete -c set -n '__fish_set_is_color true false' -a --underline -x
 complete -c set -n '__fish_set_is_color true false' -a--underline={double,curly,dotted,dashed} -x
 
 # Locale completions
-complete -c set -n '__fish_set_is_locale; and not __fish_seen_argument -s e -l erase' -x -a '(command -sq locale; and locale -a)' -d Locale
+if builtin -q __fish_native_services
+    complete -c set -n '__fish_set_is_locale; and not __fish_seen_argument -s e -l erase' -x -a '(builtin __fish_native_services locales)' -d Locale
+else
+    complete -c set -n '__fish_set_is_locale; and not __fish_seen_argument -s e -l erase' -x -a '(command -sq locale; and locale -a)' -d Locale
+end

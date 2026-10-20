@@ -384,23 +384,16 @@ fn parse_flags(
             'h' => {
                 #[cfg(windows)]
                 {
-                    streams.out.append(L!(
-                        "Usage: fish_key_reader [OPTIONS]\n\
-                         Print fish bind commands for keys read from the console.\n\n\
-                         Options:\n\
-                           -c, --continuous  Read keys until \"exit\", \"quit\", or two consecutive\n\
-                                             Ctrl-C or Ctrl-D keys (default: read one key).\n\
-                           -V, --verbose     Also print the decoded input sequence.\n\
-                           -h, --help        Print this help and exit.\n\
-                           -v, --version     Print the version and exit.\n\n\
-                         No positional arguments are accepted. Bind commands and verbose\n\
-                         sequences go to stdout; prompts and errors go to stderr.\n\
-                         Reading requires console stdin and an installed console session;\n\
-                         the standalone program also requires console stdout. Redirected\n\
-                         pipes are not interpreted as terminal input. Help and version\n\
-                         do not require a console.\n"
-                    ));
-                    return ControlFlow::Break(native_check_output(streams));
+                    match crate::print_help::help_text("fish_key_reader") {
+                        Ok(text) => {
+                            streams.out.append(&WString::from_str(&text));
+                            return ControlFlow::Break(native_check_output(streams));
+                        }
+                        Err(error) => {
+                            streams.err.appendln(&WString::from_str(&format!("fish_key_reader: {error}")));
+                            return ControlFlow::Break(Err(STATUS_CMD_ERROR));
+                        }
+                    }
                 }
                 #[cfg(unix)]
                 {

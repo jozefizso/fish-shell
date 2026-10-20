@@ -14,6 +14,13 @@ complete -c dput -s e -l delayed -d "Upload to a delayed queue" -r
 complete -c dput -s v -l version -d "Print the version"
 complete -c dput -s V -l check-version -d "Enable the local install check"
 
-complete -c dput -x -a '(dput --host-list | string match --regex --groups-only "(.+) => .*")' -d "Upload host" -n __fish_is_first_arg
+function __fish_dput_hosts
+    command -sq dput
+    or return 127
+    command dput --host-list | string match --regex --groups-only '(.+) => .*'
+    return $pipestatus[1]
+end
+
+complete -c dput -x -a '(__fish_dput_hosts)' -d "Upload host" -n __fish_is_first_arg
 # dput validates that filenames end in .changes
 complete -c dput -x -a '(complete -C"\'\' $(commandline -ct)" | string match -re "(?:/|.changes)\$")'

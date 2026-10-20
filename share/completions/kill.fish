@@ -1,3 +1,8 @@
+if builtin -q __fish_native_fs
+    complete -c kill -f
+    return
+end
+
 __fish_make_completion_signals
 
 for sig in $__kill_signals[-1..1]

@@ -85,6 +85,13 @@ pub fn init_special_chars_once() {
     }
 }
 
+#[cfg(windows)]
+pub fn init_special_chars_once() {
+    // Conservative one-cell ASCII works on native console and ConPTY fonts.
+    OMITTED_NEWLINE_STR.store(&"^J");
+    OBFUSCATION_READ_CHAR.store(u32::from('*'), Ordering::Relaxed);
+}
+
 /// Test if the string is a valid function name.
 pub fn valid_func_name(name: &wstr) -> bool {
     !(name.is_empty()

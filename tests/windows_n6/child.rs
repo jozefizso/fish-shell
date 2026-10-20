@@ -1,6 +1,6 @@
 use super::{
     Family,
-    cases_probe::Event,
+    cases_probe::{Event, RetainedProcess},
     editor::{capture, finish, start},
     fixture::{Fixture, quote},
 };
@@ -130,10 +130,14 @@ fn cancellation(f: &Fixture) {
         .as_bytes(),
     );
     s.wait_file(&f.root.join("child-ready"));
+    let pid = fs::read_to_string(f.root.join("child-pid")).unwrap().parse().unwrap();
+    let child = RetainedProcess::acknowledged(pid);
+    child.running("ignored-control child must be alive before receipt");
     s.wait_protocol(false);
     let before = s.snapshot();
     s.control(1);
     controlled.wait();
+    child.running("real receipt must not finish the ignoring child");
     // The real handler acknowledgement is the barrier; no grace period or sleep.
     let held = s.snapshot();
     assert_eq!(
@@ -151,13 +155,21 @@ fn cancellation(f: &Fixture) {
         .expect("protocol disabled for child");
     assert!(!trace[off + 8..].windows(8).any(|x| x == b"\x1b[?2004h"));
     release.set();
-    s.wait_file(&f.root.join("ignored-status"));
+    let raw_status = child.wait_status("released ignored-control child");
+    fs::write(f.root.join("ignored-native-status"), format!("0x{raw_status:08X}")).unwrap();
+    assert_eq!(raw_status, 0, "receipt provenance must not rewrite an ordinary native exit");
     s.wait_protocol(true);
     let after = s.snapshot();
     assert_eq!(
         (after.input_mode, after.output_mode),
         (editor.input_mode, editor.output_mode)
     );
+    assert!(!f.root.join("ignored-status").exists(),
+        "callback rearm and native exit zero must not resume the cancelled command tail");
+    s.send(b"printf '%s' $status > ignored-reader-status\r");
+    s.wait_file(&f.root.join("ignored-reader-status"));
+    assert_eq!(fs::read(f.root.join("ignored-reader-status")).unwrap(), b"130",
+        "fresh reader observes the cancelled evaluator, independently of native DWORD zero");
     s.send(b"after-break");
     capture(&mut s, f, 1, "after-break");
     finish(s);

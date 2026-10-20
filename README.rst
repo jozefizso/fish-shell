@@ -58,6 +58,15 @@ Instructions for other distributions may be found at
 Windows
 ~~~~~~~
 
+The native x64 MSVC distribution path is a **relocatable, unsigned ZIP**, separate
+from WSL/Cygwin/MSYS2. Build and installation commands are below. Its currently
+declared test baseline is x64 Windows build 10.0.26300, local NTFS, Windows SDK
+10.0.26100.0, the native console/ConPTY transport and Rust 1.85/current stable.
+This is not certification of older Windows builds, ARM64, FAT/ReFS, remote SMB
+globbing, MSI/MSIX/winget or signed publication. Package/gate implementation is
+not a clean-machine or human-signoff result; consult the recorded gate evidence
+before advertising a release.
+
 -  On Windows 10/11, fish can be installed under the WSL Windows Subsystem
    for Linux with the instructions for the appropriate distribution
    listed above under “Packages for Linux”, or from source with the
@@ -198,6 +207,101 @@ Here are the remaining advantages of a full installation, as currently done by C
   (also recorded in ``$PREFIX/share/pkgconfig/fish.pc``)
   which are used by some package managers to house third-party completions.
   Regardless of build system, fish uses ``$XDG_DATA_DIRS/{vendor_completion.d,vendor_conf.d,vendor_functions.d}``.
+
+Native Windows build, ZIP and installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use native PowerShell 7.4+ in an x64 Visual Studio Developer environment with
+MSVC C/C++ tools and Windows SDK 10.0.26100.0 (including ``rc.exe`` and
+``dumpbin.exe``). Rust/Cargo must use ``x86_64-pc-windows-msvc``. Native builds do
+not invoke CMake, ``sh``, WSL or MSYS. Select the SDK explicitly when initializing
+``VsDevCmd.bat -arch=x64 -host_arch=x64 -winsdk=10.0.26100.0``.
+
+The ``default`` profile preserves Cargo's ``embed-manpages`` and
+``localize-messages`` features: install native Sphinx (and the Python dependencies
+in ``pyproject.toml``) plus GNU gettext ``msgfmt`` on the **build host**.
+``minimal`` explicitly disables default features and uses English messages.
+Both ZIP profiles install version-matched text help, so packaging either profile
+requires native ``sphinx-build``. Missing requested tools or failing generators
+are errors, not permission to strip features. Python/Sphinx/gettext and Rust
+are not shell-startup dependencies. Optional Python user tools require Python
+3.8+ only when invoked.
+
+.. code:: powershell
+
+    pwsh -NoProfile -File build_tools/native.ps1 -Action Build -Configuration debug -Features default
+    pwsh -NoProfile -File build_tools/native.ps1 -Action Build -Configuration release -Features default
+    pwsh -NoProfile -File build_tools/native.ps1 -Action Package -Features default -OutputDirectory D:\fish-artifacts
+    # For an explicitly English, nonembedded-help runtime:
+    pwsh -NoProfile -File build_tools/native.ps1 -Action Package -Features minimal -OutputDirectory D:\fish-minimal-artifacts
+
+The package contains three real binaries under ``bin``, installed resources under
+``share/fish``, system configuration under ``etc/fish`` and help/licenses/notices
+under ``share/doc/fish``. Fluent/gettext catalogs are embedded in the default
+profile; no gettext runtime DLL is needed. Static MSVC CRT and static UTF-32
+PCRE2 are selected, and packaging rejects undeployed non-system DLL imports.
+Supported Windows supplies the remaining Windows/UCRT API DLLs. Version resources,
+the lockfile hash, build inputs, import lists, per-file hashes and a ZIP SHA-256
+sidecar accompany the unsigned artifact.
+ZIP distribution is release-only; ``Build``/``Check`` also support debug binaries
+for local testing, not redistribution of debug CRTs. Build release packages with
+a redistribution-permitted MSVC toolchain under its applicable license terms.
+
+Download the chosen ZIP and verify its SHA-256 against the independently obtained
+release checksum before running its included ``native.ps1``. Extract it into a
+temporary folder with Explorer's **Extract All**, then use the included script
+from that folder (supply the ZIP's actual absolute path below). Alternatively use
+the matching trusted source-checkout script. Extraction/install is user-local:
+
+.. code:: powershell
+
+    $versions = Join-Path $env:LOCALAPPDATA 'Programs\fish'
+    New-Item -ItemType Directory -Force $versions | Out-Null
+    $zip = (Resolve-Path 'C:\Users\<you>\Downloads\fish-<version>-windows-x64-default-unsigned.zip').Path
+    Get-FileHash -Algorithm SHA256 $zip
+    $install = Join-Path $versions '<version>'
+    pwsh -NoProfile -File .\native.ps1 -Action Install -Archive $zip -Destination $install
+    & (Join-Path $install 'bin\fish.exe') -c 'echo installed; string match -r fish fish'
+    & (Join-Path $install 'bin\fish_indent.exe') --version
+    & (Join-Path $install 'bin\fish_key_reader.exe') --help
+    # Optional, current PowerShell session only; no profile or registry writes:
+    $env:PATH = (Join-Path $install 'bin') + [IO.Path]::PathSeparator + $env:PATH
+
+For persistent PATH selection, use Windows Settings' user environment-variable
+editor and add the selected version's ``bin`` directory yourself. For an optional
+Windows Terminal profile, use **Add a new profile**, give it a distinct name, and
+set its command line to the quoted absolute ``...\bin\fish.exe`` path. Do not
+overwrite another profile or make it the default unless that is your own choice.
+No script here edits PATH, Terminal settings, login-shell settings or profiles.
+
+Upgrade by installing to a **new version directory**, smoke-test it, and explicitly
+select its PATH/Terminal entry. Existing destinations are never overwritten.
+Relocate by closing that version's processes and moving its entire directory;
+update only your selected PATH/Terminal entry. Remove an old version with:
+
+.. code:: powershell
+
+    pwsh -NoProfile -File .\native.ps1 -Action Remove -Destination $oldVersionDirectory
+
+Removal validates tracked contents, rejects modified/untracked files and active
+locks, and never touches independent config/history/universal-variable roots.
+Preserve those roots during upgrades/removal: explicit XDG/HOME overrides take
+precedence; the native default is the existing LocalAppData fish state policy.
+Locked, denied, corrupt and partial operations return nonzero. A removal race can
+leave an explicitly named ``.removing-*`` package directory; the diagnostic names
+it rather than falsely reporting success. Close owned processes, resolve the
+reported access problem and inspect the remainder before manually removing it.
+Neither removal nor reinstall is a user-data reset.
+
+``-Action Check`` runs native unit/doctest/integration/workspace-runtime suites,
+rejecting zero/ignored mandatory suites. It requires the documented native
+console/UNC/security fixtures plus the N10 ZIP, prior-version ZIP and clean
+restricted-user fixture; see ``doc_internal/win_compat/15-build-packaging-documentation.md``.
+Native Fluent rewriting/extraction and HTML generation have separate development
+host evidence. HTML generation selects a matching host ``fish_indent`` directly,
+without a Unix symlink or PATH separator convention. Unix-specific ``cargo xtask``
+check/release commands remain separate. None of these development checks replaces
+native installed-product, clean-machine or human accessibility acceptance.
 
 Contributing Changes to the Code
 --------------------------------

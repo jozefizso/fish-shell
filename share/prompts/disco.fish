@@ -68,10 +68,17 @@ function fish_right_prompt
     # We don't want the leading space.
     set -l vcs (fish_vcs_prompt '(%s)' 2>/dev/null)
 
-    set -l d (set_color brgrey)(date "+%R")(set_color --reset)
+    set -l clock
+    if builtin -q __fish_native_services
+        set clock (__fish_native_services timestamp now '%H:%M')
+    else
+        set clock (date '+%R')
+    end
+    set -l d (set_color brgrey)$clock(set_color --reset)
 
-    set -l duration "$cmd_duration$CMD_DURATION"
-    if test $duration -gt 100
+    # The first prompt has no command duration yet.
+    set -l duration "$CMD_DURATION"
+    if test -n "$duration"; and test "$duration" -gt 100
         set duration (math $duration / 1000)s
     else
         set duration
@@ -83,5 +90,5 @@ function fish_right_prompt
     and set -l venv (string replace -r '.*/' '' -- "$VIRTUAL_ENV")
 
     set_color --reset
-    string join " " -- $venv $duration $vcs $d
+    printf '%s\n' (string join " " -- $venv $duration $vcs $d)
 end

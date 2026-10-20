@@ -55,7 +55,14 @@ function cdh --description "Menu based cd command"
             set dir_color (set_color $fish_color_history_current)
         end
 
-        set -l home_dir (string match -r "^$HOME(/.*|\$)" "$dir")
+        set -l home_dir
+        if builtin -q __fish_native_fs
+            set -l home_path (string replace -a '\\' / -- "$HOME" | string trim -r -c /)
+            set -l native_dir (string replace -a '\\' / -- "$dir")
+            set home_dir (string match -ri "^$(string escape --style=regex -- "$home_path")(/.*|\$)" -- "$native_dir")
+        else
+            set home_dir (string match -r "^$(string escape --style=regex -- "$HOME")(/.*|\$)" -- "$dir")
+        end
         if set -q home_dir[2]
             set dir "~$home_dir[2]"
         end

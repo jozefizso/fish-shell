@@ -1,6 +1,6 @@
 # localization: skip(private)
 function __fish_webconfig_update_color_hook --on-variable __fish_webconfig_theme_notification
-    if not string match -qr -- '^set-theme-v1-#\d+$' $__fish_webconfig_theme_notification
+    if not string match -qr -- '\Aset-theme-v1-#\d+\z' $__fish_webconfig_theme_notification
         # Early return for forward compatibility - a future "fish_config"
         # may not want to update old shells.
         return

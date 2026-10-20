@@ -17,6 +17,20 @@ This page briefly describes the options for invoking :command:`fish`.
 The :ref:`full manual <intro>` is available in HTML by using the :command:`help` command from inside fish, and in the `fish-doc(1)` man page.
 The :doc:`tutorial <../tutorial>` is available as HTML via ``help tutorial`` or in `man fish-tutorial`.
 
+On native Windows, ``fish``, ``fish_indent`` and ``fish_key_reader`` provide
+``-h``/``--help`` as plain text without ``man``, ``less``, a Unix shell, Python
+or Sphinx at runtime. Builtin and shipped-function help uses the same manual.
+The default Cargo profile embeds Sphinx-generated text in the executable;
+the build host therefore needs Sphinx and gettext's ``msgfmt``. Requested
+help or localization features fail the build when their generator is absent.
+``--no-default-features`` explicitly selects an English-only minimal profile.
+Its external manual, if installed, is read from
+``share/doc/fish/help`` relative to the executable's installation root
+(``bin/fish.exe``), never from another fish on ``PATH``. The
+``fish-help-version`` file in that directory must match the executable's
+version; missing or mismatched data produces an error rather than invoking
+another installation.
+
 
 The following options are available:
 
@@ -65,6 +79,9 @@ The following options are available:
 
 **-v** or **--version**
     Print version and exit.
+
+**-h** or **--help**
+    Print this command's manual and exit.
 
 **-f** or **--features=FEATURES**
     Enables one or more comma-separated :ref:`feature flags <featureflags>`.

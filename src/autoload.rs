@@ -42,6 +42,14 @@ pub struct Autoload {
 #[exclude = "__fish_build_paths.fish.in"]
 pub struct Asset;
 
+// Live-file debug builds need only this namespace for command completion.
+// Keep script bytes in Asset; this index must never be used to load a function.
+#[cfg(all(unix, debug_assertions))]
+#[derive(RustEmbed)]
+#[folder = "share/functions"]
+#[metadata_only = true]
+pub(crate) struct FunctionNames;
+
 pub fn has_asset(cmd: &str) -> bool {
     Asset::get(cmd).is_some()
 }
@@ -94,6 +102,26 @@ impl Autoload {
     /// mark_autoload_finished() with the same command. Note this does not actually execute any
     /// code; it is the caller's responsibility to load the file.
     pub fn resolve_command(&mut self, cmd: &wstr, env: &dyn Environment) -> AutoloadResult {
+        self.resolve_command_with_case_policy(cmd, env, true)
+    }
+
+    /// Resolve a completion using the already-resolved command's native case policy.
+    /// Only embedded completion names may be folded; disk paths and function names stay exact.
+    pub fn resolve_completion_command(
+        &mut self,
+        cmd: &wstr,
+        env: &dyn Environment,
+        case_sensitive: bool,
+    ) -> AutoloadResult {
+        self.resolve_command_with_case_policy(cmd, env, case_sensitive)
+    }
+
+    fn resolve_command_with_case_policy(
+        &mut self,
+        cmd: &wstr,
+        env: &dyn Environment,
+        case_sensitive: bool,
+    ) -> AutoloadResult {
         let paths = env.get(self.env_var_name);
         let paths = paths.as_ref().map(|var| var.as_list()).unwrap_or_default();
         // Native filesystem APIs must resolve against this environment's owned cwd,
@@ -109,7 +137,7 @@ impl Autoload {
         };
         #[cfg(windows)]
         let paths = resolved_paths.as_slice();
-        let result = self.resolve_command_impl(cmd, paths);
+        let result = self.resolve_command_impl(cmd, paths, case_sensitive);
         match result {
             AutoloadResult::Path(AutoloadPath::OnDisk(ref path)) => {
                 flogf!(
@@ -175,6 +203,13 @@ impl Autoload {
         self.autoloaded_files.remove(cmd);
     }
 
+    /// Definitions were removed after a native path became unavailable. Restoring
+    /// access must reload even if the file's identity itself did not change.
+    #[cfg(windows)]
+    pub fn forget_command(&mut self, cmd: &wstr) {
+        self.autoloaded_files.remove(cmd);
+    }
+
     /// Return whether a command is currently being autoloaded.
     pub fn autoload_in_progress(&self, cmd: &wstr) -> bool {
         self.current_autoloading.contains(cmd)
@@ -184,7 +219,7 @@ impl Autoload {
     /// This does not actually mark the command as being autoloaded.
     pub fn can_autoload(&mut self, cmd: &wstr) -> bool {
         self.cache
-            .check(self.env_var_name, cmd, true /* allow stale */)
+            .check(self.env_var_name, cmd, true /* allow stale */, true)
             .is_some()
     }
 
@@ -220,7 +255,12 @@ impl Autoload {
 
     /// Like resolve_autoload(), but accepts the paths directly.
     /// This is exposed for testing.
-    fn resolve_command_impl(&mut self, cmd: &wstr, paths: &[WString]) -> AutoloadResult {
+    fn resolve_command_impl(
+        &mut self,
+        cmd: &wstr,
+        paths: &[WString],
+        case_sensitive: bool,
+    ) -> AutoloadResult {
         // Are we currently in the process of autoloading this?
         if self.current_autoloading.contains(cmd) {
             return AutoloadResult::Pending;
@@ -234,7 +274,7 @@ impl Autoload {
         }
 
         // Do we have an entry to load?
-        let Some(file) = self.cache.check(self.env_var_name, cmd, false) else {
+        let Some(file) = self.cache.check(self.env_var_name, cmd, false, case_sensitive) else {
             return AutoloadResult::None;
         };
 
@@ -332,6 +372,7 @@ impl AutoloadFileCache {
         env_var_name: &wstr,
         cmd: &wstr,
         allow_stale: bool,
+        case_sensitive: bool,
     ) -> Option<AutoloadableFileInfo> {
         let asset_dir = match env_var_name {
             s if s == "fish_function_path" => Some(AssetDir::Functions),
@@ -367,7 +408,7 @@ impl AutoloadFileCache {
         // We couldn't satisfy this request from the cache. Hit the disk.
         let file = self
             .locate_file(cmd, asset_dir, false)
-            .or_else(|| self.locate_asset(cmd, asset_dir?))
+            .or_else(|| self.locate_asset(cmd, asset_dir?, case_sensitive))
             .or_else(|| self.locate_file(cmd, asset_dir, true));
         if let Some(file) = file.as_ref() {
             let old_value = self.known_files.insert(
@@ -451,13 +492,24 @@ impl AutoloadFileCache {
         None
     }
 
-    fn locate_asset(&self, cmd: &wstr, asset_dir: AssetDir) -> Option<AutoloadableFileInfo> {
+    fn locate_asset(
+        &self,
+        cmd: &wstr,
+        asset_dir: AssetDir,
+        case_sensitive: bool,
+    ) -> Option<AutoloadableFileInfo> {
         // HACK: In cargo tests, this used to never load functions
         // It will hang for reasons unrelated to this.
         if cfg!(test) {
             return None;
         }
-        let narrow = wcs2bytes(cmd);
+        let mut narrow = wcs2bytes(cmd);
+        // Embedded completion assets have canonical ASCII names, unlike the native command
+        // spelling returned by directory enumeration (for example, System32/PING.EXE).
+        // Do not apply this policy to functions, filesystem lookups, or explicit asset APIs.
+        if cfg!(windows) && asset_dir == AssetDir::Completions && !case_sensitive {
+            narrow.make_ascii_lowercase();
+        }
         let cmdstr = std::str::from_utf8(&narrow).ok()?;
         let path = match asset_dir {
             AssetDir::Functions => "functions/".to_owned() + cmdstr + ".fish",
@@ -510,10 +562,10 @@ mod tests {
 
         let paths = &[p1.clone(), p2.clone()];
         let mut autoload = Autoload::new(L!("test_var"));
-        assert!(autoload.resolve_command_impl(L!("file1"), paths).is_none());
+        assert!(autoload.resolve_command_impl(L!("file1"), paths, true).is_none());
         assert!(
             autoload
-                .resolve_command_impl(L!("nothing"), paths)
+                .resolve_command_impl(L!("nothing"), paths, true)
                 .is_none()
         );
         assert!(autoload.get_autoloaded_commands().is_empty());
@@ -524,11 +576,11 @@ mod tests {
 
         assert!(!autoload.autoload_in_progress(L!("file1")));
         assert_matches!(
-            autoload.resolve_command_impl(L!("file1"), paths),
+            autoload.resolve_command_impl(L!("file1"), paths, true),
             AutoloadResult::Path(_)
         );
         assert_matches!(
-            autoload.resolve_command_impl(L!("file1"), paths),
+            autoload.resolve_command_impl(L!("file1"), paths, true),
             AutoloadResult::Pending
         );
         assert!(autoload.autoload_in_progress(L!("file1")));
@@ -538,22 +590,22 @@ mod tests {
         assert_eq!(autoload.get_autoloaded_commands(), vec![L!("file1")]);
 
         assert_matches!(
-            autoload.resolve_command_impl(L!("file1"), paths),
+            autoload.resolve_command_impl(L!("file1"), paths, true),
             AutoloadResult::Loaded
         );
         assert!(
             autoload
-                .resolve_command_impl(L!("nothing"), paths)
+                .resolve_command_impl(L!("nothing"), paths, true)
                 .is_none()
         );
-        assert!(autoload.resolve_command_impl(L!("file2"), paths).is_some());
+        assert!(autoload.resolve_command_impl(L!("file2"), paths, true).is_some());
         assert_matches!(
-            autoload.resolve_command_impl(L!("file2"), paths),
+            autoload.resolve_command_impl(L!("file2"), paths, true),
             AutoloadResult::Pending
         );
         autoload.mark_autoload_finished(L!("file2"));
         assert_matches!(
-            autoload.resolve_command_impl(L!("file2"), paths),
+            autoload.resolve_command_impl(L!("file2"), paths, true),
             AutoloadResult::Loaded
         );
         assert_eq!(
@@ -562,31 +614,31 @@ mod tests {
         );
 
         autoload.clear();
-        assert!(autoload.resolve_command_impl(L!("file1"), paths).is_some());
+        assert!(autoload.resolve_command_impl(L!("file1"), paths, true).is_some());
         autoload.mark_autoload_finished(L!("file1"));
         assert_matches!(
-            autoload.resolve_command_impl(L!("file1"), paths),
+            autoload.resolve_command_impl(L!("file1"), paths, true),
             AutoloadResult::Loaded
         );
         assert!(
             autoload
-                .resolve_command_impl(L!("nothing"), paths)
+                .resolve_command_impl(L!("nothing"), paths, true)
                 .is_none()
         );
-        assert!(autoload.resolve_command_impl(L!("file2"), paths).is_some());
+        assert!(autoload.resolve_command_impl(L!("file2"), paths, true).is_some());
         assert_matches!(
-            autoload.resolve_command_impl(L!("file2"), paths),
+            autoload.resolve_command_impl(L!("file2"), paths, true),
             AutoloadResult::Pending
         );
         autoload.mark_autoload_finished(L!("file2"));
 
         assert_matches!(
-            autoload.resolve_command_impl(L!("file1"), paths),
+            autoload.resolve_command_impl(L!("file1"), paths, true),
             AutoloadResult::Loaded
         );
         touch_file(&sprintf!("%s/file1.fish", p1));
         autoload.invalidate_cache();
-        assert!(autoload.resolve_command_impl(L!("file1"), paths).is_some());
+        assert!(autoload.resolve_command_impl(L!("file1"), paths, true).is_some());
         autoload.mark_autoload_finished(L!("file1"));
     }
 }

@@ -5,7 +5,7 @@ complete -c file -s c -l checking-printout -d 'Print the parsed form of the magi
 complete -c file -s C -l compile -d 'Write an output file containing a pre-parsed version of file'
 complete -c file -s h -l no-dereference -d 'Do not follow symlinks'
 
-if test (uname) = Darwin
+if test (__fish_uname) = Darwin
     complete -c file -s i -d 'Do not classify regular file contents'
     complete -c file -s I -l mime -d 'Output mime type strings instead human readable strings'
 else

@@ -1,5 +1,15 @@
 #completion for arp
-switch (uname -s)
+if __fish_is_windows_command arp; or begin; builtin -q __fish_native_fs; and not command -sq arp; end
+    complete -c arp -s a -s g -d 'Display ARP entries'
+    complete -c arp -s v -d 'Include invalid and loopback entries'
+    complete -c arp -s N -xa '(__fish_print_addresses | string match -r "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\\t.*")' -d 'Select interface by IPv4 address'
+    complete -c arp -s d -x -d 'Delete an ARP entry'
+    complete -c arp -s s -x -d 'Add a static ARP entry'
+    complete -c arp -a '/?' -d 'Show help'
+    return
+end
+
+switch (__fish_uname)
     case Darwin
         complete -c arp -s n -d 'Show network addresses as numbers'
         complete -c arp -s i -x -a "(__fish_print_interfaces)" -d 'Limit scope to interface'

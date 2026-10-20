@@ -25,4 +25,11 @@ complete -f -c pkg-config -l list-all -d 'List all modules found in the pkg-conf
 complete -f -c pkg-config -l print-provides -d 'List all modules the given packages provides'
 complete -f -c pkg-config -l print-requires -d 'List all modules the given packages requires'
 complete -f -c pkg-config -l print-requires-private -d 'List all modules the given packages requires for static linking'
-complete -f -c pkg-config -a '(command pkg-config --list-all | string replace -r " (.*)" "\t\$1")'
+function __fish_pkg_config_packages
+    command -sq pkg-config
+    or return 127
+    command pkg-config --list-all | string replace -r ' (.*)' '\t$1'
+    return $pipestatus[1]
+end
+
+complete -f -c pkg-config -a '(__fish_pkg_config_packages)'

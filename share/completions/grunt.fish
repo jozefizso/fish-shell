@@ -8,7 +8,10 @@
 # https://github.com/gruntjs/grunt/blob/master/LICENSE-MIT
 
 function __grunt_print_tasks
-    grunt --version --verbose 2>/dev/null | awk '/Available tasks: / {$1=$2=""; print $0}' | awk '{$1=$1}1' | string split ' '
+    command -sq grunt
+    or return 127
+    command grunt --version --verbose 2>/dev/null | string replace -rf '^\s*Available tasks:\s*' '' | string match -ra '\S+'
+    return $pipestatus[1]
 end
 
 complete -c grunt -fa '(__grunt_print_tasks)'

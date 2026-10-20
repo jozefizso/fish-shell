@@ -32,6 +32,24 @@ function __fish_complete_man
 
     if test -n "$token"
         # Do the actual search
+        if builtin -q __fish_native_fs
+            set -l query (string escape --style=regex -- $token)
+            # A section-only request intentionally searches every page in that section.
+            test "$token" = .; and set query ''
+            __fish_apropos "^$query" 2>/dev/null | while read -l line
+                set -l fields (string match -rg -- '^(.+) \(([^)]+)\) - (.+)$' $line)
+                set -q fields[3]; or continue
+                string match -qr -- "^$section\$" $fields[2]; or continue
+                printf '%s\t%s: %s\n' $fields[1] $fields[2] $fields[3]
+            end
+            set -l summary_status $pipestatus[1]
+            if not set -ql exclude_fish_commands
+                if __fish_tried_to_embed_manpages; or begin; set -q __fish_man_dir[1]; and test -d "$__fish_man_dir/man1"; end
+                    string join \n -- (__fish_man1_pages)\t'1: fish command'
+                end
+            end
+            return $summary_status
+        end
         __fish_apropos ^$token 2>/dev/null | awk '
                 BEGIN { FS="[\t ]- "; OFS="\t"; }
                 # BSD/Darwin

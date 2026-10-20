@@ -276,6 +276,8 @@ pub fn initialize_native_variables(vars: &crate::env::EnvStack) -> std::io::Resu
         (L!("__fish_sysconf_dir"), Some(paths.sysconf)),
         (L!("__fish_data_dir"), paths.data),
         (L!("__fish_bin_dir"), paths.bin),
+        (L!("__fish_man_dir"), paths.man),
+        (L!("__fish_help_dir"), paths.doc),
     ] {
         let path =
             path.ok_or_else(|| std::io::Error::other("native install directory unavailable"))?;

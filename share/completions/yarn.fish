@@ -49,16 +49,7 @@ complete -f -c yarn -n __fish_use_subcommand -a remove -d 'Remove packages'
 complete -f -c yarn -n __fish_use_subcommand -a run -d 'Run a defined package script'
 
 function __fish_yarn_run
-    if test -e package.json; and set -l python (__fish_anypython)
-        # Warning: That weird indentation is necessary, because python.
-        $python -S -c 'import json, sys; data = json.load(sys.stdin);
-for k,v in data["scripts"].items(): print(k + "\t" + v[:18])' <package.json 2>/dev/null
-    else if test -e package.json; and type -q jq
-        jq -r '.scripts | to_entries | map("\(.key)\t\(.value | tostring | .[0:20])") | .[]' package.json
-    else if type -q jq
-        # Yarn is quite slow and still requires `jq` because the normal format is unusable.
-        command yarn run --json 2>/dev/null | jq -r '.data.hints? | to_entries | map("\(.key)\t\(.value | tostring |.[0:20])") | .[]'
-    end
+    __npm_package_scripts
 end
 
 # Scripts can be used like normal subcommands, or with `yarn run SCRIPT`.

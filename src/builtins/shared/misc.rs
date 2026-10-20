@@ -140,8 +140,18 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
     },
     #[cfg(windows)]
     BuiltinData {
+        name: L!("__fish_native_adapter"),
+        func: native_adapter::native_adapter,
+    },
+    #[cfg(windows)]
+    BuiltinData {
         name: L!("__fish_native_fs"),
         func: native_fs::native_fs,
+    },
+    #[cfg(windows)]
+    BuiltinData {
+        name: L!("__fish_native_services"),
+        func: native_services::native_services,
     },
     BuiltinData {
         name: L!("abbr"),
@@ -371,7 +381,6 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
         name: L!("type"),
         func: r#type::r#type,
     },
-    #[cfg(unix)]
     BuiltinData {
         name: L!("ulimit"),
         func: ulimit::ulimit,
@@ -389,7 +398,7 @@ const BUILTIN_DATAS: &[BuiltinData] = &[
 /// Names reserved by fish which must never fall through to native executable lookup.
 #[cfg(windows)]
 pub fn builtin_is_unsupported(name: &wstr) -> bool {
-    [L!("bg"), L!("exec"), L!("fg"), L!("ulimit")].contains(&name)
+    [L!("bg"), L!("exec"), L!("fg")].contains(&name)
 }
 assert_sorted_by_name!(BUILTIN_DATAS);
 
@@ -620,10 +629,16 @@ pub fn builtin_print_help(
     streams: &mut IoStreams,
     cmd: &wstr,
 ) -> BuiltinResult {
-    err_fmt!("help tooling is unsupported on native Windows")
-        .cmd(cmd)
-        .finish(streams);
-    Err(STATUS_INVALID_ARGS)
+    match crate::print_help::help_text(&cmd.to_string()) {
+        Ok(text) => {
+            streams.out.append(&WString::from_str(&text));
+            Ok(SUCCESS)
+        }
+        Err(error) => {
+            streams.err.appendln(&WString::from_str(&format!("{cmd}: {error}")));
+            Err(STATUS_CMD_ERROR)
+        }
+    }
 }
 
 /// Perform error reporting for encounter with unknown option.

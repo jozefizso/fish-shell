@@ -7,10 +7,10 @@ function __fish_evince_complete_file_url
         set comp (commandline -ct)
     end
 
-    set -l prefix (echo $comp|cut -c 1-7)
+    set -l prefix (string sub -l 7 -- "$comp")
 
-    if test file:// = $prefix
-        set -l stripped (echo $comp|cut -c 8-)
+    if test file:// = "$prefix"
+        set -l stripped (string sub -s 8 -- "$comp")
         printf "%s\n" file://(complete -C"echo $stripped")
     else
         echo file://

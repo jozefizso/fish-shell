@@ -160,21 +160,16 @@ pub(super) fn exercise(f: &Fixture) {
         failed(result, false);
     }
     launched(f, "set -gx PATH .", "cwd-only", &cwd_only);
-    for extension in ["cmd", "bat", "ps1"] {
+    // N8 replaces the old blanket provider rejection with actual deliberate dispatch.
+    for extension in ["cmd", "bat", "ps1", "fish"] {
         let path = first.join(format!("provider.{extension}"));
-        let body = if extension == "ps1" {
-            format!(
-                "[IO.File]::WriteAllText('{}','forbidden')",
-                marker.display()
-            )
+        let body = if matches!(extension, "cmd" | "bat") {
+            "@exit /b 37\r\n"
         } else {
-            format!("@echo forbidden>\"{}\"\r\n", marker.display())
+            "exit 37\n"
         };
         fs::write(&path, body).unwrap();
-        failed(
-            f.eval(&format!("{} marker {}", qpath(&path), qpath(&marker))),
-            true,
-        );
+        exact(f.eval(&qpath(&path)), 37, b"", b"");
         assert!(!marker.exists());
     }
     let com = executable(f, &first, "provider.com");
@@ -183,10 +178,10 @@ pub(super) fn exercise(f: &Fixture) {
     failed(result, true);
     assert!(!marker.exists());
     let supported = executable(f, &second, "provider.exe");
-    lookup(f, &setup, "provider", &supported);
+    lookup(f, &format!("{setup}; set -gx PATHEXT '.exe'"), "provider", &supported);
     assert!(
         !marker.exists(),
-        "disabled earlier providers hid/ran before native exe"
+        "explicit PATHEXT policy must not execute an earlier script provider"
     );
     fs::create_dir(first.join("directory.exe")).unwrap();
     let regular = executable(f, &second, "directory.exe");

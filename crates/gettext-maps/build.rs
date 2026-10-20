@@ -36,17 +36,17 @@ fn embed_localizations(cache_dir: &Path) {
 
     match Command::new("msgfmt").arg("-h").output() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            rsconf::warn!(
-                "Could not find msgfmt required to build message catalogs. \
-                 Localization will not work. \
-                 If you install gettext now, you need to trigger a rebuild to include localization support. \
-                 For example by running `touch localization/po` followed by the build command."
+            panic!(
+                "localize-messages requires msgfmt to build the actual gettext catalogs. \
+                 Install gettext, or explicitly select the English-only profile with \
+                 --no-default-features (and enable embed-manpages separately if wanted)."
             );
         }
         Err(e) => {
             panic!("Error when trying to run `msgfmt -h`: {e:?}");
         }
         Ok(output) => {
+            assert!(output.status.success(), "msgfmt -h failed: {}", String::from_utf8_lossy(&output.stderr));
             let has_check_format =
                 String::from_utf8_lossy(&output.stdout).contains("--check-format");
             for dir_entry_result in fish_build_helper::po_dir().read_dir().unwrap() {
@@ -70,7 +70,7 @@ fn embed_localizations(cache_dir: &Path) {
                 writeln!(
                     &mut localization_map_file,
                     "include!(\"{}\");",
-                    cached_map_path.display()
+                    cached_map_path.to_str().unwrap().escape_default()
                 )
                 .unwrap();
                 // Map from the language identifier to the map containing the localizations for this
@@ -101,13 +101,14 @@ fn embed_localizations(cache_dir: &Path) {
                     } else {
                         tmp_mo_file = Some(cache_dir.join("messages.mo"));
                     }
-                    cmd.arg(format!(
-                        "--output-file={}",
-                        tmp_mo_file
-                            .as_ref()
-                            .map_or("-", |path| path.to_str().unwrap())
-                    ))
-                    .arg(&po_file_path)
+                    cmd.arg(if has_check_format {
+                        "--output-file=-"
+                    } else {
+                        "--output-file=messages.mo"
+                    })
+                    .arg("-")
+                    .stdin(File::open(&po_file_path).unwrap())
+                    .current_dir(cache_dir)
                     .output()
                     .unwrap()
                 };
@@ -121,6 +122,7 @@ fn embed_localizations(cache_dir: &Path) {
 
                 // Extract map from MO data.
                 let language_localizations = parse_mo_file(&mo_data).unwrap();
+                assert!(!language_localizations.is_empty(), "msgfmt produced an empty catalog for {language}");
 
                 // This file will contain the localization map for the current language.
                 let mut cached_map_file = File::create(&cached_map_path).unwrap();

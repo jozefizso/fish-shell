@@ -1,6 +1,6 @@
 complete -c dmesg -f -d 'Display system message buffer'
 
-switch (uname -s)
+switch (__fish_uname)
     #
     # Solaris
     #

@@ -57,8 +57,13 @@ pub mod localization;
 #[cfg(windows)]
 pub mod native_accounting;
 #[cfg(windows)]
-pub mod native_fd_bridge;
+pub mod native_adapters;
 #[cfg(windows)]
+pub mod native_limits;
+#[cfg(windows)]
+pub mod native_services;
+#[cfg(windows)]
+pub mod native_fd_bridge;
 pub(crate) mod native_text;
 #[cfg(unix)]
 pub mod nix;
@@ -76,7 +81,6 @@ pub mod parser_keywords;
 pub mod path;
 pub mod portable_atomic;
 pub mod prelude;
-#[cfg(unix)]
 pub mod print_help;
 pub mod proc;
 pub mod re;

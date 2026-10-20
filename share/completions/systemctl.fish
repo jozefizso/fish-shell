@@ -1,4 +1,7 @@
-set -l systemd_version (systemctl --version | string match "systemd*" | string replace -r "\D*(\d+)\D.*"  '$1')
+set -l systemd_version
+if command -sq systemctl
+    set systemd_version (command systemctl --version | string match -rg '^systemd (\d+)')
+end
 set -l commands list-units list-sockets start stop reload restart try-restart reload-or-restart reload-or-try-restart \
     isolate kill is-active is-failed status show get-cgroup-attr set-cgroup-attr unset-cgroup-attr set-cgroup help \
     reset-failed list-unit-files enable disable is-enabled reenable preset mask unmask link list-jobs cancel \
@@ -6,16 +9,16 @@ set -l commands list-units list-sockets start stop reload restart try-restart re
     default rescue emergency halt poweroff reboot kexec exit suspend suspend-then-hibernate hibernate hybrid-sleep switch-root \
     list-timers set-property import-environment get-default list-automounts is-system-running try-reload-or-restart freeze \
     thaw mount-image bind clean set-default cat list-machines preset-all add-wants add-requires edit
-if test $systemd_version -gt 243 2>/dev/null
+if set -q systemd_version[1]; and test $systemd_version -gt 243
     set commands $commands log-level log-target service-watchdogs
 end
-if test $systemd_version -gt 246 2>/dev/null
+if set -q systemd_version[1]; and test $systemd_version -gt 246
     set commands $commands service-log-level service-log-target
 end
-if test $systemd_version -gt 253 2>/dev/null
+if set -q systemd_version[1]; and test $systemd_version -gt 253
     set commands $commands list-paths soft-reboot whoami
 end
-if test $systemd_version -gt 255 2>/dev/null
+if set -q systemd_version[1]; and test $systemd_version -gt 255
     set commands $commands sleep
 end
 
@@ -24,9 +27,9 @@ set -l types services sockets mounts service_paths targets automounts timers
 function __fish_systemd_properties
     # We need to call the main systemd binary (the thing that is run as PID1).
     # Unfortunately, it's usually not in $PATH.
-    if test -f /usr/lib/systemd/systemd
+    if test -x /usr/lib/systemd/systemd
         /usr/lib/systemd/systemd --dump-configuration-items | string replace -rf '(.+)=(.+)$' '$1\t$2'
-    else if test -f /lib/systemd/systemd # Debian has not merged /lib and /usr/lib
+    else if test -x /lib/systemd/systemd # Debian has not merged /lib and /usr/lib
         /lib/systemd/systemd --dump-configuration-items | string replace -rf '(.+)=(.+)$' '$1\t$2'
     end
 end
@@ -85,8 +88,8 @@ complete -f -c systemctl -n "not __fish_seen_subcommand_from $commands" -a whoam
 complete -c systemctl -a '(__fish_systemctl)' -f
 
 # These "--x=help" outputs always have lines like "Available unit types:". We use the fact that they end in a ":" to filter them out.
-complete -f -c systemctl -s t -l type -d 'List of unit types' -xa '(systemctl --type=help --no-legend --no-pager | string match -v "*:")'
-complete -f -c systemctl -l state -d 'List of unit states' -xa '(systemctl --state=help --no-legend --no-pager | string match -v "*:")'
+complete -f -c systemctl -s t -l type -d 'List of unit types' -xa '(command -sq systemctl; and command systemctl --type=help --no-legend --no-pager | string match -v "*:")'
+complete -f -c systemctl -l state -d 'List of unit states' -xa '(command -sq systemctl; and command systemctl --state=help --no-legend --no-pager | string match -v "*:")'
 complete -f -c systemctl -s p -l property -a '(__fish_systemd_properties)'
 complete -f -c systemctl -s a -l all -d 'Show all units or properties'
 complete -f -c systemctl -s r -l recursive -d 'Show also units of local containers'
@@ -118,7 +121,7 @@ complete -f -r -c systemctl -s n -l lines -d 'Number of journal lines to show' -
 complete -f -c systemctl -s o -l output -d 'Control journal formatting' -xa 'short short-monotonic verbose export json json-pretty json-sse cat'
 complete -f -c systemctl -l plain -d 'list-dependencies flat, not as tree'
 complete -f -c systemctl -s H -l host -d 'Execute the operation on a remote host' -a "(__fish_print_hostnames)"
-complete -x -c systemctl -s M -l machine -d 'Execute operation on a VM or container' -a "(__fish_systemd_machines)"
+complete -x -c systemctl -s M -l machine -d 'Execute operation on a VM or container' -a "(command -sq machinectl; and __fish_systemd_machines)"
 complete -f -c systemctl -s h -l help -d 'Print a short help and exit'
 complete -f -c systemctl -l version -d 'Print a short version and exit'
 complete -f -c systemctl -l no-pager -d 'Do not pipe output into a pager'
@@ -127,7 +130,7 @@ complete -f -c systemctl -l now -n "__fish_seen_subcommand_from enable" -d "Also
 complete -f -c systemctl -l now -n "__fish_seen_subcommand_from disable mask" -d "Also stop unit"
 
 # New options since systemd 242
-if test $systemd_version -ge 242 2>/dev/null
-    complete -x -c systemctl -l boot-loader-entry -n "__fish_seen_subcommand_from halt poweroff reboot" -d "Boot into a specific boot loader entry on next boot" -a "(systemctl --boot-loader-entry=help --no-legend --no-pager 2>/dev/null)"
+if set -q systemd_version[1]; and test $systemd_version -ge 242
+    complete -x -c systemctl -l boot-loader-entry -n "__fish_seen_subcommand_from halt poweroff reboot" -d "Boot into a specific boot loader entry on next boot" -a "(command -sq systemctl; and command systemctl --boot-loader-entry=help --no-legend --no-pager 2>/dev/null)"
     complete -x -c systemctl -l boot-loader-menu -n "__fish_seen_subcommand_from halt poweroff reboot" -d "Boot into boot loader menu on next boot"
 end

@@ -1,4 +1,5 @@
 function __fish_detect_screen_socket_dir -d "Detect which folder screen uses"
+    command -sq screen; or return 127
     set -l screen_bin screen
     if not set -q __fish_screen_socket_dir
         set -g __fish_screen_socket_dir ($screen_bin -ls __fish_i_don_t_think_this_will_be_matched | string match -r "(?<=No Sockets found in ).*(?=\.)")
@@ -6,7 +7,10 @@ function __fish_detect_screen_socket_dir -d "Detect which folder screen uses"
 end
 
 function __fish_complete_screen_general_list_mac -d "Get the socket list on mac"
-    pushd $__fish_screen_socket_dir >/dev/null
+    command -sq screen; or return 127
+    command -sq ls; and command -sq stat; or return 127
+    test -d "$__fish_screen_socket_dir"; or return
+    pushd $__fish_screen_socket_dir >/dev/null; or return
     set -l sockets (ls)
     if test (count $sockets) -ne 0
         switch $argv
@@ -20,12 +24,13 @@ function __fish_complete_screen_general_list_mac -d "Get the socket list on mac"
 end
 
 function __fish_complete_screen_general_list -d "Get the socket list"
+    command -sq screen; or return 127
     set -l escaped (string escape --style=regex $argv)
     screen -list | string match -r '^\t.*\('$escaped'\)\s*$' | string replace -r '\t(.*)\s+(\(.*\))?\s*\((.*)\)' '$1\t$3'
 end
 
 function __fish_complete_screen_detached -d "Print a list of detached screen sessions"
-    switch (uname)
+    switch (__fish_uname)
         case Darwin
             __fish_complete_screen_general_list_mac Detached
         case '*'
@@ -34,7 +39,7 @@ function __fish_complete_screen_detached -d "Print a list of detached screen ses
 end
 
 function __fish_complete_screen_attached -d "Print a list of attached screen sessions"
-    switch (uname)
+    switch (__fish_uname)
         case Darwin
             __fish_complete_screen_general_list_mac Attached
         case '*'
@@ -47,7 +52,9 @@ function __fish_complete_screen -d "Print a list of running screen sessions"
 end
 
 # detect socket directory for mac users
-__fish_detect_screen_socket_dir
+if test (__fish_uname) = Darwin
+    __fish_detect_screen_socket_dir
+end
 
 complete -c screen -s a -d 'Include all capabilitys'
 complete -c screen -s A -d 'Adapt window size'

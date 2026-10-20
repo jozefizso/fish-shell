@@ -106,9 +106,11 @@ function __fish_complete_ssh -d "common completions for ssh commands" --argument
 end
 
 function __fish_ssh_ciphers -d "List of possible SSH cipher algorithms"
-    ssh -Q cipher
+    command ssh -Q cipher | string replace -r '\r$' ''
+    return $pipestatus[1]
 end
 
 function __fish_ssh_macs -d "List of possible SSH MAC algorithms"
-    ssh -Q mac
+    command ssh -Q mac | string replace -r '\r$' ''
+    return $pipestatus[1]
 end

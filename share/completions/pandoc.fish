@@ -2,9 +2,14 @@
 # Copyright (c) 2018 David Sanson
 # Licensed under the GNU General Public License version 2
 
-set -l informats (pandoc --list-input-formats)
-set -l outformats (pandoc --list-output-formats)
-set -l highlight_styles (pandoc --list-highlight-styles)
+set -l informats
+set -l outformats
+set -l highlight_styles
+if command -sq pandoc
+    set informats (command pandoc --list-input-formats)
+    set outformats (command pandoc --list-output-formats)
+    set highlight_styles (command pandoc --list-highlight-styles)
+end
 set -l datadir $HOME/.pandoc
 
 # Only suggest installed engines
@@ -90,9 +95,9 @@ complete -c pandoc -r -f -l bibliography -k -a "(__fish_complete_suffix 'bib' 'b
 complete -c pandoc -r -f -l lua-filter -k -a "(__fish_complete_suffix 'lua')"
 
 # options that take files in DATADIR
-complete -c pandoc -r -s F -l filter -a "(find $datadir/filters -type f 2>/dev/null | string replace -- '$datadir/filters/' '')"
-complete -c pandoc -r -l template -a "(find $datadir/templates -type f 2>/dev/null | string replace -- '$datadir/templates/' '')"
-complete -c pandoc -r -f -l lua-filter -a "(find $datadir -type f 2>/dev/null | string match -r '.lua\$' | string replace -- '$datadir/' '')"
+complete -c pandoc -r -s F -l filter -a "(path filter -f -- $datadir/filters/** | string replace -- '$datadir/filters/' '')"
+complete -c pandoc -r -l template -a "(path filter -f -- $datadir/templates/** | string replace -- '$datadir/templates/' '')"
+complete -c pandoc -r -f -l lua-filter -a "(path filter -f -- $datadir/** | string match -r '.lua\$' | string replace -- '$datadir/' '')"
 
 # options that require arguments which cannot be autocompleted
 complete -c pandoc -x -l indented-code-classes

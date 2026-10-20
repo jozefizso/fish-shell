@@ -3,22 +3,29 @@ use std::path::Path;
 use fish_build_helper::{as_os_strs, fish_doc_dir};
 
 fn main() {
-    let sec1_dir = fish_doc_dir().join("man").join("man1");
-    // Running `cargo clippy` on a clean build directory panics, because when rust-embed
-    // tries to embed a directory which does not exist it will panic.
-    _ = std::fs::create_dir_all(&sec1_dir);
+    let doc_dir = fish_doc_dir();
+    let sec1_dir = doc_dir.join("man").join("man1");
+    let help_dir = doc_dir.join("help");
+    std::fs::create_dir_all(&sec1_dir).unwrap();
+    std::fs::create_dir_all(&help_dir).unwrap();
     if !cfg!(clippy) {
-        build_man(&sec1_dir);
+        build_docs(&sec1_dir, "man");
+        build_docs(&help_dir, "text");
+        for command in ["fish", "fish_indent", "fish_key_reader"] {
+            let path = help_dir.join("cmds").join(format!("{command}.txt"));
+            assert!(std::fs::metadata(&path).is_ok_and(|m| m.len() > 0),
+                "Sphinx did not generate required help: {}", path.display());
+        }
     }
 }
 
-fn build_man(sec1_dir: &Path) {
+fn build_docs(output_dir: &Path, builder: &str) {
     use fish_build_helper::{env_var, workspace_root};
     use std::process::{Command, Stdio};
 
     let workspace_root = workspace_root();
     let doc_src_dir = workspace_root.join("doc_src");
-    let doctrees_dir = fish_doc_dir().join(".doctrees-man");
+    let doctrees_dir = fish_doc_dir().join(format!(".doctrees-{builder}"));
 
     fish_build_helper::rebuild_if_paths_changed([
         &workspace_root.join("CHANGELOG.rst"),
@@ -31,7 +38,7 @@ fn build_man(sec1_dir: &Path) {
         "auto",
         "-q",
         "-b",
-        "man",
+        builder,
         "-c",
         &doc_src_dir,
         // doctree path - put this *above* the man1 dir to exclude it.
@@ -39,20 +46,18 @@ fn build_man(sec1_dir: &Path) {
         "-d",
         &doctrees_dir,
         &doc_src_dir,
-        &sec1_dir,
+        &output_dir,
     ];
 
     rsconf::rebuild_if_env_changed("FISH_BUILD_DOCS");
-    if env_var("FISH_BUILD_DOCS") == Some("0".to_owned()) {
-        rsconf::warn!("Skipping man pages because $FISH_BUILD_DOCS is set to 0");
-        return;
-    }
+    assert_ne!(
+        env_var("FISH_BUILD_DOCS"), Some("0".to_owned()),
+        "embed-manpages requests generated help; FISH_BUILD_DOCS=0 would silently disable it. \
+         Select --no-default-features for the supported minimal profile."
+    );
 
-    // We run sphinx to build the man pages.
-    // Every error here is fatal so cargo doesn't cache the result
-    // - if we skipped the docs with sphinx not installed, installing it would not then build the docs.
-    // That means you need to explicitly set $FISH_BUILD_DOCS=0 (`FISH_BUILD_DOCS=0 cargo install --path .`),
-    // which is unfortunate - but the docs are pretty important because they're also used for --help.
+    // Requested embedded documentation is a real build input. Never cache a
+    // successful feature-enabled build with missing or empty help data.
     let sphinx_build = match Command::new(option_env!("FISH_SPHINX").unwrap_or("sphinx-build"))
         .args(args)
         .stdout(Stdio::piped())
@@ -60,18 +65,10 @@ fn build_man(sec1_dir: &Path) {
         .spawn()
     {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            assert_ne!(
-                env_var("FISH_BUILD_DOCS"),
-                Some("1".to_owned()),
-                "Could not find sphinx-build required to build man pages.\n\
-                 Install Sphinx or disable building the docs by setting $FISH_BUILD_DOCS=0."
+            panic!(
+                "embed-manpages requires sphinx-build to generate packaged help. \
+                 Install Sphinx or explicitly select --no-default-features."
             );
-            rsconf::warn!(
-                "Could not find sphinx-build required to build man pages. \
-                 If you install Sphinx now, you need to trigger a rebuild to include man pages. \
-                 For example by running `touch doc_src` followed by the build command."
-            );
-            return;
         }
         Err(e) => {
             // Another error - permissions wrong etc

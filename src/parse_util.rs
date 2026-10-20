@@ -1331,9 +1331,24 @@ pub fn detect_errors_in_argument(
 
     // Check if a subtoken contains errors. Returns true if there is an error, and appends to out_errors if provided.
     let check_subtoken =
-        |begin: usize, end: usize, out_errors: &mut Option<&mut ParseErrorList>| -> bool {
+        |begin: usize,
+         end: usize,
+         initially_quoted: bool,
+         out_errors: &mut Option<&mut ParseErrorList>|
+         -> bool {
+            // A quoted command substitution temporarily closes its surrounding double
+            // quotes. Resume that context when checking the following literal segment.
+            let mut quoted_subtoken = WString::new();
+            let subtoken = if initially_quoted {
+                quoted_subtoken.reserve(end - begin + 1);
+                quoted_subtoken.push('"');
+                quoted_subtoken.push_utfstr(&arg_src[begin..end]);
+                &quoted_subtoken[..]
+            } else {
+                &arg_src[begin..end]
+            };
             let Some(unesc) = unescape_string(
-                &arg_src[begin..end],
+                subtoken,
                 UnescapeStringStyle::Script(UnescapeFlags {
                     special: true,
                     ..Default::default()
@@ -1369,7 +1384,8 @@ pub fn detect_errors_in_argument(
 
             let mut errored = false;
             // Check for invalid variable expansions.
-            let unesc = unesc.as_char_slice();
+            // Ignore the separator emitted for our synthetic opening quote.
+            let unesc = &unesc.as_char_slice()[usize::from(initially_quoted)..];
             for (idx, c) in unesc.iter().enumerate() {
                 if ![VARIABLE_EXPAND, VARIABLE_EXPAND_SINGLE].contains(c) {
                     continue;
@@ -1387,7 +1403,12 @@ pub fn detect_errors_in_argument(
                         {
                             first_dollar -= 1;
                         }
-                        expand_variable_error(unesc.into(), source_start, first_dollar, out_errors);
+                        expand_variable_error(
+                            unesc.into(),
+                            source_start + begin,
+                            first_dollar,
+                            out_errors,
+                        );
                     }
                 }
             }
@@ -1400,6 +1421,7 @@ pub fn detect_errors_in_argument(
 
     let mut do_loop = true;
     let mut is_quoted = false;
+    let mut checked_is_quoted = false;
     while do_loop {
         let mut has_dollar = false;
         match locate_cmdsubst_range(
@@ -1421,6 +1443,7 @@ pub fn detect_errors_in_argument(
                 issue.error |= check_subtoken(
                     checked,
                     cmdsub.opening_paren_offset() - if has_dollar { 1 } else { 0 },
+                    checked_is_quoted,
                     out_errors,
                 );
                 let mut subst_errors = ParseErrorList::new();
@@ -1443,11 +1466,12 @@ pub fn detect_errors_in_argument(
                 }
 
                 checked = cmdsub.end();
+                checked_is_quoted = is_quoted;
             }
         }
     }
 
-    issue.error |= check_subtoken(checked, arg_src.len(), out_errors);
+    issue.error |= check_subtoken(checked, arg_src.len(), checked_is_quoted, out_errors);
     if issue.error || issue.incomplete {
         Err(issue)
     } else {
@@ -1996,6 +2020,44 @@ mod tests {
             "echo 1 && echo 2 & && echo 3",
             BOOL_AFTER_BACKGROUND_ERROR_MSG
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_quoted_cmdsubst_argument_errors() {
+        #[cfg(unix)]
+        test_init();
+        for source in [
+            L!(r#"echo "^$(string escape --style=regex -- "$doc_path")"'/(.+)/index\.html$'"#),
+            L!(r#"echo "$(echo one)$(echo two)"'$'"#),
+            L!(r#"echo "$(echo '"$"')"'$'"#),
+            L!(r#"echo "$(echo one)"'$'"$(echo two)"'$'"#),
+            L!(r#"echo "$(echo one)\$$(echo two)""#),
+            L!(r#"echo $(echo one)'$?'"#),
+            L!(r#"command "$(status fish-path)" -N -c true"#),
+            L!(r#""$(printf '%s' printf)" '%s\n' '雪 🐟'"#),
+        ] {
+            let mut errors = vec![];
+            assert!(
+                detect_parse_errors(source, Some(&mut errors), false).is_ok(),
+                "valid quoted substitution rejected: {source}: {errors:?}"
+            );
+            assert!(errors.is_empty(), "{source}: {errors:?}");
+        }
+        for source in [
+            L!(r#"echo "$(echo one)$""#),
+            L!(r#"echo "$(echo one)"$"#),
+            L!(r#"echo "$(echo one)"'$'"$(echo two)$?""#),
+            L!(r#"echo "$(echo $?)"'$'"#),
+            L!(r#"echo "$(echo one)"'$'"$(echo two)$""#),
+        ] {
+            let mut errors = vec![];
+            assert!(
+                detect_parse_errors(source, Some(&mut errors), false).is_err(),
+                "invalid variable expansion accepted: {source}"
+            );
+            assert!(!errors.is_empty(), "{source}");
+        }
     }
 
     #[test]

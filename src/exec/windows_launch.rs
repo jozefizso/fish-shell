@@ -8,6 +8,8 @@ use crate::io::IoChain;
 use crate::native_accounting::{self, TrackedJob};
 use crate::native_fd_bridge::{self, BridgeHandle, PRIVATE_FD_ENV};
 use crate::threads::{NativeCancellation, NativeRuntime, NativeWaitRegistration};
+use crate::native_limits::NativeLimits;
+use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString, c_void};
@@ -34,6 +36,10 @@ const EXTENDED_STARTUPINFO_PRESENT: u32 = 0x0008_0000;
 const DUPLICATE_SAME_ACCESS: u32 = 2;
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0002;
 const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+const JOB_OBJECT_LIMIT_PROCESS_TIME: u32 = 0x0000_0002;
+const JOB_OBJECT_LIMIT_ACTIVE_PROCESS: u32 = 0x0000_0008;
+const JOB_OBJECT_LIMIT_PROCESS_MEMORY: u32 = 0x0000_0100;
+const JOB_OBJECT_LIMIT_JOB_MEMORY: u32 = 0x0000_0200;
 const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: i32 = 1;
 const JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION: i32 = 7;
 const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: i32 = 9;
@@ -174,12 +180,6 @@ unsafe extern "system" {
     fn TerminateProcess(process: RawHandle, status: u32) -> i32;
     fn GetExitCodeProcess(process: RawHandle, status: *mut u32) -> i32;
     fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
-    fn WaitForMultipleObjects(
-        count: u32,
-        handles: *const RawHandle,
-        wait_all: i32,
-        milliseconds: u32,
-    ) -> u32;
     fn CreateJobObjectW(security: *const c_void, name: *const u16) -> RawHandle;
     fn SetInformationJobObject(job: RawHandle, class: i32, data: *const c_void, size: u32) -> i32;
     fn QueryInformationJobObject(
@@ -302,6 +302,14 @@ fn native_path(path: &Path) -> io::Result<Vec<u16>> {
     // cwd or per-drive state to resolve a relative executable/cwd.
     let text = crate::path::native_path_text(path)?;
     let absolute = crate::path::native_absolute_path(&text)?;
+    // Many native toolchains interpret the extended namespace as a UNC share.
+    // Prefer an ordinary spelling only after strict validation and identity proof.
+    // Extended-only names retain their original native capability, not an alias.
+    let absolute = match crate::path::native_tool_path(&absolute) {
+        Ok(ordinary) => ordinary,
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => absolute,
+        Err(error) => return Err(error),
+    };
     wide(absolute.as_os_str())
 }
 
@@ -311,8 +319,9 @@ fn command_line(argv: &[OsString]) -> io::Result<Vec<u16>> {
     };
     let mut line = Vec::new();
     line.push(34);
-    // The CRT parses argv[0] separately: backslashes are literal and a quote
-    // cannot be represented in that field. Do not silently corrupt such argv[0].
+    // Keep argv[0] quoted even without separators. The CRT parses it separately:
+    // backslashes are literal and a quote cannot be represented in that field.
+    // Do not silently corrupt such argv[0].
     for unit in first.encode_wide() {
         if unit == 0 || unit == 34 {
             return Err(invalid("NUL or quote in native argv[0]"));
@@ -321,7 +330,22 @@ fn command_line(argv: &[OsString]) -> io::Result<Vec<u16>> {
     }
     line.push(34);
     for argument in &argv[1..] {
-        line.extend_from_slice(&[32, 34]);
+        // Only space and tab separate CRT arguments. Native metacharacters are
+        // ordinary data, not cmd operators; unnecessary quotes can also change
+        // how legacy native tools such as attrib interpret their switches.
+        let quoted = argument.is_empty()
+            || argument.as_encoded_bytes().iter().any(|byte| matches!(byte, b' ' | b'\t' | b'"'));
+        line.push(32);
+        if !quoted {
+            for unit in argument.encode_wide() {
+                if unit == 0 {
+                    return Err(invalid("NUL in native process argument"));
+                }
+                line.push(unit);
+            }
+            continue;
+        }
+        line.push(34);
         let mut slashes = 0;
         for unit in argument.encode_wide() {
             if unit == 0 {
@@ -492,6 +516,17 @@ pub fn initialize_native_image_identity() -> io::Result<()> {
     native_image_identity().map(|_| ())
 }
 
+/// The startup-pinned image, not a fresh PATH lookup or a replaceable current_exe spelling.
+pub fn native_loaded_fish_path() -> io::Result<std::path::PathBuf> {
+    crate::path::native_absolute_path(&crate::wutil::native_final_path(
+        &native_image_identity()?._image.file,
+    )?)
+}
+
+pub(crate) fn is_current_native_image(file: &File) -> io::Result<bool> {
+    Ok(crate::wutil::native_identity_for_file(file)? == native_image_identity()?.identity)
+}
+
 struct ChildIo {
     // These duplicates are inheritable only within this local launch scope. The
     // explicit allowlist prevents simultaneous launches inheriting one another.
@@ -649,6 +684,7 @@ pub struct NativeChild {
     registration: Mutex<Option<NativeWaitRegistration>>,
     exit_status: OnceLock<u32>,
     control: Mutex<NativeControlState>,
+    provider_files: Option<Mutex<Vec<File>>>,
 }
 
 impl NativeChild {
@@ -670,6 +706,11 @@ impl NativeChild {
         }
         // This is reached only after the process handle signals: 259 is a real
         // exit DWORD here, not STILL_ACTIVE and not a reason to look up a PID.
+        // Retained process/status capabilities may outlive the job; they must not keep a
+        // completed script locked against edits until an unrelated wait-cache eviction.
+        if let Some(files) = &self.provider_files {
+            files.lock().unwrap_or_else(|poison| poison.into_inner()).clear();
+        }
         let _ = self.exit_status.set(status);
         Ok(status)
     }
@@ -749,9 +790,9 @@ impl NativeChild {
                 self.process.as_raw_handle(),
                 cancellation.handle().as_raw_handle(),
             ];
-            unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) }
+            crate::console_windows::wait_for_evaluator_handles(&handles, INFINITE)?
         } else {
-            unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) }
+            crate::console_windows::wait_for_evaluator_handles(&[self.process.as_raw_handle()], INFINITE)?
         };
         if result == WAIT_OBJECT_0 {
             self.completed_status()
@@ -787,6 +828,7 @@ struct PendingChild {
     process: Option<Arc<OwnedHandle>>,
     thread: Option<OwnedHandle>,
     registration: Option<NativeWaitRegistration>,
+    provider_files: Vec<File>,
 }
 
 impl PendingChild {
@@ -800,6 +842,8 @@ impl PendingChild {
             registration: Mutex::new(self.registration.take()),
             exit_status: OnceLock::new(),
             control: Mutex::new(NativeControlState::default()),
+            provider_files: (!self.provider_files.is_empty())
+                .then(|| Mutex::new(mem::take(&mut self.provider_files))),
         })
     }
 }
@@ -848,6 +892,7 @@ pub struct NativeLaunchPlan {
     cwd: Vec<u16>,
     command_line: Vec<u16>,
     environment: Vec<u16>,
+    provider_files: Vec<File>,
 }
 
 /// A rollback boundary for one native pipeline/evaluation launch group.
@@ -864,6 +909,9 @@ pub struct NativeLaunchGroup {
     finished: bool,
     terminated: bool,
     accepted: bool,
+    substitution_leases: Vec<Arc<crate::native_adapters::SubstitutionLease>>,
+    substitution_registrations: Vec<usize>,
+    preparation_started: Cell<bool>,
 }
 
 impl NativeLaunchGroup {
@@ -907,7 +955,49 @@ impl NativeLaunchGroup {
             finished: false,
             terminated: false,
             accepted: false,
+            preparation_started: Cell::new(false),
+            substitution_leases: Vec::new(),
+            substitution_registrations: Vec::new(),
         })
+    }
+
+    /// Attach command-substitution resources before preparing this caller's
+    /// native stages. Acknowledgement is installed while the first root is
+    /// suspended, before any consumer can run or the parent can release it.
+    pub(crate) fn attach_substitutions(&mut self, caller: crate::proc::InternalJobId) {
+        self.substitution_leases = crate::native_adapters::leases_for_caller(caller);
+    }
+
+    pub(crate) fn attach_substitution_inputs(&mut self, argv: &[OsString], environment: &[(OsString, OsString)]) {
+        for lease in crate::native_adapters::leases_for_launch(argv, environment) {
+            if !self.substitution_leases.iter().any(|owned| Arc::ptr_eq(owned, &lease)) {
+                self.substitution_leases.push(lease);
+            }
+        }
+    }
+
+    pub(crate) fn attach_substitution_io(&mut self, io_chain: &IoChain, cwd: &Path) -> io::Result<()> {
+        for lease in crate::native_adapters::leases_for_io(io_chain, cwd)? {
+            if !self.substitution_leases.iter().any(|owned| Arc::ptr_eq(owned, &lease)) {
+                self.substitution_leases.push(lease);
+            }
+        }
+        Ok(())
+    }
+
+    /// Configure this isolated Job before preparation or process creation.
+    /// The policy never applies to fish, the host Job, or already launched groups.
+    pub fn apply_limits(&mut self, config: &NativeLimits) -> io::Result<()> {
+        if self.preparation_started.get() || !self.children.is_empty() || self.accepted || self.finished {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "native limits must be applied before launch preparation",
+            ));
+        }
+        let mut limits = config.job_limits()?;
+        // Preserve rollback ownership; accept/finish clear only this flag.
+        limits.basic.flags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        write_job_limits(&self.job, &limits)
     }
 
     /// Launch argv (including argv[0]) with a private native environment and the
@@ -925,6 +1015,44 @@ impl NativeLaunchGroup {
         self.spawn_prepared(plan)
     }
 
+    /// Keep the provider's script/interpreter pins through execution, while reusing the one
+    /// native image, endpoint, handle-allowlist and suspended transaction implementation.
+    pub fn prepare_provider(
+        &self,
+        invocation: crate::path::NativeProviderInvocation,
+        io_chain: &IoChain,
+    ) -> io::Result<NativeLaunchPlan> {
+        let mut plan = self.prepare(
+            &invocation.executable,
+            &invocation.argv,
+            &invocation.cwd,
+            &invocation.environment,
+            io_chain,
+            true,
+        )?;
+        if let Some(script) = &invocation.script {
+            if crate::wutil::native_file_identity(&crate::path::native_path_text(script)?, true)?
+                != crate::wutil::native_identity_for_file(&invocation.pins[0])?
+            {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                    "provider script identity changed before native preparation"));
+            }
+        }
+        if let Some(interpreter) = invocation.pins.last() {
+            if crate::wutil::native_identity_for_file(interpreter)?
+                != crate::wutil::native_identity_for_file(&plan.image.file)?
+            {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                    "provider interpreter identity changed after classification"));
+            }
+        }
+        if let Some(command_line) = invocation.command_line {
+            plan.command_line = command_line;
+        }
+        plan.provider_files = invocation.pins;
+        Ok(plan)
+    }
+
     /// Complete every fallible image/I/O/argument/environment/bridge preparation
     /// without creating a child. The scheduler can prepare all stages before
     /// allowing even the first stage to execute.
@@ -937,6 +1065,7 @@ impl NativeLaunchGroup {
         io_chain: &IoChain,
         fd_bridge: bool,
     ) -> io::Result<NativeLaunchPlan> {
+        self.preparation_started.set(true);
         if self.terminated {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -978,7 +1107,62 @@ impl NativeLaunchGroup {
             cwd,
             command_line,
             environment,
+            provider_files: Vec::new(),
         })
+    }
+
+    /// Hidden resource owners must be the retained startup fish image, not an
+    /// executable that happens to occupy current_exe's old pathname.
+    pub(crate) fn prepare_resource_keeper(
+        &self, cwd: &Path, environment: &[(OsString, OsString)], io_chain: &IoChain,
+    ) -> io::Result<NativeLaunchPlan> {
+        let image = crate::wutil::native_current_exe_path()?;
+        let argv = [image.as_os_str().to_owned(), crate::native_adapters::RESOURCE_LEASE_OPTION.into()];
+        let plan = self.prepare(image, &argv, cwd, environment, io_chain, false)?;
+        if crate::wutil::native_identity_for_file(&plan.image.file)? != native_image_identity()?.identity {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                "resource keeper requires the actual retained current fish executable"));
+        }
+        Ok(plan)
+    }
+
+    /// A deliberately cooperating CPython bootstrap, not a general CRT fd
+    /// table. Only these two synchronous completion output handles are added.
+    pub(crate) fn prepare_argcomplete(
+        &self, executable: &Path, argv: &[OsString], cwd: &Path,
+        environment: &[(OsString, OsString)], io_chain: &IoChain,
+        completion: BorrowedHandle<'_>, diagnostics: BorrowedHandle<'_>,
+    ) -> io::Result<NativeLaunchPlan> {
+        let mut plan = self.prepare(executable, argv, cwd, environment, io_chain, false)?;
+        let mut handles = [0usize; 2];
+        for (slot, source) in handles.iter_mut().zip([completion, diagnostics]) {
+            let mut raw = ptr::null_mut();
+            if unsafe { DuplicateHandle(GetCurrentProcess(), source.as_raw_handle(),
+                GetCurrentProcess(), &mut raw, 0, 1, DUPLICATE_SAME_ACCESS) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            plan.child_io.handles.push(unsafe { OwnedHandle::from_raw_handle(raw) });
+            plan.child_io.allowlist.push(raw);
+            *slot = raw as usize;
+        }
+        // Insert one reserved ASCII record into the already validated/sorted
+        // UTF-16 block; do not clone/re-encode the caller's entire environment.
+        let record = format!("{}=v1;{};{}\0", native_fd_bridge::ARGCOMPLETE_FD_ENV, handles[0], handles[1]);
+        let mut name = [0u16; native_fd_bridge::ARGCOMPLETE_FD_ENV.len()];
+        for (slot, byte) in name.iter_mut().zip(native_fd_bridge::ARGCOMPLETE_FD_ENV.bytes()) {
+            *slot = u16::from(byte);
+        }
+        let mut insertion = 0;
+        while plan.environment[insertion] != 0 {
+            let end = insertion + plan.environment[insertion..].iter().position(|unit| *unit == 0).unwrap();
+            let equals = insertion + plan.environment[insertion..end].iter().position(|unit| *unit == 61).unwrap();
+            if environment_name_cmp(&name, &plan.environment[insertion..equals]) == Ordering::Less { break; }
+            insertion = end + 1;
+        }
+        let replace = if plan.environment == [0, 0] { 1 } else { 0 };
+        plan.environment.splice(insertion..insertion + replace, record.bytes().map(u16::from));
+        plan.attributes = Some(AttributeList::new(&plan.child_io.allowlist)?);
+        Ok(plan)
     }
 
     /// Consume one fully owned plan. Only native process creation and the
@@ -1032,6 +1216,7 @@ impl NativeLaunchGroup {
             })),
             thread: Some(unsafe { OwnedHandle::from_raw_handle(information.thread) }),
             registration: None,
+            provider_files: mem::take(&mut plan.provider_files),
         };
         if unsafe { AssignProcessToJobObject(self.job.as_raw_handle(), information.process) } == 0 {
             return Err(io::Error::last_os_error());
@@ -1040,6 +1225,23 @@ impl NativeLaunchGroup {
             information.pid,
             Arc::clone(pending.process.as_ref().expect("pending process owner")),
         )?);
+        // Leases belong to the suspended provider too: accepted/disowned work may outlive
+        // orderly or abrupt fish exit. Zero granted rights retain file-object sharing
+        // reservations; bInheritHandle=false prevents propagation to grandchildren.
+        // Any failure remains inside PendingChild's terminate/wait rollback boundary.
+        for file in &pending.provider_files {
+            let mut child_lease = ptr::null_mut();
+            if unsafe {
+                DuplicateHandle(GetCurrentProcess(), file.as_raw_handle(),
+                    information.process, &mut child_lease, 0, 0, 0)
+            } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        for lease in self.substitution_leases.iter().skip(self.substitution_registrations.len()) {
+            self.substitution_registrations.push(lease.register_job(self.job.as_handle(),
+                pending.process.as_ref().expect("pending process owner").as_handle())?);
+        }
         if unsafe { ResumeThread(information.thread) } == u32::MAX {
             return Err(io::Error::last_os_error());
         }
@@ -1080,8 +1282,15 @@ impl NativeLaunchGroup {
     /// Accepted work survives normal shell exit, including after disown. Until
     /// this succeeds, every failure still rolls back the suspended/started roots.
     pub(crate) fn accept(&mut self) -> io::Result<()> {
+        if self.accepted { return Ok(()); }
         set_job_kill_on_close(&self.job, false)?;
         self.accepted = true;
+        // The native flag is the atomic acceptance record. A keeper whose A
+        // packet is interrupted can reconcile it without deleting a live
+        // accepted consumer's files or retaining an unaccepted suspended root.
+        for (lease, cookie) in self.substitution_leases.iter().zip(&self.substitution_registrations) {
+            lease.accept_job(*cookie)?;
+        }
         Ok(())
     }
 
@@ -1192,14 +1401,32 @@ impl NativeLaunchGroup {
 
 fn set_job_kill_on_close(job: &OwnedHandle, enabled: bool) -> io::Result<()> {
     let mut limits = JobExtendedLimits::default();
-    if enabled {
-        limits.basic.flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if unsafe {
+        QueryInformationJobObject(
+            job.as_raw_handle(),
+            JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            (&mut limits as *mut JobExtendedLimits).cast(),
+            size_of::<JobExtendedLimits>() as u32,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
     }
+    if enabled {
+        limits.basic.flags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    } else {
+        limits.basic.flags &= !JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    }
+    write_job_limits(job, &limits)
+}
+
+fn write_job_limits(job: &OwnedHandle, limits: &JobExtendedLimits) -> io::Result<()> {
     if unsafe {
         SetInformationJobObject(
             job.as_raw_handle(),
             JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-            (&limits as *const JobExtendedLimits).cast(),
+            (limits as *const JobExtendedLimits).cast(),
             size_of::<JobExtendedLimits>() as u32,
         )
     } == 0
@@ -1207,6 +1434,55 @@ fn set_job_kill_on_close(job: &OwnedHandle, enabled: bool) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+impl NativeLimits {
+    fn job_limits(&self) -> io::Result<JobExtendedLimits> {
+        fn positive(value: u64) -> io::Result<u64> {
+            if value == 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "native limits must be positive; use not-configured to reset"));
+            }
+            Ok(value)
+        }
+        fn memory(kib: u64) -> io::Result<usize> {
+            positive(kib)?.checked_mul(1024)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "native memory limit overflows SIZE_T"))
+        }
+        let mut limits = JobExtendedLimits::default();
+        if let Some(kib) = self.process_memory_kib {
+            limits.process_memory_limit = memory(kib)?;
+            limits.basic.flags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        }
+        if let Some(kib) = self.job_memory_kib {
+            limits.job_memory_limit = memory(kib)?;
+            limits.basic.flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+        }
+        if let Some(seconds) = self.process_cpu_seconds {
+            limits.basic.process_user_time = positive(seconds)?.checked_mul(10_000_000)
+                .and_then(|ticks| i64::try_from(ticks).ok())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "native USER CPU limit overflows signed 100-nanosecond units"))?;
+            limits.basic.flags |= JOB_OBJECT_LIMIT_PROCESS_TIME;
+        }
+        if let Some(count) = self.active_processes {
+            limits.basic.active_process_limit = u32::try_from(positive(count)?)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "native active process limit exceeds DWORD"))?;
+            limits.basic.flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        }
+        Ok(limits)
+    }
+
+    /// Ask the kernel to accept a policy on an empty private Job before saving it.
+    /// No process is assigned and no existing/enclosing Job is queried or changed.
+    pub fn validate(&self) -> io::Result<()> {
+        let limits = self.job_limits()?;
+        let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        if raw.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+        write_job_limits(&job, &limits)
+    }
 }
 
 impl Drop for NativeLaunchGroup {
@@ -1226,6 +1502,98 @@ impl Drop for NativeLaunchGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::ffi::OsStringExt;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn CommandLineToArgvW(command: *const u16, count: *mut i32) -> *mut *mut u16;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+
+    fn assert_command_line_roundtrip(argv: &[OsString]) -> Vec<u16> {
+        let line = command_line(argv).unwrap();
+        let mut count = 0;
+        let decoded = unsafe { CommandLineToArgvW(line.as_ptr(), &mut count) };
+        assert!(!decoded.is_null(), "native argv decoder: {}", io::Error::last_os_error());
+        let mut actual = Vec::new();
+        for index in 0..count as usize {
+            let argument = unsafe { *decoded.add(index) };
+            let mut length = 0;
+            while unsafe { *argument.add(length) } != 0 {
+                length += 1;
+            }
+            actual.push(unsafe { std::slice::from_raw_parts(argument, length) }.to_vec());
+        }
+        assert!(unsafe { LocalFree(decoded.cast()) }.is_null());
+        let expected: Vec<Vec<u16>> = argv.iter().map(|argument| argument.encode_wide().collect()).collect();
+        assert_eq!(actual, expected, "real Windows decoder must preserve native argv");
+        line
+    }
+
+    #[test]
+    fn command_line_roundtrips_native_decoder() {
+        let mut arguments: Vec<OsString> = [
+            "", "+r", "-r", "/s", "ordinary", "two words", "\t", "tab\tword",
+            "\"", "\"\"", "inside\"quote", "\\", "\\\\", "space and slash\\",
+            "雪🐟", "雪 🐟\\", "%PATH%", "!value!", "^&|<>()", ";$`*?[]{}",
+            "line\nbreak", "line\r\nbreak", "nonbreaking\u{a0}space",
+        ].into_iter().map(OsString::from).collect();
+        // Exercise both parity cases before literal quotes and doubled trailing
+        // backslashes before a required syntactic quote, without a model decoder.
+        for count in 0..=8 {
+            let slashes = "\\".repeat(count);
+            for argument in [
+                format!("{slashes}\"tail"),
+                format!("head{slashes}\""),
+                format!(" {slashes}"),
+                format!("\t{slashes}"),
+                format!("{slashes}"),
+            ] {
+                arguments.push(argument.into());
+            }
+        }
+        // The process boundary carries UTF-16, not only valid Unicode scalars.
+        arguments.push(OsString::from_wide(&[0xd800, 32, 0xdc00, 92]));
+        for first in ["native.exe", r"C:\Program Files\雪🐟\native.exe", r"C:\trailing\", ""] {
+            let mut argv = vec![OsString::from(first)];
+            argv.extend(arguments.iter().cloned());
+            assert_command_line_roundtrip(&argv);
+        }
+    }
+
+    #[test]
+    fn command_line_rejects_unrepresentable_arguments() {
+        let invalid_arguments = [
+            Vec::new(),
+            vec![OsString::from("bad\"image")],
+            vec![OsString::from_wide(&[b'p' as u16, 0])],
+            vec![OsString::from("p"), OsString::from_wide(&[0])],
+            vec![OsString::from("p"), OsString::from_wide(&[32, 0, 34])],
+        ];
+        for argv in invalid_arguments {
+            assert_eq!(command_line(&argv).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn command_line_enforces_encoded_utf16_limit() {
+        // The 32767-unit CreateProcessW limit includes the terminating NUL.
+        let mut argv = vec![OsString::from("p"), OsString::from("🐟".repeat(16_381))];
+        assert_eq!(assert_command_line_roundtrip(&argv).len(), 32_767);
+        argv[1].push("x");
+        assert_eq!(command_line(&argv).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+
+        // Required quoting expands trailing backslashes; measure the encoded
+        // command rather than the unescaped argument's character count.
+        argv[1] = format!(" x{}", "\\".repeat(16_379)).into();
+        assert_eq!(assert_command_line_roundtrip(&argv).len(), 32_767);
+        argv[1].push("\\");
+        assert_eq!(command_line(&argv).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
 
     const QUOTA_READY: &str = "FISH_NATIVE_ASSIGNMENT_QUOTA_READY";
     const QUOTA_RELEASE: &str = "FISH_NATIVE_ASSIGNMENT_QUOTA_RELEASE";
@@ -1372,6 +1740,10 @@ mod tests {
         let target_release = NamedEvent::new("target-release");
         let mut host_group = NativeLaunchGroup::new(Arc::clone(&runtime)).unwrap();
         let mut target_group = NativeLaunchGroup::new(Arc::clone(&runtime)).unwrap();
+        target_group.apply_limits(&NativeLimits {
+            active_processes: Some(1),
+            ..NativeLimits::default()
+        }).unwrap();
         let host = host_group
             .spawn(
                 &exe,
@@ -1402,22 +1774,6 @@ mod tests {
         // The owner is outside the target job, so CreateProcessW can still
         // create a suspended root in the outer job. Only the subsequent real
         // AssignProcessToJobObject hits the target's now-full active quota.
-        let mut limits = JobExtendedLimits::default();
-        limits.basic.flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-        limits.basic.active_process_limit = 1;
-        assert_ne!(
-            unsafe {
-                SetInformationJobObject(
-                    target_group.job.as_raw_handle(),
-                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                    (&limits as *const JobExtendedLimits).cast(),
-                    size_of::<JobExtendedLimits>() as u32,
-                )
-            },
-            0,
-            "target active-process quota: {}",
-            io::Error::last_os_error()
-        );
         let plan = target_group
             .prepare(
                 &exe,
@@ -1473,5 +1829,68 @@ mod tests {
             runtime.drain().is_empty(),
             "rollback left owned completion records"
         );
+    }
+    #[test]
+    fn configured_limits_preserve_units_rollback_and_preparation_boundary() {
+        const CASE: &str = concat!(module_path!(), "::configured_limits_preserve_units_rollback_and_preparation_boundary");
+        if !crate::threads::isolated_test(CASE) {
+            return;
+        }
+        let outer = own(unsafe { CreateJobObjectW(ptr::null(), ptr::null()) });
+        assert_ne!(unsafe { AssignProcessToJobObject(outer.as_raw_handle(), GetCurrentProcess()) }, 0);
+        assert_eq!(job_accounting(&outer).active_processes, 1);
+        let policy = NativeLimits {
+            process_memory_kib: Some(65_536),
+            job_memory_kib: Some(131_072),
+            process_cpu_seconds: Some(2),
+            active_processes: Some(3),
+        };
+        policy.validate().unwrap();
+        let mut group = NativeLaunchGroup::new(NativeRuntime::new().unwrap()).unwrap();
+        group.apply_limits(&policy).unwrap();
+        assert_eq!(job_accounting(&group.job).total_processes, 0);
+        assert_eq!(job_accounting(&outer).active_processes, 1);
+        // The root is not subject to the configured 64 MiB child-process cap.
+        let root_memory = vec![0x8au8; 80 * 1024 * 1024];
+        std::hint::black_box(&root_memory);
+        assert_eq!(root_memory[79 * 1024 * 1024], 0x8a);
+        drop(root_memory);
+        fn query(group: &NativeLaunchGroup) -> JobExtendedLimits {
+            let mut limits = JobExtendedLimits::default();
+            assert_ne!(unsafe {
+                QueryInformationJobObject(group.job.as_raw_handle(),
+                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                    (&mut limits as *mut JobExtendedLimits).cast(),
+                    size_of::<JobExtendedLimits>() as u32, ptr::null_mut())
+            }, 0);
+            limits
+        }
+        let expected_flags = JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY
+            | JOB_OBJECT_LIMIT_PROCESS_TIME | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        for enabled in [true, false, true] {
+            set_job_kill_on_close(&group.job, enabled).unwrap();
+            let actual = query(&group);
+            assert_eq!(actual.process_memory_limit, 65_536 * 1024);
+            assert_eq!(actual.job_memory_limit, 131_072 * 1024);
+            assert_eq!(actual.basic.process_user_time, 20_000_000);
+            assert_eq!(actual.basic.active_process_limit, 3);
+            assert_eq!(actual.basic.flags,
+                expected_flags | if enabled { JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE } else { 0 });
+        }
+        for invalid in [
+            NativeLimits { process_memory_kib: Some(0), ..policy },
+            NativeLimits { process_memory_kib: Some(u64::MAX), ..policy },
+            NativeLimits { job_memory_kib: Some(u64::MAX), ..policy },
+            NativeLimits { process_cpu_seconds: Some(u64::MAX), ..policy },
+            NativeLimits { active_processes: Some(u64::from(u32::MAX) + 1), ..policy },
+        ] {
+            assert_eq!(invalid.validate().unwrap_err().kind(), io::ErrorKind::InvalidInput);
+            assert!(group.apply_limits(&invalid).is_err());
+            assert_eq!(query(&group).basic.flags, expected_flags | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
+            assert_eq!(query(&group).process_memory_limit, 65_536 * 1024);
+        }
+        let missing = std::env::temp_dir().join(format!("fish-n8-absent-{}.exe", std::process::id()));
+        assert!(group.prepare(&missing, &[], &std::env::temp_dir(), &[], &IoChain::new(), false).is_err());
+        assert_eq!(group.apply_limits(&NativeLimits::default()).unwrap_err().kind(), io::ErrorKind::InvalidInput);
     }
 }

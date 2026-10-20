@@ -1,3 +1,5 @@
+mod context;
+
 mod history_search;
 
 #[cfg(windows)]

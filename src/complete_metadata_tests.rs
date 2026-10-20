@@ -224,10 +224,10 @@ fn native_declarative_metadata() {
         ]
     );
     abbrs::with_abbrs(|set| {
-        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("tool")));
-        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("unrelated")));
-        assert!(!set.has_match(L!("x雪42"), Position::Anywhere, L!("tool")));
-        let replacers = set.r#match(L!("literal"), Position::Command, L!(""));
+        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("tool")).unwrap());
+        assert!(!set.has_match(L!("雪42"), Position::Anywhere, L!("unrelated")).unwrap());
+        assert!(!set.has_match(L!("x雪42"), Position::Anywhere, L!("tool")).unwrap());
+        let replacers = set.r#match(L!("literal"), Position::Command, L!("")).unwrap();
         assert_eq!(replacers.len(), 1);
         let replacement = Replacement::new(
             crate::parse_constants::SourceRange {
@@ -286,7 +286,7 @@ fn native_declarative_metadata() {
     abbrs::with_abbrs(|set| {
         assert!(!set.has_name(L!("rx")));
         assert!(set.has_name(L!("renamed")));
-        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("other")));
+        assert!(set.has_match(L!("雪42"), Position::Anywhere, L!("other")).unwrap());
     });
 
     invoke(
@@ -749,7 +749,7 @@ fn native_disk_completion_autoload() {
     )
     .unwrap();
     select_path(&mut parser, &first);
-    assert!(complete_load(command, &mut parser));
+    assert!(complete_load(command, &mut parser, true));
     let initial = rules_for(command);
     assert_eq!(initial.len(), 2);
     for (option, typ) in [
@@ -771,13 +771,13 @@ fn native_disk_completion_autoload() {
         assert_eq!(rule.description, L!("disk choice"));
         assert!(rule.flags.dont_sort);
     }
-    assert!(!complete_load(command, &mut parser));
+    assert!(!complete_load(command, &mut parser, true));
     assert_eq!(rules_for(command), initial);
 
     // Cache an actual miss before making a new command available. Changing the
     // parser-owned search path must discard that miss and the old loaded rules.
     let missing = L!("n4_native_late");
-    assert!(!complete_load(missing, &mut parser));
+    assert!(!complete_load(missing, &mut parser, true));
     assert!(rules_for(missing).is_empty());
     std::fs::write(
         second.join("n4_native_late.fish"),
@@ -786,7 +786,7 @@ fn native_disk_completion_autoload() {
     .unwrap();
     select_path(&mut parser, &second);
     assert!(rules_for(command).is_empty());
-    assert!(complete_load(command, &mut parser));
+    assert!(complete_load(command, &mut parser, true));
     let replacement = rules_for(command);
     assert_eq!(replacement.len(), 1);
     let rule = &replacement[0];
@@ -797,7 +797,7 @@ fn native_disk_completion_autoload() {
     assert!(rule.conditions.is_empty());
     assert_eq!(rule.arguments, L!("new value"));
     assert_eq!(rule.description, L!("replacement rule"));
-    assert!(complete_load(missing, &mut parser));
+    assert!(complete_load(missing, &mut parser, true));
     let recovered = rules_for(missing);
     assert_eq!(recovered.len(), 1);
     assert_eq!(recovered[0].option, L!("recovered"));
@@ -810,15 +810,15 @@ fn native_disk_completion_autoload() {
     let broken = L!("n4_native_broken");
     let broken_file = second.join("n4_native_broken.fish");
     std::fs::write(&broken_file, "if true\n").unwrap();
-    assert!(!complete_load(broken, &mut parser));
-    assert!(!complete_load(broken, &mut parser));
+    assert!(!complete_load(broken, &mut parser, true));
+    assert!(!complete_load(broken, &mut parser, true));
     assert!(rules_for(broken).is_empty());
     std::fs::write(
         &broken_file,
         "complete -c n4_native_broken -s b -f -a repaired -d 'repaired syntax'\n",
     )
     .unwrap();
-    assert!(complete_load(broken, &mut parser));
+    assert!(complete_load(broken, &mut parser, true));
     let repaired = rules_for(broken);
     assert_eq!(repaired.len(), 1);
     assert_eq!(repaired[0].option, L!("b"));
@@ -826,7 +826,7 @@ fn native_disk_completion_autoload() {
     assert_eq!(repaired[0].policy.files, FileCompletionPolicy::Skip);
     assert_eq!(repaired[0].arguments, L!("repaired"));
     assert_eq!(repaired[0].description, L!("repaired syntax"));
-    assert!(!complete_load(broken, &mut parser));
+    assert!(!complete_load(broken, &mut parser, true));
     assert_eq!(rules_for(broken), repaired);
 
     // Retry a failed source without touching its bytes or file identity. This
@@ -840,16 +840,112 @@ fn native_disk_completion_autoload() {
          complete -c n4_native_retry -l ready -a 'ready now' -d 'retried source'\n",
     )
     .unwrap();
-    assert!(!complete_load(retry, &mut parser));
+    assert!(!complete_load(retry, &mut parser, true));
     assert!(rules_for(retry).is_empty());
     replay(&mut parser, L!("set -g n4_allow_completion_load 1"));
-    assert!(complete_load(retry, &mut parser));
+    assert!(complete_load(retry, &mut parser, true));
     let retried = rules_for(retry);
     assert_eq!(retried.len(), 1);
     assert_eq!(retried[0].option, L!("ready"));
     assert_eq!(retried[0].typ, CompleteOptionType::DoubleLong);
     assert_eq!(retried[0].arguments, L!("ready now"));
     assert_eq!(retried[0].description, L!("retried source"));
-    assert!(!complete_load(retry, &mut parser));
+    assert!(!complete_load(retry, &mut parser, true));
     assert_eq!(rules_for(retry), retried);
+}
+
+#[test]
+fn native_completion_cursor_context() {
+    if !run_native_test_in_child("complete::metadata_tests::native_completion_cursor_context") {
+        return;
+    }
+    crate::threads::init();
+    crate::common::PROGRAM_NAME.set(L!("fish")).unwrap();
+    let variables = EnvStack::new();
+    variables
+        .initialize_native_from(std::iter::empty(), &std::env::temp_dir())
+        .unwrap();
+    let mut parser = Parser::new(variables, CancelBehavior::default()).unwrap();
+    replay(&mut parser, L!("set -g fish_function_path; set -g fish_complete_path"));
+    invoke(
+        &mut parser,
+        &[
+            L!("complete"),
+            L!("-c"),
+            L!("n9_cursor_target"),
+            L!("-f"),
+            L!("-a"),
+            L!("prefix"),
+            L!("-n"),
+            L!("test (commandline -b) = \"$__n9_context_text\"; and test (commandline -C) = \"$__n9_context_cursor\"; and test (commandline -ct) = \"$__n9_context_token\""),
+        ],
+    );
+    invoke(
+        &mut parser,
+        &[
+            L!("complete"),
+            L!("-c"),
+            L!("n9_cursor_wrapper"),
+            L!("-w"),
+            L!("N9_CURSOR_LOCAL=assigned n9_cursor_target --fixed"),
+        ],
+    );
+
+    fn expect_context(parser: &mut Parser, text: &wstr, cursor: usize, token: &wstr) {
+        replay(
+            parser,
+            &(L!("set -g __n9_context_text ").to_owned() + &escape(text)[..]),
+        );
+        replay(parser, &sprintf!("set -g __n9_context_cursor %u", cursor));
+        replay(
+            parser,
+            &(L!("set -g __n9_context_token ").to_owned() + &escape(token)[..]),
+        );
+    }
+
+    let direct = L!("n9_cursor_target pr tail 雪");
+    let wrapped = L!("N9_CURSOR_LOCAL=assigned n9_cursor_target --fixed pr tail 雪");
+    for (text, before_cursor, expected_text, expected_before_cursor) in [
+        (direct, L!("n9_cursor_target p"), direct, L!("n9_cursor_target p")),
+        (
+            L!("N9_CURSOR_LOCAL=original n9_cursor_target pr tail 雪"),
+            L!("N9_CURSOR_LOCAL=original n9_cursor_target p"),
+            direct,
+            L!("n9_cursor_target p"),
+        ),
+        (
+            L!("n9_cursor_wrapper pr tail 雪"),
+            L!("n9_cursor_wrapper p"),
+            wrapped,
+            L!("N9_CURSOR_LOCAL=assigned n9_cursor_target --fixed p"),
+        ),
+        (
+            L!("echo (n9_cursor_wrapper pr tail 雪) outside"),
+            L!("echo (n9_cursor_wrapper p"),
+            wrapped,
+            L!("N9_CURSOR_LOCAL=assigned n9_cursor_target --fixed p"),
+        ),
+    ] {
+        expect_context(&mut parser, expected_text, expected_before_cursor.len(), L!("p"));
+        let (completions, _) = complete(
+            text,
+            Some(before_cursor.len()),
+            CompletionRequestOptions::default(),
+            &mut parser.context(),
+        );
+        // Matching still includes the token's trailing 'r', while commandline
+        // reads the real cursor after 'p' and retains the following arguments.
+        assert_eq!(completions.len(), 1, "{text}");
+        assert_eq!(completions[0].completion, L!("efix"), "{text}");
+        assert!(parser.libdata().transient_commandline.borrow().is_none());
+    }
+
+    // Explicit complete -C remains an independent synthetic end-of-line request.
+    let synthetic = L!("n9_cursor_target pr");
+    expect_context(&mut parser, synthetic, synthetic.len(), L!("pr"));
+    assert_eq!(
+        invoke(&mut parser, &[L!("complete"), L!("-C"), synthetic]),
+        L!("prefix\n"),
+    );
+    assert!(parser.libdata().transient_commandline.borrow().is_none());
 }

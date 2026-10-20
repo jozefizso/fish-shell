@@ -30,6 +30,30 @@ mod windows_native_n6_clipboard;
 #[path = "../windows_n6/console.rs"]
 mod windows_native_n6_console;
 #[cfg(windows)]
+#[path = "../windows_n7/eval_input_probe.rs"]
+mod windows_native_n7_eval;
+#[cfg(windows)]
+#[path = "../windows_n7/render_probe.rs"]
+mod windows_native_n7_render;
+#[cfg(windows)]
+#[path = "../windows_n8/provider_probe.rs"]
+mod windows_native_n8_provider;
+#[cfg(windows)]
+#[path = "../windows_n8/adapters_probe.rs"]
+mod windows_native_n8_adapters;
+#[cfg(windows)]
+#[path = "../windows_n8/policy_probe.rs"]
+mod windows_native_n8_policy;
+#[cfg(windows)]
+#[path = "../windows_n8/services_probe.rs"]
+mod windows_native_n8_services;
+#[cfg(windows)]
+#[path = "../windows_n9/assets_probe.rs"]
+mod windows_native_n9_assets;
+#[cfg(windows)]
+#[path = "../windows_n11/network_probe.rs"]
+mod windows_native_n11_network;
+#[cfg(windows)]
 #[path = "runtime.rs"]
 mod windows_native_runtime;
 #[cfg(windows)]
@@ -50,9 +74,49 @@ fn main() {
         }
         writeln!(out).unwrap();
     }
+    if std::env::var_os("FISH_N9_FACADE_MARKER").is_some() {
+        if let Some(code) = windows_native_n9_assets::facade_fallback() {
+            std::process::exit(code);
+        }
+    }
     let mut args = std::env::args_os().skip(1);
     let mode = args.next().expect("probe mode");
     match mode.to_str().expect("Unicode mode") {
+        mode if mode.starts_with("n11-network-") => {
+            windows_native_n11_network::run(mode, args.collect())
+        }
+        mode if mode.starts_with("n9-") => {
+            let args: Vec<_> = args.collect();
+            std::process::exit(
+                windows_native_n9_assets::try_main(mode, &args).expect("known N9 asset mode"),
+            );
+        }
+        mode if mode.starts_with("n8-") || mode == "--fish-native-resource-lease" => {
+            let args: Vec<_> = args.collect();
+            for run in [
+                windows_native_n8_provider::try_main,
+                windows_native_n8_adapters::try_main,
+                windows_native_n8_policy::try_main,
+                windows_native_n8_services::try_main,
+            ] {
+                if let Some(status) = run(mode, &args) {
+                    std::process::exit(status);
+                }
+            }
+            panic!("unknown N8 probe mode: {mode}");
+        }
+        mode if mode.starts_with("n7-eval-") => {
+            let args: Vec<_> = args.collect();
+            std::process::exit(
+                windows_native_n7_eval::try_main(mode, &args).expect("known N7 evaluator mode"),
+            );
+        }
+        mode if mode.starts_with("n7-render-") => {
+            let args: Vec<_> = args.collect();
+            std::process::exit(
+                windows_native_n7_render::try_main(mode, &args).expect("known N7 rendering mode"),
+            );
+        }
         mode if mode.starts_with("n6-console-") => {
             windows_native_n6_console::run(mode, args.collect())
         }

@@ -179,6 +179,10 @@ unsafe extern "system" {
     fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> Handle;
     fn SetEvent(event: Handle) -> i32;
     fn GetConsoleMode(console: Handle, mode: *mut u32) -> i32;
+    fn SetConsoleMode(console: Handle, mode: u32) -> i32;
+    fn CreateConsoleScreenBuffer(access: u32, share: u32, attributes: *const c_void, flags: u32, reserved: Handle) -> Handle;
+    fn SetConsoleScreenBufferSize(console: Handle, size: Coord) -> i32;
+    fn WriteConsoleW(console: Handle, text: *const u16, count: u32, written: *mut u32, reserved: Handle) -> i32;
     fn SetHandleInformation(handle: Handle, mask: u32, flags: u32) -> i32;
     fn GetNumberOfConsoleInputEvents(console: Handle, count: *mut u32) -> i32;
     fn GetConsoleScreenBufferInfo(console: Handle, info: *mut BufferInfo) -> i32;
@@ -327,20 +331,50 @@ fn read_modes(input: &File, output: &File) -> (u32, u32) {
     (i, o)
 }
 
+fn observed_nonspacing_width(output_mode: u32) -> u16 {
+    let buffer = owned(
+        unsafe { CreateConsoleScreenBuffer(0xc000_0000, 3, std::ptr::null(), 1, std::ptr::null_mut()) },
+        "CreateConsoleScreenBuffer(width policy)",
+    );
+    let handle = buffer.as_raw_handle();
+    checked(unsafe { SetConsoleMode(handle, output_mode) }, "SetConsoleMode(private width probe)");
+    let mut info = BufferInfo::default();
+    checked(unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }, "GetConsoleScreenBufferInfo(private)");
+    if info.size.x < 4 {
+        checked(unsafe { SetConsoleScreenBufferSize(handle, Coord { x: 4, y: info.size.y }) }, "grow private probe buffer");
+    }
+    let initial_row = info.cursor.y;
+    // Two marks independently distinguish legacy one-cell measurement from
+    // a zero-cell policy; neither the renderer nor its width tables are used.
+    let text = [13u16, b'a' as u16, 0x0308, 0x0301];
+    let mut written = 0;
+    checked(unsafe { WriteConsoleW(handle, text.as_ptr(), 4, &mut written, std::ptr::null_mut()) }, "WriteConsoleW(private width probe)");
+    assert_eq!(written, 4);
+    checked(unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }, "GetConsoleScreenBufferInfo(private result)");
+    assert_eq!(info.cursor.y, initial_row);
+    assert!(matches!(info.cursor.x, 1 | 3), "unsupported native measurement policy: {:?}", [info.cursor.x, info.cursor.y]);
+    ((info.cursor.x - 1) / 2) as u16
+}
+
 #[derive(Debug)]
 pub struct Snapshot {
     pub input_mode: u32,
     pub output_mode: u32,
+    pub nonspacing_width: u16,
     pub buffer_width: i16,
     pub buffer_height: i16,
     pub viewport: [i16; 4],
     pub cursor: [i16; 2],
     /// Entire native screen buffer, row-major; not reconstructed from the VT trace.
     pub cells: Vec<u16>,
+    /// Actual CHAR_INFO attributes paired one-for-one with `cells`.
+    pub attributes: Vec<u16>,
 }
 impl Snapshot {
     fn capture(input: &File, output: &File) -> Self {
         let (input_mode, output_mode) = read_modes(input, output);
+        static NONSPACING_WIDTH: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+        let nonspacing_width = *NONSPACING_WIDTH.get_or_init(|| observed_nonspacing_width(output_mode));
         let mut info = BufferInfo::default();
         checked(
             unsafe { GetConsoleScreenBufferInfo(output.as_raw_handle(), &mut info) },
@@ -375,10 +409,14 @@ impl Snapshot {
             [0, 0, info.size.x - 1, info.size.y - 1],
             "incomplete native screen rectangle"
         );
-        let cells = native_cells.into_iter().map(|cell| cell.unicode).collect();
+        let (cells, attributes) = native_cells
+            .into_iter()
+            .map(|cell| (cell.unicode, cell.attributes))
+            .unzip();
         Self {
             input_mode,
             output_mode,
+            nonspacing_width,
             buffer_width: info.size.x,
             buffer_height: info.size.y,
             viewport: [
@@ -389,11 +427,14 @@ impl Snapshot {
             ],
             cursor: [info.cursor.x, info.cursor.y],
             cells,
+            attributes,
         }
     }
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        assert_eq!(self.cells.len(), self.attributes.len());
+        let mut out = Vec::with_capacity(30 + self.cells.len() * 4);
         put_modes(&mut out, (self.input_mode, self.output_mode));
+        out.extend_from_slice(&self.nonspacing_width.to_le_bytes());
         for value in [self.buffer_width, self.buffer_height]
             .into_iter()
             .chain(self.viewport)
@@ -402,13 +443,17 @@ impl Snapshot {
             out.extend_from_slice(&value.to_le_bytes());
         }
         put_u32(&mut out, self.cells.len() as u32);
-        for unit in &self.cells {
+        for (unit, attribute) in self.cells.iter().zip(&self.attributes) {
             out.extend_from_slice(&unit.to_le_bytes());
+            out.extend_from_slice(&attribute.to_le_bytes());
         }
         out
     }
     fn decode(mut input: &[u8]) -> Self {
         let (input_mode, output_mode) = get_modes(&mut input);
+        assert!(input.len() >= 2);
+        let nonspacing_width = u16::from_le_bytes(input[..2].try_into().unwrap());
+        input = &input[2..];
         let mut values = [0i16; 8];
         assert!(input.len() >= 16);
         for (value, bytes) in values.iter_mut().zip(input[..16].chunks_exact(2)) {
@@ -416,19 +461,26 @@ impl Snapshot {
         }
         input = &input[16..];
         let count = get_u32(&mut input) as usize;
-        assert_eq!(input.len(), count * 2);
-        let cells = input
-            .chunks_exact(2)
-            .map(|v| u16::from_le_bytes(v.try_into().unwrap()))
-            .collect();
+        assert_eq!(input.len(), count * 4);
+        let (cells, attributes) = input
+            .chunks_exact(4)
+            .map(|v| {
+                (
+                    u16::from_le_bytes(v[..2].try_into().unwrap()),
+                    u16::from_le_bytes(v[2..].try_into().unwrap()),
+                )
+            })
+            .unzip();
         Self {
             input_mode,
             output_mode,
+            nonspacing_width,
             buffer_width: values[0],
             buffer_height: values[1],
             viewport: values[2..6].try_into().unwrap(),
             cursor: values[6..8].try_into().unwrap(),
             cells,
+            attributes,
         }
     }
 }
@@ -834,6 +886,12 @@ impl Session {
     /// Raw observed VT bytes, including queries, for deterministic fragmented responses.
     pub fn trace(&self) -> Vec<u8> {
         self.trace.0.lock().unwrap().bytes.clone()
+    }
+    pub fn wait_output_after(&mut self, offset: usize) {
+        self.wait_trace(
+            |state| state.bytes.len() > offset,
+            "provider output after control receipt",
+        );
     }
     fn wait_trace(&mut self, predicate: impl Fn(&Trace) -> bool, description: &str) {
         let deadline = Instant::now() + LIMIT;

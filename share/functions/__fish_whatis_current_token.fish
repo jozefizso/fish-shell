@@ -23,19 +23,24 @@ function __fish_whatis_current_token -d "Show man page entries or function descr
             if builtin -q __fish_native_fs
                 set -l help (__fish_print_help $token)
                 or return
-                set desc (string trim -- "$help[4]")
+                set -l summary (string match -r -- '^[^ \t]+ - .+' $help)[1]
+                set -q summary[1]; or return 1
+                set desc (string trim -- $summary)
             else
                 set desc (__fish_print_help $token | sed -n 4p | string trim)
             end
 
         case file
-            if builtin -q __fish_native_fs; and not type -q whatis
-                echo "fish: manual summary requires the optional whatis command" >&2
-                return 127
+            if builtin -q __fish_native_fs
+                set -l query (string escape --style=regex -- $token)
+                set -l tmpdesc (__fish_apropos "^$query\$")
+                or return $status
+                set desc $tmpdesc
+            else
+                set -l tmpdesc (whatis $token 2>/dev/null)
+                and set desc $tmpdesc
             end
-            set -l tmpdesc (whatis $token 2>/dev/null)
-            and set desc $tmpdesc
     end
 
-    __fish_echo string join \n -- $desc
+    __fish_echo printf '%s\n' $desc
 end

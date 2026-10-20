@@ -1,6 +1,6 @@
 __fish_complete_pgrep pgrep
 
-if pgrep --help &>/dev/null
+if command -sq pgrep; and command pgrep --help &>/dev/null
     complete -c pgrep -s d -l delimiter -r -d 'Output delimiter'
     complete -c pgrep -s l -l list-name -d 'List the process name as well as the process ID'
     complete -c pgrep -s a -l list-full -d 'List the full command line as well as the process ID'

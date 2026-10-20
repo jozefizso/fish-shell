@@ -155,6 +155,14 @@ impl ConsoleControlEpoch {
         }
     }
 
+    /// Preserve receipts delivered during one owning evaluation even after a
+    /// nested reader/callback rearms the current token. Cross-kind chronology
+    /// is unknown; use the same close/break/C priority as signal_check_cancel.
+    pub(crate) fn signal_since(self, earlier: Self) -> Option<RawSignal> {
+        self.difference(earlier).controls().into_iter().rev()
+            .find_map(|(signal, count)| (count != 0).then_some(signal))
+    }
+
     /// One entry per supported kind; counts are not coalesced into a single event.
     pub fn controls(self) -> [(RawSignal, u64); 3] {
         [
@@ -527,6 +535,10 @@ pub fn signal_check_cancel() -> i32 {
         RawSignal::CTRL_BREAK.code()
     } else if pending.ctrl_c != 0 {
         RawSignal::CTRL_C.code()
+    } else if crate::console_windows::poll_evaluation_input() {
+        // Local typed input only supplies evaluator unwind status. It never
+        // changes HANDOFF counts/tokens or creates a named-signal delivery.
+        RawSignal::CTRL_C.code()
     } else {
         0
     }
@@ -570,6 +582,11 @@ pub fn rearm_console_controls() -> io::Result<()> {
 /// Shared evaluator compatibility entry point. A failed rearm does not clear
 /// cancellation. Startup/command boundaries should use the checked owner API.
 pub fn signal_clear_cancel() {
+    if crate::console_windows::evaluation_input_cancelled() {
+        // Keep the local epoch latched through every nested parser boundary.
+        // In particular do not acknowledge a real receipt racing this input.
+        return;
+    }
     if let Err(error) = rearm_console_controls() {
         if error.kind() != io::ErrorKind::NotConnected {
             eprintln!("fish: cannot rearm console controls: {error}");
@@ -605,25 +622,30 @@ pub(crate) fn take_pending_console_controls() -> io::Result<ConsoleControlEpoch>
 /// Shared wait-builtin interruption detector. Rearm cannot erase its history.
 pub struct SigChecker {
     epoch: ConsoleControlEpoch,
+    typed_epoch: u64,
 }
 
 impl SigChecker {
     pub fn new_sighupintterm() -> Self {
         Self {
             epoch: console_control_epoch(),
+            typed_epoch: crate::console_windows::typed_cancel_epoch(),
         }
     }
 
     pub fn check(&mut self) -> bool {
+        let local = crate::console_windows::poll_evaluation_input();
+        let typed_epoch = crate::console_windows::typed_cancel_epoch();
         let epoch = console_control_epoch();
-        let changed = epoch != self.epoch;
+        let changed = local || epoch != self.epoch || typed_epoch != self.typed_epoch;
         self.epoch = epoch;
+        self.typed_epoch = typed_epoch;
         changed
     }
 
-    /// Block on the current real, permanent cancellation event, including an
-    /// already-pending request. Returns an error without an installed owner;
-    /// never polls or allocates a fake wake source. Only `check` tests freshness.
+    /// Block on the real cancellation event, with bounded main-thread typed
+    /// input polls only while an editor evaluator owns input. No fake notifier
+    /// or native receipt is created; `check` retains both histories.
     pub fn wait(&self) -> io::Result<()> {
         let cancellation = console_control_cancellation().ok_or_else(|| {
             io::Error::new(
@@ -634,7 +656,9 @@ impl SigChecker {
         if console_control_epoch() != self.epoch {
             return Ok(());
         }
-        match unsafe { WaitForSingleObject(cancellation.handle().as_raw_handle(), INFINITE) } {
+        match crate::console_windows::wait_for_evaluator_handles(
+            &[cancellation.handle().as_raw_handle()], INFINITE,
+        )? {
             WAIT_OBJECT_0 => Ok(()),
             u32::MAX => Err(io::Error::last_os_error()),
             result => Err(io::Error::other(format!(
@@ -757,6 +781,7 @@ mod tests {
             io::ErrorKind::AlreadyExists
         );
         let first = guard.cancellation();
+        let evaluation_epoch = console_control_epoch();
         let mut checker = SigChecker::new_sighupintterm();
         assert!(!first.is_cancelled());
         assert_eq!(unsafe { console_control_handler(0) }, 1);
@@ -768,6 +793,11 @@ mod tests {
         assert!(first.is_cancelled());
         assert!(!guard.cancellation().is_cancelled());
         assert_eq!(signal_check_cancel(), 0);
+        assert_eq!(console_control_epoch().signal_since(evaluation_epoch), Some(RawSignal::CTRL_C),
+            "rearm must not erase a receipt from its owning foreground operation");
+        let fresh_evaluation_epoch = console_control_epoch();
+        assert_eq!(console_control_epoch().signal_since(fresh_evaluation_epoch), None,
+            "a new callback/reader operation must not inherit retired cancellation");
         assert!(!checker.check());
         guard.check_health().unwrap();
         guard.shutdown().unwrap();

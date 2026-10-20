@@ -100,6 +100,8 @@ pub fn env_dispatch_var_change(milieu: VarChangeMilieu, key: &wstr, vars: &EnvSt
                 crate::flog::flog!(warning, error);
             }
         }
+        #[cfg(feature = "localize-messages")]
+        crate::localization::update_from_env(vars);
     } else if key == "fish_history" || key == "fish_private_mode" {
         // This also updates the batch history context; the shared callback guards
         // its interactive reader access when no owner thread is registered.
@@ -149,8 +151,11 @@ pub fn env_dispatch_var_change(milieu: VarChangeMilieu, key: &wstr, vars: &EnvSt
 }
 
 pub fn env_dispatch_init(vars: &EnvStack) -> io::Result<()> {
+    crate::common::init_special_chars_once();
     crate::locale::configure_native_locale(vars)
         .map_err(|errors| io::Error::new(io::ErrorKind::InvalidInput, errors.join("; ")))?;
+    #[cfg(feature = "localize-messages")]
+    crate::localization::update_from_env(vars);
     common::handle_read_limit_change(vars);
     common::handle_fish_trace(vars);
     common::handle_emoji_width(vars);

@@ -1,5 +1,39 @@
 # localization: skip(uses-apropos)
 
+if builtin -q __fish_native_fs
+    function man
+        # Fish's own manuals are native text resources. They do not require an
+        # external Unix viewer, including in an installation without embedding.
+        set -l own_args $argv
+        if test "$own_args[1]" = --
+            set -e own_args[1]
+        end
+        if test (count $own_args) -eq 2; and test "$own_args[1]" = 1
+            set -e own_args[1]
+        end
+        if test (count $own_args) -eq 1; and not string match -q -- '-*' "$own_args[1]"
+            set -l topic (__fish_canonicalize_builtin "$own_args[1]")
+            if not command -sq man
+                __fish_print_help "$topic"
+                return $status
+            end
+            # Do not leak a failed own-manual lookup before delegating a
+            # genuinely external topic to the explicitly installed viewer.
+            if status native-help "$topic" &>/dev/null
+                __fish_print_help "$topic"
+                return $status
+            end
+        end
+        if command -sq man
+            command man $argv
+            return $status
+        end
+        printf '%s\n' 'man: this request requires an installed native manual viewer; fish command manuals accept one topic or section 1 and a topic' >&2
+        return 127
+    end
+    exit 0
+end
+
 if not command -qs man
     # see #5329 and discussion at https://github.com/fish-shell/fish-shell/commit/13e025bdb01cc4dd08463ec497a0a3495873702f
     exit

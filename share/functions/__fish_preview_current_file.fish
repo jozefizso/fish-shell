@@ -1,4 +1,12 @@
 # localization: skip(private)
+if builtin -q __fish_native_fs
+    function __fish_preview_current_file_text --argument-names file
+        # The decoder's own redirection selects stdin without changing the
+        # wrapper's argument/input semantics or consuming its setup input.
+        string sub --start 1 <$file
+    end
+end
+
 function __fish_preview_current_file --description "Open the file at the cursor in a pager"
     __fish_edit_command_if_at_cursor
     set -l edit_status $status
@@ -43,7 +51,7 @@ function __fish_preview_current_file --description "Open the file at the cursor 
     if set -q files[1] && test -f $files[1]
         if $direct
             for file in $files
-                __fish_echo string sub --start 1 <$file
+                __fish_echo __fish_preview_current_file_text $file
                 or return
             end
         else

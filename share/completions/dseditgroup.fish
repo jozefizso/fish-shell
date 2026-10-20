@@ -1,8 +1,10 @@
 function __fish_dseditgroup_groups
+    command -sq dscl; or return 127
     dscl . -list /Groups
 end
 
 function __fish_dseditgroup_users
+    command -sq dscl; or return 127
     dscl . -list /Users
 end
 

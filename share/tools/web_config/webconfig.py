@@ -10,12 +10,15 @@ import os
 import platform
 import re
 import select
+import signal
 import socket
 import socketserver as SocketServer
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+from pathlib import Path
 from html import escape as escape_html
 from itertools import chain
 from typing import Optional
@@ -42,14 +45,16 @@ import webbrowser
 if term is not None:
     os.environ["TERM"] = term
 
-TERMINAL_COLOR_THEME = os.environ["__fish_terminal_color_theme"]
+TERMINAL_COLOR_THEME = os.environ.get("__fish_terminal_color_theme", "unknown")
 
 
 def find_executable(exe, paths=()):
-    final_path = os.environ["PATH"].split(os.pathsep)
+    final_path = os.environ.get("PATH", "").split(os.pathsep)
     if paths:
         final_path.extend(paths)
     for p in final_path:
+        if not p:
+            continue
         proposed_path = os.path.join(p, exe)
         if os.access(proposed_path, os.X_OK):
             return proposed_path
@@ -84,7 +89,7 @@ def is_sailfish_os():
 
 def is_termux():
     """Return whether we are running under the Termux application for Android"""
-    return "com.termux" in os.environ["PATH"] and find_executable("termux-open-url")
+    return "com.termux" in os.environ.get("PATH", "") and find_executable("termux-open-url")
 
 
 def is_chromeos_garcon():
@@ -109,12 +114,17 @@ def run_fish_cmd(text, strict=False, env=None):
         stderr=subprocess.PIPE,
         env=env,
     )
-    out, err = p.communicate(text.encode("utf-8"))
+    try:
+        out, err = p.communicate(text.encode("utf-8"), timeout=30)
+    except BaseException:
+        p.kill()
+        p.communicate()
+        raise
     out = out.decode("utf-8", "replace")
     err = err.decode("utf-8", "replace")
     if strict:
-        assert err == "", err
-        # TODO use check_output()
+        if p.returncode or err:
+            raise RuntimeError(err or "fish exited with status %d" % p.returncode)
         return out
     return out, err
 
@@ -793,11 +803,37 @@ class FishConfigTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
 
     address_family = socket.AF_INET6 if socket.has_ipv6 else socket.AF_INET
 
+    daemon_threads = False
+    block_on_close = True
+
+    def get_request(self):
+        request, address = super().get_request()
+        # A browser may preconnect without ever sending HTTP headers.
+        request.settimeout(2)
+        return request, address
     def verify_request(self, request, client_address):
         return client_address[0] in FishConfigTCPServer.WHITELIST
 
 
 class FishConfigHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
+    # These are the assets shipped with webconfig. Do not initialize the host
+    # MIME database (registry/system-file probes) merely to serve private assets.
+    extensions_map = {
+        ".html": "text/html",
+        ".css": "text/css",
+        ".js": "text/javascript",
+        ".png": "image/png",
+    }
+
+    def guess_type(self, path):
+        return self.extensions_map.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+
+    def translate_path(self, path):
+        translated = super().translate_path(path)
+        # The stdlib appends a literal "/" for directory URLs. Windows extended
+        # paths require native separators even for that final slash.
+        return translated.replace("/", os.sep) if is_windows() else translated
+
     def write_to_wfile(self, txt):
         self.wfile.write(txt.encode("utf-8"))
 
@@ -979,7 +1015,9 @@ class FishConfigHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         return name + " " + color
 
     def do_get_function(self, func_name):
-        out, err = run_fish_cmd("functions " + func_name + " | fish_indent --html")
+        out, err = run_fish_cmd(
+            "functions -- " + escape_fish_cmd(func_name) + " | builtin fish_indent --html"
+        )
         return out
 
     def do_delete_history_item(self, history_item_text):
@@ -1005,18 +1043,18 @@ class FishConfigHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         # Return the prompt output by the given command
         cmd = (
             prompt_function_text
-            + '\n builtin cd "'
-            + initial_wd
-            + '" \n false \n fish_prompt\n'
+            + "\n builtin cd -- "
+            + escape_fish_cmd(initial_wd)
+            + " \n false \n fish_prompt\n"
         )
         prompt_demo_ansi, err = run_fish_cmd(cmd)
         prompt_demo_html = ansi_to_html(prompt_demo_ansi)
         right_demo_ansi, err = run_fish_cmd(
             "functions -e fish_right_prompt; "
             + prompt_function_text
-            + '\n builtin cd "'
-            + initial_wd
-            + '" \n false \n functions -q fish_right_prompt && fish_right_prompt\n'
+            + "\n builtin cd -- "
+            + escape_fish_cmd(initial_wd)
+            + " \n false \n functions -q fish_right_prompt && fish_right_prompt\n"
         )
         right_demo_html = ansi_to_html(right_demo_ansi)
         prompt_demo_font_size = self.font_size_for_ansi_prompt(
@@ -1093,6 +1131,7 @@ class FishConfigHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
 
     def do_get_sample_prompts_list(self):
         paths = list_embedded_files("prompts", ".fish")
+        pool = None
         result = []
         try:
             pool = multiprocessing.pool.ThreadPool(processes=8)
@@ -1112,6 +1151,10 @@ class FishConfigHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
             )
             result.append(self.do_get_current_prompt())
             result.extend([self.read_one_sample_prompt(path) for path in paths])
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
         return result
 
     def secure_startswith(self, haystack, needle):
@@ -1147,7 +1190,7 @@ class FishConfigHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         p = self.path
 
         authpath = "/" + authkey
-        if self.secure_startswith(p, authpath):
+        if self.secure_startswith(p, authpath + "/"):
             p = p[len(authpath) :]
         else:
             return self.send_error(403)
@@ -1180,14 +1223,41 @@ class FishConfigHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
         # Output JSON
         self.write_to_wfile(json.dumps(output))
 
+    def reject_unauthenticated_post(self):
+        # Closing a Windows socket with an unread request body can reset TCP
+        # before the peer receives the 403. Discard only a small, framed body;
+        # never decode it or pass it to a mutation handler.
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if 0 < length <= 64 * 1024 and not self.headers.get("Transfer-Encoding"):
+            timeout = self.connection.gettimeout()
+            deadline = time.monotonic() + (timeout if timeout is not None else 2)
+            try:
+                while length:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.connection.settimeout(remaining)
+                    chunk = self.rfile.read1(min(length, 8192))
+                    if not chunk:
+                        break
+                    length -= len(chunk)
+            except TimeoutError:
+                pass  # An unfinished rejected body does not extend the deadline.
+            finally:
+                self.connection.settimeout(timeout)
+        self.send_error(403)
+
     def do_POST(self):
         p = self.path
 
         authpath = "/" + authkey
-        if self.secure_startswith(p, authpath):
+        if self.secure_startswith(p, authpath + "/"):
             p = p[len(authpath) :]
         else:
-            return self.send_error(403)
+            return self.reject_unauthenticated_post()
         self.path = p
 
         # This is cheesy, we want just the actual content-type.
@@ -1298,233 +1368,198 @@ redirect_template_html = """
 </html>
 """
 
-# find fish
-fish_bin_dir = os.environ.get("fish_bin_dir")
-fish_bin_path = None
-
-# only need the '.exe' extension on Windows
-fish_bin_name = "fish.exe" if is_windows() else "fish"
-
-if not fish_bin_dir:
-    print("The $__fish_bin_dir environment variable is not set. Looking in $PATH...")
-    fish_bin_path = find_executable(fish_bin_name)
-    if not fish_bin_path:
-        print("fish could not be found. Is fish installed correctly?")
-        sys.exit(-1)
-    else:
-        print("fish found at '%s'" % fish_bin_path)
-
-else:
-    fish_bin_path = os.path.join(fish_bin_dir, fish_bin_name)
-
-if not os.access(fish_bin_path, os.X_OK):
-    print(
-        "fish could not be executed at path '%s'. "
-        "Is fish installed correctly?" % fish_bin_path
-    )
-    sys.exit(-1)
-FISH_BIN_PATH = fish_bin_path
-
-# We want to show the demo prompts in the directory from which this was invoked,
-# so get the current working directory
-initial_wd = os.getcwd()
-
-# Make sure that the working directory is the one that contains the script
-# server file, because the document root is the working directory.
-where = os.path.dirname(sys.argv[0])
-os.chdir(where)
-
-# Generate a 16-byte random key as a hexadecimal string
-authkey = binascii.b2a_hex(os.urandom(16)).decode("ascii")
-
-# Try to find a suitable port
-PORT = 8000
-HOST = "::" if socket.has_ipv6 else "localhost"
-while PORT <= 9000:
+def capture_enter(entered, stop):
+    """Record ENTER/EOF without blocking cooperative cancellation."""
     try:
-        Handler = FishConfigHTTPRequestHandler
-        httpd = FishConfigTCPServer((HOST, PORT), Handler)
-        # Success
-        break
-    except (OSError, socket.error) as e:
-        if e.errno == errno.EAFNOSUPPORT and HOST == "::":
-            print("Ipv6 seems to be unavailable, trying ipv4")
-            # We can't do ipv6, let's try v4.
-            HOST = "127.0.0.1"
-            PORT = 8000
-            # Override the class address_family variable (yes, this is a hack)
-            FishConfigTCPServer.address_family = socket.AF_INET
-            continue
-        if e.errno != errno.EADDRINUSE:
-            print(str(e))
-            sys.exit(-1)
-    PORT += 1
+        if is_windows():
+            import ctypes
+            import msvcrt
 
-if PORT > 9000:
-    # Nobody say it
-    print("Unable to find an open port between 8000 and 9000")
-    sys.exit(-1)
-
-# Get any initial tab (functions, colors, etc)
-# Just look at the first letter
-initial_tab = ""
-if len(sys.argv) > 1:
-    for tab in [
-        "functions",
-        "prompt",
-        "colors",
-        "variables",
-        "history",
-        "bindings",
-    ]:
-        if tab.startswith(sys.argv[1]):
-            initial_tab = "#!/" + tab
-            break
-
-url = "http://localhost:%d/%s/%s" % (PORT, authkey, initial_tab)
-
-# Create temporary file to hold redirect to real server. This prevents exposing
-# the URL containing the authentication key on the command line (see
-# CVE-2014-2914 or https://github.com/fish-shell/fish-shell/issues/1438).
-#
-
-# If on Windows, the file needs to be closed after writing, otherwise, the browser won't be able to open it."
-# unfortunately this was added in python 3.12, so we don't add it on other platforms
-# to support older python versions there.
-kwargs = {}
-if is_windows():
-    kwargs["delete_on_close"] = False
-f = tempfile.NamedTemporaryFile(
-    prefix="web_config",
-    suffix=".html",
-    mode="w",
-    delete=True,
-    **kwargs,
-)
-
-f.write(redirect_template_html % (url, url))
-f.flush()
-
-if is_windows():
-    f.close()
-
-# Open temporary file as URL
-# Use open on macOS >= 10.12.5 to work around #4035.
-fileurl = "file://" + f.name
-
-if is_windows():
-    fileurl = fileurl.replace("\\", "/")
-
-print(
-    "Web config started at %s%s%s"
-    % (ENTER_UNDERLINE_MODE, fileurl, EXIT_ATTRIBUTE_MODE)
-)
-print(
-    "If that doesn't work, try opening %s%s%s"
-    % (ENTER_UNDERLINE_MODE, url, EXIT_ATTRIBUTE_MODE)
-)
-print("%sHit ENTER to stop.%s" % (ENTER_BOLD_MODE, EXIT_ATTRIBUTE_MODE))
+            handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.GetFileType.argtypes = [ctypes.c_void_p]
+            kernel.PeekNamedPipe.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p,
+            ]
+            kind = kernel.GetFileType(handle)
+            while not stop.is_set():
+                if kind == 2:  # FILE_TYPE_CHAR: never block in getwch.
+                    if msvcrt.kbhit() and msvcrt.getwch() in ("\r", "\n"):
+                        break
+                elif kind == 3:  # FILE_TYPE_PIPE
+                    available = ctypes.c_uint32()
+                    if not kernel.PeekNamedPipe(handle, None, 0, None, ctypes.byref(available), None):
+                        break  # The pipe writer closed its owned end.
+                    if available.value and os.read(sys.stdin.fileno(), 1) in (b"\r", b"\n", b""):
+                        break
+                elif os.read(sys.stdin.fileno(), 1) in (b"\r", b"\n", b""):
+                    break
+                stop.wait(0.05)
+        else:
+            while not stop.is_set():
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    if os.read(sys.stdin.fileno(), 1) in (b"\r", b"\n", b""):
+                        break
+        if not stop.is_set():
+            entered.set()
+    except (OSError, ValueError):
+        if not stop.is_set():
+            entered.set()
 
 
-def runThing():
+def windows_browser_argv(command, fileurl):
+    """Parse Windows command-line conventions, not POSIX sh or colon lists."""
+    import ctypes
+
+    count = ctypes.c_int()
+    shell = ctypes.WinDLL("shell32", use_last_error=True)
+    shell.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    shell.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    pointer = shell.CommandLineToArgvW(command, ctypes.byref(count))
+    if not pointer:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        argv = [pointer[index] for index in range(count.value)]
+    finally:
+        kernel.LocalFree(ctypes.cast(pointer, ctypes.c_void_p))
+    if not argv or os.path.splitext(argv[0])[1].lower() in (".cmd", ".bat"):
+        raise OSError("BROWSER must name a native executable, not a command-shell script")
+    if any("%s" in argument for argument in argv):
+        return [argument.replace("%s", fileurl) for argument in argv]
+    return argv + [fileurl]
+
+
+def launch_browser(fileurl, url):
     if os.environ.get("BROWSER") == "true":
-        # Don't start a browser in this case (see issue #11926)
-        pass
-    elif is_wsl():
-        cmd_path = find_executable("cmd.exe", COMMON_WSL_CMD_PATHS)
-        if cmd_path:
-            subprocess.call([cmd_path, "/c", "start %s" % url])
-        else:
-            print("Please add the directory containing cmd.exe to your $PATH")
-            sys.exit(-1)
-    elif is_termux():
-        subprocess.call(["termux-open-url", url])
-    elif is_chromeos_garcon():
-        webbrowser.open(url)
-    elif is_sailfish_os():
-        subprocess.call(["xdg-open", url])
-    else:
-        webbrowser.open(fileurl)
+        return True
+    if is_windows():
+        if os.environ.get("BROWSER"):
+            return subprocess.Popen(windows_browser_argv(os.environ["BROWSER"], fileurl))
+        # ShellExecute opens one literal URL and returns without a browser worker.
+        os.startfile(fileurl)
+        return True
+    if is_wsl():
+        cmd = find_executable("cmd.exe", COMMON_WSL_CMD_PATHS)
+        if not cmd:
+            return False
+        return subprocess.call([cmd, "/c", "start", "", fileurl]) == 0
+    if is_termux():
+        return subprocess.call(["termux-open-url", url]) == 0
+    if is_sailfish_os():
+        return subprocess.call(["xdg-open", url]) == 0
+    return webbrowser.open(url if is_chromeos_garcon() else fileurl)
 
 
-# Some browsers still block webbrowser.open if they haven't been opened before,
-# so we just spawn it in a thread.
-thread = threading.Thread(target=runThing)
-thread.start()
-
-# Safari will open sockets and not write to them, causing potential hangs
-# on shutdown.
-httpd.block_on_close = False
-httpd.daemon_threads = True
-
-# Select on stdin and httpd
-stdin_no = sys.stdin.fileno()
-
-
-def create_socket(start_port, end_port):
-    """Attempt to create a socket from a range of ports."""
-    for port in range(start_port, end_port + 1):
-        try:
-            sck = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sck.bind(("localhost", port))
-            sck.listen()
-            return (sck, port)
-        except socket.error:
-            pass
-    print("Unable to find an open port between {} and {}.".format(start_port, end_port))
-    sys.exit(-1)
-
-
-def capture_enter(port):
-    """Read keyboard events and establish a socket connection when pressing the Enter."""
-    import msvcrt
-
-    while True:
-        if msvcrt.kbhit():
-            key = msvcrt.getch().decode()
-            if key == "\r" or key == "\n":
+def main():
+    global FISH_BIN_PATH, initial_wd, authkey
+    if not (3, 8) <= sys.version_info < (4, 0):
+        print("fish_config browse requires Python 3.8 or newer.", file=sys.stderr)
+        return 1
+    fish_name = "fish.exe" if is_windows() else "fish"
+    # fish_config supplies its actual image path, never a different installation
+    # found earlier on PATH. Direct invocation can explicitly select an image.
+    FISH_BIN_PATH = os.environ.get("fish_bin_path")
+    if not FISH_BIN_PATH:
+        bin_dir = os.environ.get("fish_bin_dir")
+        FISH_BIN_PATH = os.path.join(bin_dir, fish_name) if bin_dir else find_executable(fish_name)
+    if not FISH_BIN_PATH or not os.access(FISH_BIN_PATH, os.X_OK):
+        print("fish could not be executed; set fish_bin_path to the matching fish installation.", file=sys.stderr)
+        return 1
+    FISH_BIN_PATH = os.path.abspath(FISH_BIN_PATH)
+    initial_wd = os.getcwd()
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    authkey = binascii.b2a_hex(os.urandom(16)).decode("ascii")
+    # Bind only loopback; verify_request remains a second independent boundary.
+    host = "::1" if socket.has_ipv6 else "127.0.0.1"
+    server = None
+    redirect = None
+    input_thread = None
+    browser = None
+    previous_break = None
+    if is_windows():
+        def interrupted(signum, frame):
+            raise KeyboardInterrupt
+        previous_break = signal.signal(signal.SIGBREAK, interrupted)
+    stop = threading.Event()
+    entered = threading.Event()
+    try:
+        for port in range(8000, 9001):
+            try:
+                server = FishConfigTCPServer((host, port), FishConfigHTTPRequestHandler)
                 break
-    sck = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sck.connect(("localhost", port))
+            except OSError as error:
+                if error.errno in (errno.EAFNOSUPPORT, errno.EADDRNOTAVAIL) and host == "::1":
+                    host = "127.0.0.1"
+                    FishConfigTCPServer.address_family = socket.AF_INET
+                    server = FishConfigTCPServer((host, port), FishConfigHTTPRequestHandler)
+                    break
+                if error.errno != errno.EADDRINUSE:
+                    raise
+        if server is None:
+            raise OSError("Unable to find an open port between 8000 and 9000")
+        initial_tab = ""
+        if len(sys.argv) > 1:
+            for tab in ("functions", "prompt", "colors", "variables", "history", "bindings"):
+                if tab.startswith(sys.argv[1]):
+                    initial_tab = "#!/" + tab
+                    break
+        url_host = "[::1]" if host == "::1" else "127.0.0.1"
+        url = "http://%s:%d/%s/%s" % (url_host, server.server_address[1], authkey, initial_tab)
+        # TemporaryDirectory is private and works on Python 3.8+ on Windows.
+        # Close the redirect before opening it; delete only after service shutdown.
+        redirect = tempfile.TemporaryDirectory(prefix="fish-webconfig-")
+        redirect_path = Path(redirect.name) / "redirect.html"
+        redirect_path.write_text(redirect_template_html % (url, url), encoding="utf-8")
+        fileurl = redirect_path.as_uri()
+        print("Web config started at %s%s%s" % (ENTER_UNDERLINE_MODE, fileurl, EXIT_ATTRIBUTE_MODE))
+        print("If that doesn't work, try opening %s%s%s" % (ENTER_UNDERLINE_MODE, url, EXIT_ATTRIBUTE_MODE))
+        print("%sHit ENTER to stop.%s" % (ENTER_BOLD_MODE, EXIT_ATTRIBUTE_MODE), flush=True)
+        browser = launch_browser(fileurl, url)
+        if not browser:
+            raise OSError("Unable to launch a browser; set BROWSER or open the displayed URL.")
+        input_thread = threading.Thread(target=capture_enter, args=(entered, stop), name="fish-config-input")
+        input_thread.start()
+        while True:
+            # The input event needs no auxiliary TCP connection. In particular,
+            # Windows socketpair() may itself block establishing loopback TCP.
+            ready, _, _ = select.select([server], [], [], 0.1)
+            if isinstance(browser, subprocess.Popen) and browser.poll() not in (None, 0):
+                raise OSError("Browser exited with status %d" % browser.returncode)
+            if entered.is_set():
+                print("Shutting down.")
+                return 0
+            if server in ready:
+                server.handle_request()
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+        return 0
+    except OSError as error:
+        print("fish_config: %s" % error, file=sys.stderr)
+        return 1
+    finally:
+        stop.set()
+        if isinstance(browser, subprocess.Popen):
+            if browser.poll() is None:
+                browser.terminate()
+            try:
+                browser.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                browser.kill()
+                browser.wait()
+        if input_thread is not None:
+            input_thread.join()
+        if server is not None:
+            server.server_close()
+        if redirect is not None:
+            redirect.cleanup()
+        os.chdir(initial_wd)
+        if previous_break is not None:
+            signal.signal(signal.SIGBREAK, previous_break)
 
 
-def get_windows_signal():
-    """Using socket as a replacement for stdin on Windows."""
-    # The intent is to get a free port between 8000 and 9000, like for the HTTP
-    # server. But we already know that port 8000..PORT are not available. So
-    # starting from `PORT+1` is more efficient.
-    # More importantly though, Windows allows multiple sockets to bind to the
-    # same port in some circumstances (see SO_EXCLUSIVEADDRUSE documentation),
-    # and thus allows the signal socket to bind to the same port as HTTP.
-    # A browser may then end up reaching the wrong socket and causing
-    # fish_config to shutdown prematurely.
-    (sig, sig_port) = create_socket(PORT + 1, 9000)
-    threading.Thread(target=capture_enter, args=(sig_port,)).start()
-    return sig
-
-
-try:
-    httpd_fileno = httpd.fileno()
-    sig = get_windows_signal() if is_windows() else sys.stdin
-    sig_fileno = sig.fileno()
-    while True:
-        ready_read = select.select([sig_fileno, httpd_fileno], [], [])
-        if ready_read[0][0] != httpd_fileno:
-            print("Shutting down.")
-
-            # On windows the newline has already been consumed by the capture_enter function.
-            if not is_windows():
-                # Consume the newline so it doesn't get printed by the caller
-                sys.stdin.readline()
-            break
-        else:
-            httpd.handle_request()
-except KeyboardInterrupt:
-    print("\nShutting down.")
-
-# Clean up temporary file
-# If on Windows, the file already closed
-if not is_windows():
-    f.close()
-
-thread.join()
+if __name__ == "__main__":
+    sys.exit(main())

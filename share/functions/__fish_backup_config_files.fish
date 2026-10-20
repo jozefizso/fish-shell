@@ -7,7 +7,7 @@ function __fish_backup_config_files
         end
         if path is $filename
             if builtin -q __fish_native_fs
-                string collect -N <$filename |
+                __fish_native_fs read $filename |
                     __fish_native_fs atomic-write $filename.bak
             else
                 cp $filename{,.bak}

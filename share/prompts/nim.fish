@@ -76,7 +76,11 @@ function fish_prompt
     echo -n ']'
 
     # Date
-    _nim_prompt_wrapper $retc '' (date +%X)
+    if builtin -q __fish_native_services
+        _nim_prompt_wrapper $retc '' (__fish_native_services timestamp now '%H:%M:%S')
+    else
+        _nim_prompt_wrapper $retc '' (date +%X)
+    end
 
     # Vi-mode
 
@@ -115,7 +119,7 @@ function fish_prompt
     # Battery status
     type -q acpi
     and acpi -a 2>/dev/null | string match -rq off
-    and _nim_prompt_wrapper $retc B (acpi -b | cut -d' ' -f 4-)
+    and _nim_prompt_wrapper $retc B (acpi -b | string replace -r '^(?:[^ ]+ +){3}' '')
 
     # New line
     echo

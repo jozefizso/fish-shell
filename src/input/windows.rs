@@ -58,6 +58,32 @@ impl NativeDecoder {
         self.high_surrogate.is_some() || self.byte_position != 0
     }
 
+    /// Reapply only native text already read from the console but not yet
+    /// delivered to the shared decoder. This matters for one record containing
+    /// four ESC repeats: the shared parser consumes three, leaving one pending.
+    pub(crate) fn pending_paste_framing(
+        &self,
+        mut framing: crate::console_windows::PasteFraming,
+    ) -> crate::console_windows::PasteFraming {
+        if self.byte_count == 1 && self.repeats != 0 {
+            framing.observe(ConsoleRecord::Key {
+                down: true, repeat: self.repeats, virtual_key: 0, scan_code: 0,
+                utf16: u16::from(self.bytes[0]), control_state: 0,
+            });
+        }
+        if framing.pasted() {
+            if let Some((event, repeat)) = &self.repeated_key {
+                if let Some(text) = event.native_text.filter(char::is_ascii) {
+                    framing.observe(ConsoleRecord::Key {
+                        down: true, repeat: *repeat, virtual_key: 0, scan_code: 0,
+                        utf16: text as u16, control_state: 0,
+                    });
+                }
+            }
+        }
+        framing
+    }
+
     fn buffered_byte(&mut self) -> Option<u8> {
         if self.repeats == 0 {
             return None;
@@ -246,6 +272,12 @@ impl NativeInput {
         Ok(())
     }
 
+    pub(crate) fn synchronize_paste_framing(&self, paste: Option<&[u8]>) {
+        if let Some(session) = &self.session {
+            session.synchronize_paste_framing(paste);
+        }
+    }
+
     pub(crate) fn resume(&self) -> io::Result<()> {
         self.session
             .as_ref()
@@ -275,6 +307,7 @@ impl NativeInput {
         timeout: Timeout,
         sources: WaitSources<'_>,
     ) -> io::Result<InputEventTrigger> {
+        let _consumer = crate::console_windows::suspend_evaluation_input();
         let session = self.session.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -658,5 +691,102 @@ mod tests {
             !queue.has_lookahead(),
             "paste text must not reach binding dispatch"
         );
+    }
+
+    #[test]
+    fn cancellation_framing_defers_escape_runs_to_actual_shared_decoder() {
+        use crate::console_windows::PasteFraming;
+        use crate::input::{InputEventQueuer as _, MockInputEventQueuer};
+
+        for (bytes, repeat, expected_paste) in [
+            (&b"\x1b[200~"[..], 1, true),
+            (&b"\x1b\x1b[200~"[..], 2, true),
+            (&b"\x1b\x1b\x1b[200~"[..], 3, false),
+            (&b"\x1b\x1b\x1b\x1b[200~"[..], 4, true),
+        ] {
+            let mut native = NativeDecoder::default();
+            let mut framing = PasteFraming::default();
+            let escape = key(true, 0, 0x1b, repeat, 0);
+            native.record(escape).unwrap();
+            framing.observe(escape);
+            let mut translated = text(&mut native);
+            for unit in "[200~".encode_utf16() {
+                let record = key(true, 0, unit, 1, 0);
+                native.record(record).unwrap();
+                framing.observe(record);
+                translated.push_str(&text(&mut native));
+            }
+            assert_eq!(translated.as_bytes(), bytes);
+            let mut actual = MockInputEventQueuer::new();
+            actual.pending_input = bytes;
+            while let Some((&byte, rest)) = actual.pending_input.split_first() {
+                actual.pending_input = rest;
+                actual.service_input_event(InputEventTrigger::Byte(byte));
+            }
+            assert_eq!(actual.paste_is_buffering(), expected_paste);
+            if repeat == 1 {
+                assert!(!framing.requires_consumer());
+                assert_eq!(framing.pasted(), actual.paste_is_buffering());
+            } else {
+                assert!(framing.requires_consumer(), "Escape runs must preserve input and defer");
+                assert!(!framing.pasted(), "the monitor cannot claim a fictitious paste");
+            }
+            let synchronized = native.pending_paste_framing(PasteFraming::from_paste_buffer(
+                actual.get_input_data().paste_buffer.as_deref(),
+            ));
+            assert!(!synchronized.requires_consumer());
+            assert_eq!(synchronized.pasted(), actual.paste_is_buffering());
+        }
+
+        // A single repeat=4 record has one ESC still buffered after the real
+        // parser consumes its three legacy ESC bytes. Synchronization must not
+        // drop that pending prefix or misclassify its later pasted ETX.
+        let mut native = NativeDecoder::default();
+        native.record(key(true, 0, 0x1b, 4, 0)).unwrap();
+        for _ in 0..3 {
+            assert_eq!(native.buffered_byte(), Some(0x1b));
+        }
+        let mut framing = native.pending_paste_framing(PasteFraming::from_paste_buffer(None));
+        assert!(!framing.requires_consumer());
+        for unit in "[200~".encode_utf16() {
+            framing.observe(key(true, 0, unit, 1, 0));
+        }
+        let mut actual = MockInputEventQueuer::new();
+        actual.pending_input = b"[200~";
+        actual.service_input_event(InputEventTrigger::Byte(native.buffered_byte().unwrap()));
+        assert!(actual.paste_is_buffering());
+        assert_eq!(framing.pasted(), actual.paste_is_buffering());
+    }
+
+    #[test]
+    fn physical_paste_text_uses_shared_exact_closing_delimiter() {
+        use crate::console_windows::PasteFraming;
+        use crate::input::{InputEventQueue, InputEventQueuer as _};
+
+        let mut queue = InputEventQueue::new(0, None);
+        queue.get_input_data_mut().paste_buffer = Some(Vec::new());
+        let mut native = NativeDecoder::default();
+        for &byte in b"\x1bOM\x1b[201" {
+            if byte == 0x1b {
+                let event = native.record(key(true, 0x1b, 0x1b, 1, 0)).unwrap().unwrap();
+                queue.service_input_event(InputEventTrigger::Event(event));
+            } else {
+                queue.service_input_event(InputEventTrigger::Byte(byte));
+            }
+        }
+        assert_eq!(
+            queue.get_input_data().paste_buffer.as_deref(),
+            Some(&b"\x1bOM\x1b[201"[..]),
+        );
+        assert!(!queue.has_lookahead(), "pasted SS3 cannot produce an Enter binding");
+        let mut framing = PasteFraming::from_paste_buffer(
+            queue.get_input_data().paste_buffer.as_deref(),
+        );
+        assert!(framing.pasted());
+        framing.observe(key(true, 0, b'~' as u16, 1, 0));
+        queue.service_input_event(InputEventTrigger::Byte(b'~'));
+        assert!(!queue.paste_is_buffering());
+        assert_eq!(framing.pasted(), queue.paste_is_buffering());
+        assert!(!queue.has_lookahead());
     }
 }

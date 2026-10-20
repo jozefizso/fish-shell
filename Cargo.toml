@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/*"]
+exclude = ["vendor/fluent-ftl-tools"]
 
 [workspace.package]
 edition = "2024"
@@ -40,8 +41,8 @@ fish-wgetopt = { path = "crates/wgetopt" }
 fish-widecharwidth = { path = "crates/widecharwidth" }
 fish-widestring = { path = "crates/widestring" }
 fluent = { git = "https://github.com/projectfluent/fluent-rs", rev = "0f87afbbc3fe7d20c61a3fc75cb5d0e123aefdda" }
-# https://codeberg.org/danielrainer/fluent-ftl-tools
-fluent-ftl-tools = { git = "https://github.com/danielrainer/fluent-ftl-tools", rev = "17be1e678558d776f2bde068eacedf5fa79bf6fb" }
+# Library snapshot and upstream revision: vendor/fluent-ftl-tools/Cargo.toml.
+fluent-ftl-tools = { path = "vendor/fluent-ftl-tools" }
 fluent-syntax = { git = "https://github.com/projectfluent/fluent-rs", rev = "0f87afbbc3fe7d20c61a3fc75cb5d0e123aefdda" }
 ignore = "0.4.25"
 itertools = "0.14.0"
@@ -217,6 +218,30 @@ path = "tests/windows_n4.rs"
 name = "windows_n5"
 path = "tests/windows_n5.rs"
 
+[[test]]
+name = "windows_n6"
+path = "tests/windows_n6.rs"
+
+[[test]]
+name = "windows_n7"
+path = "tests/windows_n7.rs"
+
+[[test]]
+name = "windows_n8"
+path = "tests/windows_n8.rs"
+
+[[test]]
+name = "windows_n9"
+path = "tests/windows_n9.rs"
+
+[[test]]
+name = "windows_n10"
+path = "tests/windows_n10.rs"
+
+[[test]]
+name = "windows_n11"
+path = "tests/windows_n11.rs"
+
 [[bin]]
 name = "windows_native_probe"
 path = "tests/windows_native/probe.rs"
@@ -226,6 +251,12 @@ bench = false
 [[bin]]
 name = "windows_n5_gui_probe"
 path = "tests/windows_n5/gui_fixture.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "windows_n9_catalog_probe"
+path = "tests/windows_n9/catalog_probe.rs"
 test = false
 bench = false
 

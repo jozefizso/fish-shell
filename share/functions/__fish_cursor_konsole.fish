@@ -1,5 +1,9 @@
 # localization: skip(private)
 function __fish_cursor_konsole -d 'Set cursor (konsole)'
+    # Match the cursor helper stream policy: redirected data and dumb terminals
+    # must not acquire OSC controls from a legacy binding or prompt.
+    isatty stdout; and test "$TERM" != dumb
+    or return 1
     set -l shape $argv[1]
     switch "$shape"
         case block

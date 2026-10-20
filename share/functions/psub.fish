@@ -21,6 +21,19 @@ function psub --description "Read from stdin into a file and output the filename
         return 1
     end
 
+    if builtin -q __fish_native_adapter
+        if set -q _flag_fifo
+            printf '%s\n' 'psub: FIFO mode is unsupported on native Windows; named pipes are not pathname FIFOs' >&2
+            return 1
+        end
+        set -l lifetime caller
+        if set -q _flag_testing
+            set lifetime testing
+        end
+        __fish_native_adapter psub $lifetime "$_flag_suffix"
+        return $status
+    end
+
     if set -q _flag_fifo
         # Write output to pipe. This needs to be done in the background so
         # that the command substitution exits without needing to wait for

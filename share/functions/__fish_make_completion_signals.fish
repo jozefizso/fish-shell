@@ -4,6 +4,13 @@ function __fish_make_completion_signals --description 'Make list of kill signals
     and return 0
 
     set -g __kill_signals
+    # Native exit statuses are not POSIX signals, and the native kill facade
+    # deliberately rejects Unix signal delivery. Do not probe Unix utilities or
+    # publish signal names that the command cannot deliver.
+    if builtin -q __fish_native_fs
+        return 0
+    end
+
 
     # Cygwin's kill is special, and the documentation lies.
     # Just hardcode the signals.

@@ -36,6 +36,8 @@ function fish_prompt
         end
 
         function _is_hg_repo
+            command -sq hg
+            or return 1
             fish_print_hg_root >/dev/null
         end
 

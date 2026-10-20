@@ -2,7 +2,17 @@
 function setenv
     # No arguments should cause the current env vars to be displayed.
     if not set -q argv[1]
-        env
+        if builtin -q __fish_native_fs
+            for name in (set --names --export)
+                set -l separator ' '
+                if set --query --path $name
+                    set separator ';'
+                end
+                printf '%s=%s\n' $name (string join -- "$separator" $$name)
+            end
+        else
+            env
+        end
         return
     end
 
@@ -38,7 +48,11 @@ function setenv
     # We need to special case some vars to be compatible with fish. In particular how they are
     # treated as arrays split on colon characters. All other var values are treated literally.
     if contains -- $var PATH CDPATH MANPATH
-        set val (string split -- ':' $val)
+        if builtin -q __fish_native_fs
+            set val (string split -- ';' $val)
+        else
+            set val (string split -- ':' $val)
+        end
     end
     true
     set -gx $var $val

@@ -114,9 +114,10 @@ type HistoryRegion = MmapRegion;
 // Owned snapshots do not keep a file mapping alive across native atomic replacements.
 // Item decoding and the byte-offset index are shared with the mapped Unix backend.
 #[cfg(windows)]
-type HistoryRegion = Vec<u8>;
+type HistoryRegion = std::sync::Arc<Vec<u8>>;
 
 /// RawHistoryFile holds the read-only contents of a file, before decoding it.
+#[cfg_attr(windows, derive(Clone))]
 pub struct RawHistoryFile {
     region: HistoryRegion,
 }
@@ -183,7 +184,7 @@ impl RawHistoryFile {
                 "History changed while reading its snapshot",
             ));
         }
-        region.try_into()
+        std::sync::Arc::new(region).try_into()
     }
 
     /// Decode an item at a given offset.
@@ -219,6 +220,7 @@ impl RawHistoryFile {
 }
 
 /// A combination of a history file and its offsets.
+#[cfg_attr(windows, derive(Clone))]
 pub struct HistoryFile {
     // Contents of the file. May be None if there was no file.
     contents: Option<RawHistoryFile>,

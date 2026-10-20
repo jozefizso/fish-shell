@@ -1,6 +1,6 @@
 # On Solaris, `killall` kills all processes. So we don't want to bother providing completion
 # support on that OS.
-set -l OS (uname)
+set -l OS (__fish_uname)
 if test "$OS" = SunOS
     exit 0
 end

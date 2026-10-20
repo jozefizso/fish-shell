@@ -34,6 +34,7 @@ Synopsis
     status terminal
     status test-terminal-feature FEATURE
     status language [list-available|set [LANGUAGE ...]|unset]
+    status native-help TOPIC
 
 Description
 -----------
@@ -168,6 +169,15 @@ The following operations (subcommands) are available:
     **unset**
     undoes the effects of the **set** subcommand.
     Language settings will be taken from environment variables again.
+
+**native-help** *TOPIC[#SECTION]*
+    On native Windows, print the current executable installation's packaged
+    plain-text manual. A topic is a command name or a top-level manual page,
+    such as ``fish`` or ``tutorial``. An optional section heading uses a
+    lower-case, hyphen-separated fragment, for example
+    ``status native-help 'fish#description'``. Missing topics, sections or
+    mismatched external-manual versions return a nonzero status.
+    This command requires no pager, browser or external shell.
 
 Notes
 -----

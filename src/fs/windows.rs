@@ -37,6 +37,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "windows_substitution.rs"]
+mod substitution;
+pub(crate) use substitution::{NativeSubstitutionFile, validate_substitution_suffix};
+
 const SHARE_ALL: u32 = 1 | 2 | 4;
 const READ_ATTRIBUTES: u32 = 0x80;
 const DELETE: u32 = 0x0001_0000;
@@ -812,6 +816,7 @@ fn create_editor_directory(parent: &File, security: &StagingSecurity) -> io::Res
         }
     }
 }
+
 
 /// Allocate a private workspace for the external command-buffer editor.
 /// It remains registered until remove_editor_directory succeeds; no path-only

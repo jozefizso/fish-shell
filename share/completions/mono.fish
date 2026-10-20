@@ -76,7 +76,7 @@ complete -c mono -l full-aot-interp \
 complete -c mono -l gc -a 'boehm\tBoehm sgen\tSGen' -f -d 'Use the Garbage Collector engine'
 complete -c mono -l gc-debug -f -d 'Specify MONO_GC_DEBUG environment variable value'
 complete -c mono -l gc-params -f -d 'Specify MONO_GC_PARAMS environment variable value'
-test "$(uname)" = Darwin && complete -c mono -l arch -a '32\t"32 bit" 64\t"64 bit"' -f \
+test "$(__fish_uname)" = Darwin && complete -c mono -l arch -a '32\t"32 bit" 64\t"64 bit"' -f \
     -d 'Use the bitness of the Mono binary used, if available'
 complete -c mono -l interpreter -d 'Use Mono interpreter to execute a given assembly'
 complete -c mono -l hybrid-aot -d 'Run assemblies that have been stripped of IL'

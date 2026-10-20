@@ -6,6 +6,19 @@ function __fish_parent_directories
         # for use in completions, so don't spew error messages
         return 1
     end
+    if builtin -q __fish_native_fs
+        set -l directory (path normalize -- "$argv[1]")
+        set -q directory[1]; or return 1
+        while true
+            printf '%s\n' "$directory"
+            set -l parent (path dirname -- "$directory")
+            if test "$parent" = "$directory"
+                break
+            end
+            set directory $parent
+        end
+        return 0
+    end
 
     set -l splits (string split '/' $argv[1])
     set -l parents

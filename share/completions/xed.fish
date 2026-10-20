@@ -1,4 +1,4 @@
-switch (uname -s)
+switch (__fish_uname)
     case Darwin
         complete -c xed -s x -d 'Launch Xcode if needed'
         complete -c xed -s c -d 'Create a new document'

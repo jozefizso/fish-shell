@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use fish_build_helper::po_dir;
 use pcre2::bytes::Regex;
 use std::{
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io::{Write as _, stdout},
     path::{Path, PathBuf},
     process::Command,
@@ -57,25 +57,27 @@ fn get_po_paths<P: AsRef<Path>>(specified_paths: &[P]) -> Result<Vec<PathBuf>> {
 }
 
 fn update_po_file<P: AsRef<Path>, Q: AsRef<Path>>(file_to_update: P, template: Q) -> Result<()> {
+    let template = template.as_ref();
+    let template_directory = template.parent().context("Gettext template has no directory")?;
+    let template_name = template.file_name().context("Gettext template has no file name")?;
+    let mut merged = fish_tempfile::new_file().context("Failed to create merged PO file")?;
+    // GNU Windows builds may narrow filename arguments through the active code page.
+    // Rust opens Unicode paths; the tools receive native file handles and only the
+    // template's generated ASCII basename, relative to its possibly Unicode directory.
     Command::new("msgmerge")
-        .args([
-            "--no-wrap",
-            "--update",
-            "--no-fuzzy-matching",
-            "--backup=none",
-            "--quiet",
-        ])
-        .arg(file_to_update.as_ref())
-        .arg(template.as_ref())
+        .args(["--no-wrap", "--no-fuzzy-matching", "--quiet", "-"])
+        .arg(template_name)
+        .current_dir(template_directory)
+        .stdin(File::open(file_to_update.as_ref()).context("Failed to open PO input")?)
+        .stdout(merged.get_mut().try_clone().context("Failed to share merged PO output")?)
         .run()?;
-    let msgattrib_output_file = fish_tempfile::new_file().context("Failed to create temp file")?;
+    let mut filtered = fish_tempfile::new_file().context("Failed to create filtered PO file")?;
     Command::new("msgattrib")
-        .args(["--no-wrap", "--no-obsolete"])
-        .arg("-o")
-        .arg(msgattrib_output_file.path())
-        .arg(file_to_update.as_ref())
+        .args(["--no-wrap", "--no-obsolete", "-"])
+        .stdin(File::open(merged.path()).context("Failed to open merged PO input")?)
+        .stdout(filtered.get_mut().try_clone().context("Failed to share filtered PO output")?)
         .run()?;
-    crate::copy_file(msgattrib_output_file.path(), file_to_update.as_ref())?;
+    crate::copy_file(filtered.path(), file_to_update.as_ref())?;
     Ok(())
 }
 
@@ -249,6 +251,29 @@ msgstr "Content-Type: text/plain; charset=UTF-8\n"
 
 "#;
 
+    /// Remove only the physical header lines, leaving message escapes and body bytes intact.
+    fn strip_minimal_header(mut output: &[u8]) -> Result<&[u8]> {
+        for expected_line in MINIMAL_HEADER.lines() {
+            let physical_line = output
+                .split_inclusive(|&byte| byte == b'\n')
+                .next()
+                .context("Truncated header in msguniq output")?;
+            let line = physical_line
+                .strip_suffix(b"\n")
+                .context("Unterminated header line in msguniq output")?;
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line != expected_line.as_bytes() {
+                bail!(
+                    "Header line in msguniq output does not match expected header.\n\
+                     Expected bytes: {:02x?}\nActual bytes: {line:02x?}",
+                    expected_line.as_bytes()
+                );
+            }
+            output = &output[physical_line.len()..];
+        }
+        Ok(output)
+    }
+
     #[derive(Eq, Ord, PartialEq, PartialOrd, Clone, Copy, Hash)]
     enum LocalizationTier {
         Tier1,
@@ -352,16 +377,9 @@ msgstr "Content-Type: text/plain; charset=UTF-8\n"
                 .run_with_stdio(&concatenated_content)?;
             // The Header entry needs to be removed again,
             // because it is added outside of this function.
-            let expected_prefix = MINIMAL_HEADER.as_bytes();
-            let actual_prefix = &msguniq_output[..expected_prefix.len()];
-            if expected_prefix != actual_prefix {
-                bail!(
-                    "Prefix of msguniq output does not match expected header.\nExpected bytes:\n{expected_prefix:02x?}\nActual bytes:\n{actual_prefix:02x?}"
-                );
-            }
+            let messages = strip_minimal_header(&msguniq_output)?;
             self.mark_section("tier1-from-rust");
-            self.content
-                .extend_from_slice(&msguniq_output[expected_prefix.len()..]);
+            self.content.extend_from_slice(messages);
             self.content.push(b'\n');
             Ok(())
         }
@@ -548,5 +566,25 @@ msgstr "Content-Type: text/plain; charset=UTF-8\n"
             \n\
             "
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::strip_minimal_header;
+
+        #[test]
+        fn malformed_msguniq_headers_return_errors() {
+            for output in [
+                b"".as_slice(),
+                b"msgid \"\"",
+                b"msgid \"\"\r\n",
+                b"msgid \"\"\nmsgstr \"Content-Type: text/plain; charset=UTF-8\\n\"\n",
+                b"msgid \"\"\nmsgstr \"Content-Type: text/plain; charset=UTF-8\\n\"\n\r",
+                b"msgid \"\"\nmsgstr \"Content-Type: text/plain; charset=ISO-8859-1\\n\"\n\n",
+                b"msgid \"\"\nmsgstr \"Content-Type: text/plain; charset=UTF-8\\n\"\nmsgid \"lost\"",
+            ] {
+                assert!(strip_minimal_header(output).is_err(), "{output:?}");
+            }
+        }
     }
 }

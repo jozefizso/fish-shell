@@ -26,6 +26,8 @@ impl<'a> InputEventQueuer for Reader<'a> {
     }
 
     fn prepare_to_select(&mut self) {
+        #[cfg(windows)]
+        let evaluation = crate::console_windows::begin_evaluation_input();
         // Fire any pending events and reap stray processes, including printing exit status messages.
         event::fire_delayed(self.parser);
         if job_reap(self.parser, true, None) {
@@ -33,6 +35,8 @@ impl<'a> InputEventQueuer for Reader<'a> {
             crate::screen::invalidate_native_screen();
             reader_schedule_prompt_repaint();
         }
+        #[cfg(windows)]
+        self.reconcile_evaluation_input(&evaluation);
         #[cfg(windows)]
         if self.parser.libdata().exit_current_script {
             self.input_data.native_exit_status = Some(self.parser.last_status());
@@ -134,10 +138,12 @@ impl<'a> InputEventQueuer for Reader<'a> {
 
     #[cfg(windows)]
     fn native_jobs_notified(&mut self) {
+        let evaluation = crate::console_windows::begin_evaluation_input();
         if job_reap(self.parser, true, None) {
             crate::screen::invalidate_native_screen();
             reader_schedule_prompt_repaint();
         }
+        self.reconcile_evaluation_input(&evaluation);
         if self.parser.libdata().exit_current_script {
             self.input_data.native_exit_status = Some(self.parser.last_status());
             self.exit_loop_requested = true;
@@ -146,6 +152,8 @@ impl<'a> InputEventQueuer for Reader<'a> {
     }
 
     fn uvar_change_notified(&mut self) {
+        #[cfg(windows)]
+        let evaluation = crate::console_windows::begin_evaluation_input();
         #[cfg(unix)]
         self.parser.sync_uvars_and_fire(true /* always */);
         #[cfg(windows)]
@@ -161,7 +169,9 @@ impl<'a> InputEventQueuer for Reader<'a> {
                 }
             }
             Err(error) => self.input_error(error),
-        }
+        };
+        #[cfg(windows)]
+        self.reconcile_evaluation_input(&evaluation);
     }
 
     fn ioport_notified(&mut self) {

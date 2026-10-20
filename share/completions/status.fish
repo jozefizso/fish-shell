@@ -63,7 +63,7 @@ complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_com
 complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_commands" -a stack-trace -d "Print a list of all function calls leading up to running the current command"
 complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_commands" -a features -d "List all feature flags"
 complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_commands" -a test-feature -d "Test if a feature flag is enabled"
-complete -f -c status -n "__fish_seen_subcommand_from test-feature" -a '(status features | sed "s/[[:space:]]\+[^[:space:]]*[[:space:]]\+[^[:space:]]*/\t/")'
+complete -f -c status -n "__fish_seen_subcommand_from test-feature" -a '(status features | string replace -r "^(\S+)\s+\S+\s+\S+\s+" "\$1"\t)'
 complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_commands" -a fish-path -d "Print the path to the current instance of fish"
 complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_commands" -a get-file -d "Print an embedded file from the fish binary"
 complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_commands" -a list-files -d "List embedded files contained in the fish binary"
@@ -75,8 +75,10 @@ complete -f -c status -n "__fish_seen_subcommand_from test-terminal-feature" -a 
 
 # The job-control command changes fish state.
 complete -f -c status -n "not __fish_seen_subcommand_from $__fish_status_all_commands" -a job-control -d "Set which jobs are under job control"
-complete -f -c status -n "__fish_seen_subcommand_from job-control" -a full -d "Set all jobs under job control"
-complete -f -c status -n "__fish_seen_subcommand_from job-control" -a interactive -d "Set only interactive jobs under job control"
+if not builtin -q __fish_native_services
+    complete -f -c status -n "__fish_seen_subcommand_from job-control" -a full -d "Set all jobs under job control"
+    complete -f -c status -n "__fish_seen_subcommand_from job-control" -a interactive -d "Set only interactive jobs under job control"
+end
 complete -f -c status -n "__fish_seen_subcommand_from job-control" -a none -d "Set no jobs under job control"
 
 complete -f -c status -n "__fish_seen_subcommand_from get-file" -a '(status list-files 2>/dev/null)'

@@ -724,7 +724,6 @@ complete somewrapper2 -l long
 complete somewrapper2 -e --wraps wrapped
 complete somewrapper2
 # CHECK: complete somewrapper2 -l long
-# CHECK: complete somewrapper2
 
 # Erasing one out of two wrappers leaves the other.
 complete somewrapper3 --wraps wrapped1
@@ -733,9 +732,6 @@ complete somewrapper3 -l long2
 complete somewrapper3 -e --wraps wrapped2
 complete somewrapper3
 # CHECK: complete somewrapper3 -l long2
-# TODO: here's a stale entry.
-# CHECK: complete somewrapper3
-# CHECK: complete somewrapper3
 # CHECK: complete somewrapper3 --wraps wrapped1
 
 complete command-line-aware-completions -xa "(commandline --cursor; commandline --current-process)"
@@ -780,3 +776,13 @@ end
     # CHECK: basename{{\t.*}}
     set fish_complete_path $tmp
 }
+
+# Wildcard rules apply to command names and resolved executable paths.
+function n7_wildcard_target
+end
+complete -c 'n7_wildcard_*' -f -a wildcard-name
+complete -C 'n7_wildcard_target wildcard-n'
+# CHECK: wildcard-name
+complete -p '*fish' -f -a wildcard-path
+complete -C "$(string escape -- $fish) wildcard-p"
+# CHECK: wildcard-path

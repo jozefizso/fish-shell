@@ -1,5 +1,6 @@
 # localization: skip(private)
 function __fish_systemctl --description 'Call systemctl with some options from the current commandline'
+    command -sq systemctl; or return 127
     # We don't want to complete with ANSI color codes
     set -lu SYSTEMD_COLORS
 

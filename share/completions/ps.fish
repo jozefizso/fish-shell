@@ -2,9 +2,9 @@
 
 set -l gnu_linux 0
 set -l darwin 0
-if ps -V <&- >/dev/null 2>/dev/null
+if command -sq ps; and ps -V <&- >/dev/null 2>/dev/null
     set gnu_linux 1
-else if test (uname) = Darwin && test (command -v ps) = /bin/ps
+else if test (__fish_uname) = Darwin && test (command -v ps) = /bin/ps
     set darwin 1
 end
 

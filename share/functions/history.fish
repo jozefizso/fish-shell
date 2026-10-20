@@ -73,10 +73,11 @@ function history --description "display or manipulate interactive command histor
 
     switch $hist_cmd
         case search # search the interactive command history
+            set -l pager
             if isatty stdout
-                set -l pager (__fish_anypager)
-                and isatty stdout
-                or set pager cat
+                set pager (__fish_anypager)
+            end
+            if isatty stdout; and set -q pager[1]
 
                 # If the user hasn't preconfigured less with the $LESS environment variable,
                 # we do so to have it behave like cat if output fits on one screen.
@@ -107,7 +108,17 @@ function history --description "display or manipulate interactive command histor
             end
 
             if test "$search_mode" = --exact
-                builtin history delete $color_opt $search_mode $_flag_case_sensitive -- $searchterm
+                # Match according to the public case-sensitivity setting, then
+                # delete each exact stored spelling as required by the builtin.
+                set -l matches (
+                    builtin history search --exact $_flag_case_sensitive --null -- $searchterm | string split0
+                    test $pipestatus[1] -eq 0
+                )
+                or return $status
+                for item in $matches
+                    builtin history delete $color_opt --exact --case-sensitive -- $item
+                    or return $status
+                end
                 builtin history save
                 return
             end

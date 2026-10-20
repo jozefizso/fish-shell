@@ -74,9 +74,22 @@ function __fish_git_unique_remote_branches
     # if they are unambiguous.
     # E.g. if only alice has a "frobulate" branch
     # `git checkout frobulate` is equivalent to `git checkout -b frobulate --track alice/frobulate`.
-    __fish_git for-each-ref --format="%(refname:strip=3)" \
-        --sort="refname:strip=3" \
-        refs/remotes/ 2>/dev/null | uniq -u
+    set -l previous ''
+    set -l unique 0
+    for branch in (__fish_git for-each-ref --format="%(refname:strip=3)" --sort="refname:strip=3" refs/remotes/ 2>/dev/null)
+        if test "$branch" = "$previous"
+            set unique 0
+        else
+            if test $unique = 1
+                printf '%s\n' $previous
+            end
+            set previous $branch
+            set unique 1
+        end
+    end
+    if test $unique = 1
+        printf '%s\n' $previous
+    end
 end
 
 function __fish_git_tags
@@ -545,7 +558,9 @@ function __fish_git_rev_files
 
     # List files in $rev's index, skipping the "tree ..." header, but appending
     # the parent path, which git does not include in the output (and fish requires)
-    string join \n -- $path(__fish_git show $rev:$path | sed '1,2d')
+    set -l files (string split \n -- (__fish_git -c core.quotePath=false show $rev:$path | string collect))
+    set -e files[1..2]
+    string join \n -- $path$files
 end
 
 # Provides __fish_git_rev_files completions for the current token

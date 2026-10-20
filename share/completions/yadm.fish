@@ -12,10 +12,15 @@ end
 # Config values accepted by `yadm config`
 # See `yadm gitconfig` for setting git config values
 function __fish_yadm_config_keys
+    command -sq yadm
+    or return 127
     yadm introspect configs
 end
 
-set -l __fish_yadm_subcommands (yadm introspect commands)
+set -l __fish_yadm_subcommands
+if command -sq yadm
+    set __fish_yadm_subcommands (command yadm introspect commands)
+end
 
 # Borrowed from git completion file
 function __fish_yadm_needs_command
@@ -50,6 +55,10 @@ end
 # Manual wrapping (instead of `complete -w`) is necessary here because we
 # don't want to inherit all completions from git
 function __fish_complete_yadm_like_git
+    command -sq yadm
+    or return 127
+    command -sq git
+    or return 127
     # Remove the first word from the commandline because that is "yadm"
     set -l cmdline (commandline -xpc | string escape; commandline -ct)[2..-1]
 

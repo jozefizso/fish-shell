@@ -5,8 +5,8 @@
 //! A rooted name uses the cwd's drive or UNC share root. Ordinary names reject DOS devices, ADS,
 //! and trailing-dot/space aliases; explicit extended drive/UNC/volume names retain literal names,
 //! require backslashes, and reject dot components. Other device namespaces are not filesystem paths.
-//! PATH is searched in list order, ignoring empty entries; only .exe providers are enabled. There
-//! is no discovery cache: environment edits, cwd changes, and replacement take effect immediately.
+//! PATH is searched in list order, ignoring empty entries; PATHEXT orders deliberate providers.
+//! No discovery cache: environment edits, cwd changes, and replacement take effect immediately.
 use crate::env::Environment;
 use crate::prelude::*;
 use fish_widestring::{native_to_shell_text_owned, osstr2wcstring, shell_text_to_osstring};
@@ -19,6 +19,10 @@ use std::{
 #[path = "windows_config.rs"]
 mod windows_config;
 pub use windows_config::*;
+
+#[path = "windows_providers.rs"]
+mod windows_providers;
+pub use windows_providers::*;
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -440,35 +444,6 @@ impl NativeCwd {
     }
 }
 
-/// Validate an explicit, already resolved native provider; no associations or script dispatch.
-pub fn native_resolve_executable(command: &wstr) -> io::Result<PathBuf> {
-    let path = native_absolute_path(command)?;
-    if !path
-        .extension()
-        .is_some_and(|ext| ext.as_encoded_bytes().eq_ignore_ascii_case(b"exe"))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "only native .exe providers are enabled",
-        ));
-    }
-    let canonical = crate::wutil::native_realpath(command)?;
-    let path = native_absolute_path(&canonical)?;
-    if !path
-        .extension()
-        .is_some_and(|ext| ext.as_encoded_bytes().eq_ignore_ascii_case(b"exe"))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "canonical executable target must retain its .exe provider",
-        ));
-    }
-    let file = crate::wutil::native_open(&path, 0x20, true)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::from_raw_os_error(5));
-    }
-    Ok(path)
-}
 
 pub struct GetPathResult {
     pub path: WString,
@@ -476,34 +451,57 @@ pub struct GetPathResult {
 }
 
 fn provider_candidates(command: &wstr, vars: &dyn Environment) -> io::Result<Vec<WString>> {
-    // Validate bytes/NUL before doing any filesystem work, including bare command lookup.
     let command_os = shell_text_to_osstring(command)?;
     if command.is_empty() {
         return Err(io::Error::from_raw_os_error(2));
     }
     let extension = Path::new(&command_os).extension();
-    if extension.is_some_and(|s| !s.as_encoded_bytes().eq_ignore_ascii_case(b"exe")) {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "only native .exe providers are enabled",
-        ));
+    if extension.is_some() {
+        native_provider_for_path(Path::new(&command_os))?;
     }
-    let mut candidates = Vec::new();
-    if native_is_explicit_path(command) {
-        candidates.push(command.to_owned());
-    } else if let Some(paths) = vars.get(L!("PATH")) {
-        for entry in paths.as_list() {
-            if entry.is_empty() {
-                continue;
-            }
-            let mut candidate = entry.clone();
-            append_path_component(&mut candidate, command);
-            candidates.push(candidate);
-        }
-    }
+    let mut suffixes = Vec::new();
     if extension.is_none() {
-        for candidate in &mut candidates {
-            candidate.push_utfstr(L!(".exe"));
+        let configured = vars.get(L!("PATHEXT"));
+        let default = vec![WString::from(".exe;.cmd;.bat;.ps1;.fish")];
+        let entries = configured.as_ref().map_or(default.as_slice(), |value| value.as_list());
+        for entry in entries {
+            for suffix in entry.split(';') {
+                let suffix = suffix.to_owned();
+                let mut sample = WString::from("command");
+                sample.push_utfstr(&suffix);
+                if !suffix.starts_with('.')
+                    || suffix.contains('/')
+                    || suffix.contains('\\')
+                    || native_provider_for_path(Path::new(&shell_text_to_osstring(&sample)?)).is_err()
+                    || suffixes.iter().any(|previous: &WString|
+                        fish_wcstringutil::string_suffixes_string_case_insensitive(previous, &suffix)
+                            && previous.len() == suffix.len())
+                {
+                    continue;
+                }
+                suffixes.push(suffix);
+            }
+        }
+    } else {
+        suffixes.push(WString::new());
+    }
+    let bases = if native_is_explicit_path(command) {
+        vec![command.to_owned()]
+    } else {
+        vars.get(L!("PATH")).map_or_else(Vec::new, |paths| {
+            paths.as_list().iter().filter(|entry| !entry.is_empty()).map(|entry| {
+                let mut candidate = entry.clone();
+                append_path_component(&mut candidate, command);
+                candidate
+            }).collect()
+        })
+    };
+    let mut candidates = Vec::new();
+    for base in bases {
+        for suffix in &suffixes {
+            let mut candidate = base.clone();
+            candidate.push_utfstr(suffix);
+            candidates.push(candidate);
         }
     }
     Ok(candidates)
@@ -513,7 +511,11 @@ fn resolve_candidate(candidate: &wstr, vars: &dyn Environment) -> io::Result<WSt
     // Resolve in search order, not eagerly: a later malformed/inaccessible PATH entry cannot
     // hide an earlier valid executable or force an unnecessary cwd query.
     let absolute = native_path_text(&native_resolve_path_for_environment(candidate, vars)?)?;
-    native_path_text(&native_resolve_executable(&absolute)?)
+    // Discovery returns the callable spelling, not the classifier's physical
+    // target. Multicall aliases such as cargo.exe must retain their own name;
+    // canonical format/access checks and launch provider leases remain unchanged.
+    native_classify_command(&absolute)?;
+    Ok(absolute)
 }
 
 pub fn path_try_get_path(command: &wstr, vars: &dyn Environment) -> GetPathResult {

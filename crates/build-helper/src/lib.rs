@@ -26,7 +26,16 @@ pub fn workspace_root() -> &'static Path {
 
 fn cargo_target_dir() -> Cow<'static, Path> {
     option_env!("CARGO_TARGET_DIR")
-        .map(|d| Cow::Borrowed(Path::new(d)))
+        .map(|d| {
+            let path = Path::new(d);
+            if path.is_absolute() {
+                Cow::Borrowed(path)
+            } else {
+                // Build scripts have different package working directories.
+                // Shared generated outputs must use one workspace-relative root.
+                Cow::Owned(workspace_root().join(path))
+            }
+        })
         .unwrap_or(Cow::Owned(workspace_root().join("target")))
 }
 
